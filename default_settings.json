@@ -1,0 +1,13 @@
+{
+  "ai_provider": "claude",
+  "ai_model": "",
+  "custom_prompt": "",
+  "num_clips": 5,
+  "min_duration": 30,
+  "max_duration": 90,
+  "whisper_model": "large-v3",
+  "language": "ja",
+  "font_name": "Noto Sans JP",
+  "font_size": 96,
+  "font_color": "#FFFFFF"
+}

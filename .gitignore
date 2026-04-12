@@ -1,0 +1,35 @@
+# Secrets
+.gemini_key
+credentials.json
+token.json
+token.pickle
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Output artifacts
+output_*/
+*.zip
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+clip-extractor-logs/
+
+# OMC / Claude state
+.omc/
+.claude/
+memory/

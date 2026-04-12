@@ -1,0 +1,9 @@
+{
+  "font_name": "Noto Sans JP",
+  "font_size": 48,
+  "font_color": "#FFFFFF",
+  "outline_color": "#000000",
+  "outline_width": 3,
+  "position": "bottom",
+  "margin_bottom": 60
+}
