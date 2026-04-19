@@ -22,6 +22,17 @@ def download_video(url: str, output_dir: Path) -> Path:
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "merge_output_format": "mp4",
         "outtmpl": output_template,
+        "retries": 10,
+        "fragment_retries": 10,
+        "file_access_retries": 5,
+        "retry_sleep_functions": {
+            "http": lambda n: min(2 ** n, 30),
+            "fragment": lambda n: min(2 ** n, 30),
+        },
+        "continuedl": True,
+        "socket_timeout": 30,
+        "http_chunk_size": 10485760,
+        "concurrent_fragment_downloads": 1,
     }
 
     print(f"Downloading: {url}")

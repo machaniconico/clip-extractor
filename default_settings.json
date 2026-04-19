@@ -1,6 +1,6 @@
 {
-  "ai_provider": "claude",
-  "ai_model": "",
+  "ai_provider": "gemini",
+  "ai_model": "gemini-3-flash-preview",
   "custom_prompt": "",
   "num_clips": 5,
   "min_duration": 30,
