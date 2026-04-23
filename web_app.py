@@ -29,7 +29,7 @@ logger.addHandler(_sh)
 logger.info(f"Log file: {LOG_FILE}")
 
 from config import FontConfig
-from downloader import is_youtube_url, download_video
+from downloader import download_video
 from transcriber import segments_to_text
 from transcript_cache import transcribe_with_cache
 from highlighter import detect_highlights
