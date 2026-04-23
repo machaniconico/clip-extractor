@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """clip-extractor Web UI using Gradio."""
 
+import json
 import logging
 import os
 import shutil
@@ -27,6 +28,26 @@ logger.addHandler(_fh)
 logger.addHandler(_sh)
 logger.info(f"Log file: {LOG_FILE}")
 
+from config import FontConfig
+from downloader import is_youtube_url, download_video
+from transcriber import segments_to_text
+from transcript_cache import transcribe_with_cache
+from highlighter import detect_highlights
+from clipper import extract_clips, get_video_info
+from subtitles import generate_all_srts
+from premiere_xml import generate_combined_xml, generate_individual_xmls
+from drive_upload import upload_output_directory, is_configured as drive_is_configured
+from chapter_generator import (
+    generate_chapters,
+    search_moments,
+    format_chapters_for_youtube,
+    format_moments_for_display,
+)
+import youtube_api
+
+SETTINGS_FILE = Path(__file__).parent / "default_settings.json"
+GEMINI_KEY_FILE = Path(__file__).parent / ".gemini_key"
+
 
 def get_system_fonts():
     """Get list of installed font family names from the system."""
@@ -47,13 +68,6 @@ def get_system_fonts():
         "BIZ UDPGothic", "BIZ UDPMincho", "M PLUS Rounded 1c",
         "Meiryo", "Noto Sans JP", "Noto Serif JP", "Yu Gothic UI",
     ]
-
-import json
-
-from config import FontConfig
-
-SETTINGS_FILE = Path(__file__).parent / "default_settings.json"
-GEMINI_KEY_FILE = Path(__file__).parent / ".gemini_key"
 
 
 def load_defaults() -> dict:
@@ -88,13 +102,29 @@ def save_defaults(ai_provider, ai_model, custom_prompt, num_clips,
     }
     SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return "Settings saved as default!"
-from downloader import is_youtube_url, download_video
-from transcriber import transcribe, segments_to_text
-from highlighter import detect_highlights
-from clipper import extract_clips, get_video_info
-from subtitles import generate_all_srts
-from premiere_xml import generate_combined_xml, generate_individual_xmls
-from drive_upload import upload_output_directory, is_configured as drive_is_configured
+
+
+def _resolve_video(input_url, input_file, output_dir, log):
+    """Return a Path to the video file, downloading from URL when needed."""
+    if input_file is not None:
+        original_path = Path(input_file)
+        log(f"Local file: {original_path.name}")
+        try:
+            str(original_path).encode("ascii")
+            return original_path
+        except UnicodeEncodeError:
+            safe_dir = Path(original_path.parent / "_safe")
+            safe_dir.mkdir(parents=True, exist_ok=True)
+            safe_name = f"input{original_path.suffix}"
+            video_path = safe_dir / safe_name
+            shutil.copy2(original_path, video_path)
+            log(f"Copied to safe path: {video_path}")
+            return video_path
+    if input_url and input_url.strip():
+        video_path = download_video(input_url.strip(), output_dir / "source")
+        log(f"Downloaded: {video_path.name}")
+        return video_path
+    return None
 
 
 def process_video(
@@ -118,7 +148,7 @@ def process_video(
     upload_to_drive: bool,
     progress=gr.Progress(),
 ):
-    """Main processing pipeline for the web UI."""
+    """Main processing pipeline for the clip-extraction tab."""
     logs = []
 
     def log(msg: str):
@@ -126,53 +156,30 @@ def process_video(
         logs.append(msg)
 
     try:
-        # Determine input source
-        if input_file is not None:
-            original_path = Path(input_file)
-            log(f"Local file: {original_path.name}")
-            # Gradio temp paths may contain Japanese characters that break ffprobe on Windows.
-            try:
-                str(original_path).encode("ascii")
-                video_path = original_path
-            except UnicodeEncodeError:
-                safe_dir = Path(original_path.parent / "_safe")
-                safe_dir.mkdir(parents=True, exist_ok=True)
-                safe_name = f"input{original_path.suffix}"
-                video_path = safe_dir / safe_name
-                shutil.copy2(original_path, video_path)
-                log(f"Copied to safe path: {video_path}")
-        elif input_url and input_url.strip():
-            progress(0.05, desc="Downloading video...")
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_dir = Path(f"./output_{timestamp}")
-            output_dir.mkdir(parents=True, exist_ok=True)
-            video_path = download_video(input_url.strip(), output_dir / "source")
-            log(f"Downloaded: {video_path.name}")
-        else:
-            return "Error: URLを入力するかファイルをアップロードしてください", "", None, ""
-
-        # Setup output directory
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = Path(f"./output_{timestamp}")
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 1: Video info
+        progress(0.05, desc="Resolving input...")
+        video_path = _resolve_video(input_url, input_file, output_dir, log)
+        if video_path is None:
+            return "Error: URLを入力するかファイルをアップロードしてください", "", None, ""
+
         progress(0.1, desc="[Step 1/6] Analyzing video...")
         log(f"[Step 1/6] Analyzing video: {video_path}")
         video_info = get_video_info(video_path)
         log(f"  Resolution: {video_info['width']}x{video_info['height']}, FPS: {video_info['fps']:.2f}, Duration: {video_info['duration']:.0f}s")
 
-        # Step 2: Transcription
         progress(0.15, desc="[Step 2/6] Transcribing audio...")
         log("[Step 2/6] Transcribing... (this may take a while)")
-        segments = transcribe(video_path, whisper_model, language)
+        segments = transcribe_with_cache(
+            video_path, whisper_model, language, input_url or "",
+        )
         transcript_text = segments_to_text(segments)
-
         transcript_path = output_dir / "transcript.txt"
         transcript_path.write_text(transcript_text, encoding="utf-8")
         log(f"  Transcription complete: {len(segments)} segments")
 
-        # Step 3: Highlight detection
         progress(0.5, desc="[Step 3/6] Detecting highlights...")
         provider_name = {"claude": "Claude", "openai": "ChatGPT", "gemini": "Gemini"}.get(ai_provider, ai_provider)
         log(f"[Step 3/6] Analyzing with {provider_name}...")
@@ -201,7 +208,6 @@ def process_video(
 
         log(f"  Found {len(highlights)} highlights")
 
-        # Step 4: Extract clips
         progress(0.6, desc="[Step 4/6] Extracting clips...")
         log("[Step 4/6] Extracting clips...")
         clips_dir = output_dir / "clips"
@@ -215,7 +221,6 @@ def process_video(
             shorts_paths = extract_clips(video_path, highlights, shorts_dir, shorts=True)
             log(f"  Generated {len(shorts_paths)} shorts")
 
-        # Step 5: Subtitles
         progress(0.8, desc="[Step 5/6] Generating subtitles...")
         log("[Step 5/6] Generating subtitles...")
         srt_paths = generate_all_srts(segments, highlights, clips_dir)
@@ -224,7 +229,6 @@ def process_video(
             shorts_srt_paths = generate_all_srts(segments, highlights, output_dir / "shorts")
         log(f"  Generated {len(srt_paths)} SRT files")
 
-        # Step 6: Premiere Pro XML
         progress(0.85, desc="[Step 6/6] Exporting XML...")
         log("[Step 6/6] Exporting Premiere Pro XML...")
         if output_mode == "combined":
@@ -253,7 +257,6 @@ def process_video(
                 )
             log("  Premiere Pro XML (individual mode) exported")
 
-        # Google Drive upload
         drive_link = ""
         if upload_to_drive:
             progress(0.9, desc="Uploading to Google Drive...")
@@ -265,7 +268,6 @@ def process_video(
             else:
                 log("Google Drive: credentials.json が未設定のためスキップ")
 
-        # Create zip for download (optional)
         zip_path = None
         if generate_zip:
             progress(0.95, desc="Creating download archive...")
@@ -273,7 +275,6 @@ def process_video(
             log(f"  ZIP created: {zip_path}")
 
         log(f"\nDone! Output: {output_dir}")
-
         return "\n".join(logs), highlights_summary, zip_path, drive_link
 
     except subprocess.CalledProcessError as e:
@@ -293,14 +294,171 @@ def process_video(
         return "\n".join(logs), "", None, ""
 
 
+# ---------------------------------------------------------------------------
+# Timestamp generation tab
+# ---------------------------------------------------------------------------
+
+
+def process_timestamps(
+    input_url: str,
+    input_file,
+    mode: str,
+    prompt_text: str,
+    ai_provider: str,
+    ai_model: str,
+    api_key: str,
+    whisper_model: str,
+    language: str,
+    progress=gr.Progress(),
+) -> tuple[str, str]:
+    """Generate chapters or search moments. Returns (output_text, log_text)."""
+    logs: list[str] = []
+
+    def log(msg: str):
+        logger.info(msg)
+        logs.append(msg)
+
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        work_dir = Path(f"./output_ts_{timestamp}")
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        progress(0.05, desc="Resolving input...")
+        video_path = _resolve_video(input_url, input_file, work_dir, log)
+        if video_path is None:
+            return "Error: URLを入力するかファイルをアップロードしてください", "\n".join(logs)
+
+        progress(0.1, desc="Analyzing video...")
+        video_info = get_video_info(video_path)
+        duration = float(video_info.get("duration", 0.0))
+        log(f"  Duration: {duration:.0f}s")
+
+        progress(0.15, desc="Transcribing (cache-aware)...")
+        segments = transcribe_with_cache(
+            video_path, whisper_model, language, input_url or "",
+        )
+        transcript_text = segments_to_text(segments)
+        log(f"  Transcript: {len(segments)} segments")
+
+        progress(0.7, desc="Analyzing with AI...")
+
+        if mode == "prompt_search":
+            if not prompt_text or not prompt_text.strip():
+                return "Error: プロンプト検索モードではプロンプトを入力してください", "\n".join(logs)
+            moments = search_moments(
+                transcript_text,
+                prompt=prompt_text,
+                ai_provider=ai_provider,
+                api_key=api_key,
+                ai_model=ai_model,
+            )
+            log(f"  Moments: {len(moments)} hits")
+            output = format_moments_for_display(moments)
+        else:
+            chapters = generate_chapters(
+                transcript_text,
+                video_duration=duration,
+                ai_provider=ai_provider,
+                api_key=api_key,
+                ai_model=ai_model,
+                custom_instructions=prompt_text or "",
+            )
+            log(f"  Chapters: {len(chapters)}")
+            output = format_chapters_for_youtube(chapters)
+
+        progress(1.0, desc="Done")
+        log("\nDone.")
+        return output, "\n".join(logs)
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Timestamp generation error: {e}\n{tb}")
+        log(f"\nError: {e}")
+        return f"(生成に失敗しました)\n\n{e}", "\n".join(logs)
+
+
+def push_description_to_youtube(url: str, description_text: str) -> str:
+    """Upload description text to the YouTube video identified by URL."""
+    if not url or not url.strip():
+        return "❌ YouTube URLを入力してください"
+    if not description_text or not description_text.strip():
+        return "❌ 概要欄の本文が空です"
+    video_id = youtube_api.extract_video_id(url)
+    if not video_id:
+        return "❌ YouTubeの動画URLを認識できませんでした"
+    if not youtube_api.is_authenticated():
+        return "❌ YouTube API 未認証です。設定タブで認証してください"
+    result = youtube_api.update_description(video_id, description_text)
+    if result.get("ok"):
+        return f"✅ 概要欄を更新しました (video_id: {video_id})"
+    return f"❌ 更新に失敗: {result.get('error')}"
+
+
+def send_timestamps_to_clip_tab(output_text: str) -> str:
+    """Return a custom_prompt payload that guides the clip AI using timestamps."""
+    if not output_text or not output_text.strip():
+        return ""
+    header = "以下のタイムスタンプ付近のシーンを優先的に切り抜いてください。各行が候補区間です。\n"
+    return header + output_text.strip()
+
+
+# ---------------------------------------------------------------------------
+# YouTube auth handlers
+# ---------------------------------------------------------------------------
+
+
+def _escape_markdown(text: str) -> str:
+    """Escape characters that Markdown renders as formatting."""
+    return (
+        text.replace("\\", "\\\\")
+        .replace("*", "\\*")
+        .replace("_", "\\_")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace("`", "\\`")
+    )
+
+
+def _youtube_status_markdown() -> str:
+    if not youtube_api.is_configured():
+        return "🔒 **client_secret.json が未アップロード**"
+    if not youtube_api.is_authenticated():
+        return "🔑 client_secret.json ✓ / **未認証**"
+    channel = youtube_api.get_authenticated_user_info() or "(name unknown)"
+    return f"✅ 認証済み: **{_escape_markdown(channel)}**"
+
+
+def upload_client_secret(uploaded_file) -> str:
+    if uploaded_file is None:
+        return _youtube_status_markdown()
+    try:
+        youtube_api.save_client_secret(uploaded_file)
+    except Exception as e:
+        logger.error(f"Failed to save client_secret.json: {e}")
+        return f"❌ 保存に失敗: {e}"
+    return _youtube_status_markdown()
+
+
+def run_youtube_auth() -> str:
+    result = youtube_api.authenticate()
+    if not result.get("ok"):
+        return f"❌ {result.get('error')}"
+    channel = result.get("channel") or "(unknown)"
+    return f"✅ 認証成功: **{_escape_markdown(channel)}**"
+
+
+# ---------------------------------------------------------------------------
+# UI
+# ---------------------------------------------------------------------------
+
+
 def create_ui():
-    """Create the Gradio web interface."""
+    """Create the Gradio web interface with a 3-tab layout."""
     defaults = load_defaults()
 
     with gr.Blocks(
         title="Clip Extractor - 配信切り抜き自動生成",
         analytics_enabled=False,
-        theme=gr.themes.Soft(),
         css="""
         .main-title { text-align: center; margin-bottom: 0.5em; }
         .subtitle { text-align: center; color: #666; margin-bottom: 1.5em; }
@@ -309,11 +467,11 @@ def create_ui():
         """,
     ) as app:
         gr.HTML("<h1 class='main-title'>Clip Extractor</h1>")
-        gr.HTML("<p class='subtitle'>YouTube配信アーカイブから切り抜きショート動画を自動生成</p>")
+        gr.HTML("<p class='subtitle'>YouTube配信アーカイブから切り抜き & タイムスタンプを自動生成</p>")
 
-        with gr.Tabs():
-            # --- Input Tab ---
-            with gr.Tab("Input / 入力"):
+        with gr.Tabs() as tabs:
+            # ===== Tab 1: Clip Extraction =====
+            with gr.Tab("✂️ 切り抜き生成", id="clip_tab") as clip_tab:
                 with gr.Row():
                     with gr.Column(scale=2):
                         input_url = gr.Textbox(
@@ -354,8 +512,103 @@ def create_ui():
                             info="要: credentials.json の設定",
                         )
 
-            # --- Settings Tab ---
-            with gr.Tab("Settings / 設定"):
+                custom_prompt = gr.Textbox(
+                    label="カスタムプロンプト / タイムスタンプヒント",
+                    placeholder="例: 面白いシーンだけ選んで / タイムスタンプ生成タブから送信するとここに入ります",
+                    lines=4,
+                )
+
+                generate_btn = gr.Button(
+                    "Generate Clips / 切り抜き生成開始",
+                    variant="primary",
+                    size="lg",
+                )
+
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        log_output = gr.Textbox(
+                            label="Processing Log",
+                            lines=15,
+                            interactive=False,
+                        )
+                    with gr.Column(scale=1):
+                        highlights_output = gr.Markdown(
+                            label="Detected Highlights",
+                        )
+
+                with gr.Row():
+                    download_output = gr.File(label="Download (ZIP)")
+                    drive_link_output = gr.Textbox(
+                        label="Google Drive Link",
+                        interactive=False,
+                    )
+
+            # ===== Tab 2: Timestamp Generator =====
+            with gr.Tab("🕐 タイムスタンプ生成", id="timestamp_tab"):
+                gr.Markdown(
+                    "**配信アーカイブの章分け / シーン検索**\n\n"
+                    "同じ動画を繰り返し検索しても文字起こしはキャッシュされるため、"
+                    "2回目以降は速くタダで回せます（Gemini無料枠の範囲で）。"
+                )
+
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        ts_input_url = gr.Textbox(
+                            label="YouTube URL",
+                            placeholder="https://youtube.com/watch?v=...",
+                        )
+                        ts_input_file = gr.File(
+                            label="または ローカルファイル",
+                            file_types=["video"],
+                            type="filepath",
+                        )
+
+                    with gr.Column(scale=1):
+                        ts_mode = gr.Radio(
+                            choices=[
+                                ("全体チャプター生成", "full_chapters"),
+                                ("プロンプト検索", "prompt_search"),
+                            ],
+                            value="full_chapters",
+                            label="モード",
+                        )
+                        ts_prompt = gr.Textbox(
+                            label="プロンプト / 追加指示",
+                            placeholder=(
+                                "例1: クッキーランで負けた瞬間\n"
+                                "例2: 新作ゲームの話題が出た部分\n"
+                                "例3: スパチャに反応したとこ\n"
+                                "全体モードでは追加指示として使われます"
+                            ),
+                            lines=4,
+                        )
+
+                ts_generate_btn = gr.Button(
+                    "🚀 タイムスタンプ生成",
+                    variant="primary",
+                    size="lg",
+                )
+
+                ts_output = gr.Textbox(
+                    label="生成結果（編集可能）",
+                    lines=15,
+                    interactive=True,
+                )
+                ts_log = gr.Textbox(
+                    label="ログ",
+                    lines=6,
+                    interactive=False,
+                )
+
+                with gr.Row():
+                    ts_copy_btn = gr.Button("📋 クリップボードにコピー", variant="secondary")
+                    ts_push_btn = gr.Button("📤 YouTube 概要欄に反映", variant="secondary")
+                    ts_send_btn = gr.Button("✂️ 切り抜きタブに送る", variant="secondary")
+
+                ts_action_msg = gr.Markdown("")
+
+            # ===== Tab 3: Settings =====
+            with gr.Tab("⚙️ 設定", id="settings_tab"):
                 with gr.Row():
                     with gr.Column():
                         gr.HTML("<h3>AI Model / 分析AI</h3>")
@@ -395,11 +648,6 @@ def create_ui():
 
                     with gr.Column():
                         gr.HTML("<h3>Highlight Detection</h3>")
-                        custom_prompt = gr.Textbox(
-                            label="カスタムプロンプト (任意)",
-                            placeholder="例: 面白いシーンだけ選んで、ゲーム実況の名場面を中心に",
-                            lines=2,
-                        )
                         with gr.Row():
                             min_duration = gr.Number(
                                 label="最小クリップ長 (秒)", value=defaults["min_duration"], precision=0,
@@ -456,34 +704,31 @@ def create_ui():
                     outputs=save_defaults_msg,
                 )
 
-            # --- Output Tab ---
-            with gr.Tab("Output / 出力"):
+                gr.HTML("<hr><h3>YouTube API 認証</h3>")
+                gr.Markdown(
+                    "概要欄を自動更新するには Google Cloud Console で YouTube Data API v3 を有効化し、"
+                    "OAuth 2.0 クライアントID（デスクトップアプリ）の `client_secret.json` をアップロードしてください。"
+                )
                 with gr.Row():
-                    with gr.Column(scale=2):
-                        log_output = gr.Textbox(
-                            label="Processing Log",
-                            lines=15,
-                            interactive=False,
-                        )
-                    with gr.Column(scale=1):
-                        highlights_output = gr.Markdown(
-                            label="Detected Highlights",
-                        )
-
-                with gr.Row():
-                    download_output = gr.File(label="Download (ZIP)")
-                    drive_link_output = gr.Textbox(
-                        label="Google Drive Link",
-                        interactive=False,
+                    yt_client_secret_upload = gr.File(
+                        label="client_secret.json",
+                        file_types=[".json"],
+                        type="filepath",
                     )
+                    yt_auth_btn = gr.Button("🔑 認証する", variant="primary")
+                yt_status = gr.Markdown(_youtube_status_markdown())
 
-        # Generate button
-        generate_btn = gr.Button(
-            "Generate Clips / 生成開始",
-            variant="primary",
-            size="lg",
-        )
+                yt_client_secret_upload.change(
+                    fn=upload_client_secret,
+                    inputs=yt_client_secret_upload,
+                    outputs=yt_status,
+                )
+                yt_auth_btn.click(
+                    fn=run_youtube_auth,
+                    outputs=yt_status,
+                )
 
+        # === Clip tab wiring ===
         generate_btn.click(
             fn=process_video,
             inputs=[
@@ -497,35 +742,65 @@ def create_ui():
             concurrency_limit=1,
         )
 
-        # Instructions
+        # === Timestamp tab wiring ===
+        ts_generate_btn.click(
+            fn=process_timestamps,
+            inputs=[ts_input_url, ts_input_file, ts_mode, ts_prompt,
+                    ai_provider, ai_model, api_key, whisper_model, language],
+            outputs=[ts_output, ts_log],
+            concurrency_limit=1,
+        )
+
+        # Copy to clipboard via JS (Gradio 6.x does not support show_copy_button on Textbox).
+        ts_copy_btn.click(
+            fn=None,
+            inputs=ts_output,
+            outputs=None,
+            js="(text) => { if (text) { navigator.clipboard.writeText(text); } return []; }",
+        )
+
+        def _push_wrapper(url, desc):
+            return gr.update(value=push_description_to_youtube(url, desc))
+
+        ts_push_btn.click(
+            fn=_push_wrapper,
+            inputs=[ts_input_url, ts_output],
+            outputs=ts_action_msg,
+        )
+
+        def _send_wrapper(ts_text):
+            prompt_value = send_timestamps_to_clip_tab(ts_text)
+            if not prompt_value:
+                return gr.update(), gr.update(value="⚠️ 先にタイムスタンプを生成してください")
+            return (
+                gr.update(value=prompt_value),
+                gr.update(value="✅ 切り抜き生成タブの『カスタムプロンプト』に反映しました"),
+            )
+
+        ts_send_btn.click(
+            fn=_send_wrapper,
+            inputs=ts_output,
+            outputs=[custom_prompt, ts_action_msg],
+        )
+
+        # Instructions accordion (stays at bottom of clip tab context)
         with gr.Accordion("使い方 / How to Use", open=False):
             gr.Markdown("""
-### 基本的な使い方
-1. **Input** タブでYouTube URLを貼り付けるか、動画ファイルをアップロード
-2. クリップ数や出力モードを設定
-3. **Generate Clips** ボタンをクリック
-4. **Output** タブで結果を確認、ZIPファイルをダウンロード
+### 基本フロー
+1. **切り抜き生成タブ** で YouTube URL / ローカル動画を指定 → Generate
+2. **タイムスタンプ生成タブ** で全体チャプター or プロンプト検索
+3. 生成後、「📤 YouTube 概要欄に反映」で概要欄を自動更新
+4. または「✂️ 切り抜きタブに送る」でタイムスタンプをヒントに切り抜き
 
 ### Premiere Pro での読み込み
-1. ダウンロードしたZIPを展開
-2. Premiere Pro → File → Import → `project.xml` を選択
-3. 各シーケンスにクリップが配置済み
-4. SRTファイルをキャプションとしてインポート
-5. フォント・位置・カット位置を自由に調整
+1. ZIPを展開 → Premiere Pro で `project.xml` を Import
+2. SRT字幕を File → Import でインポート
 
-### Photoshopでテロップを編集する方法
-1. SRTキャプションをタイムライン上で選択
-2. 右クリック → 「グラフィックにアップグレード」でテキストレイヤーに変換
-3. テキストレイヤーを右クリック → 「Adobe Photoshopで編集」
-4. Photoshopでフォント・装飾・エフェクトを自由に編集
-5. 保存するとPremiere Proに即反映
-
-### Google Drive アップロード
-1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクト作成
-2. Drive API を有効化
-3. OAuth 2.0 クライアントID（デスクトップアプリ）を作成
-4. `credentials.json` をダウンロードして `clip-extractor/` フォルダに配置
-5. 初回実行時にブラウザで認証
+### YouTube概要欄 自動更新
+1. Google Cloud Console で YouTube Data API v3 を有効化
+2. OAuth 2.0 クライアントID（デスクトップ）→ `client_secret.json` ダウンロード
+3. 設定タブ > YouTube API 認証 にアップロード → 認証するボタン
+4. 以降は「📤 YouTube 概要欄に反映」で自動更新
             """)
 
     return app
@@ -538,4 +813,5 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=8080,
         ssr_mode=False,
+        theme=gr.themes.Soft(),
     )
