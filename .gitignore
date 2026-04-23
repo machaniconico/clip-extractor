@@ -3,6 +3,8 @@
 credentials.json
 token.json
 token.pickle
+client_secret.json
+youtube-oauth.json
 
 # Python
 __pycache__/
