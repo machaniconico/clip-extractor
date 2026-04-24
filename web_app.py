@@ -706,29 +706,51 @@ def create_ui():
 [https://console.cloud.google.com/](https://console.cloud.google.com/) を開く
 （初回は Google アカウントでログイン）
 
+> ⚠️ トップ画面の「**Create Gemini API key**」「**Get Agent Platform API Key**」は
+> clip-extractor には**使いません** (別物の API キー)。今から作るのは
+> OAuth 2.0 クライアント ID という別種類の認証情報です。
+
 #### 2. 新しいプロジェクトを作成
 画面上部の **プロジェクトセレクタ** → **新しいプロジェクト**
 - プロジェクト名: `clip-extractor` (任意)
 - 作成後、上部セレクタで このプロジェクトに切り替え
 
 #### 3. 使う API を有効化
-左メニュー **[APIとサービス] → [ライブラリ]** から検索して有効化:
+**左メニューの出し方**: 画面**左上の ≡ (三本線アイコン)** をクリック →
+ドロワーから **[APIとサービス] → [ライブラリ]**
+
+🔗 **最短**: 直接ライブラリを開く → [console.cloud.google.com/apis/library](https://console.cloud.google.com/apis/library)
+
+ライブラリ画面で 以下を検索し、それぞれ **[有効にする]** を押してください:
 - **Google Drive API** ── 出力を Drive にアップロードする場合
 - **YouTube Data API v3** ── 概要欄を自動更新する場合
 
-両方使うなら両方有効化（片方だけでも OK）。
+両方使うなら両方有効化（片方だけでも OK）。複数 API はそれぞれ個別に有効化が必要です。
 
 #### 4. OAuth 同意画面を設定 (初回のみ)
-左メニュー **[APIとサービス] → [OAuth同意画面]**
-- User Type: **外部** → 作成
-- アプリ名 / サポートメール / 連絡先を入力して保存
-- **テストユーザーに自分のアカウントを必ず追加** ← これを忘れると認証時に拒否されます
+🔗 **直接 URL**: [console.cloud.google.com/apis/credentials/consent](https://console.cloud.google.com/apis/credentials/consent)
+
+1. **User Type: 外部** → 作成
+2. **アプリ情報**: アプリ名 `clip-extractor` / ユーザーサポートメール / デベロッパー連絡先に自分のメールアドレス → 保存して次へ
+3. **スコープ**: 何も追加せず → 保存して次へ
+4. **テストユーザー**: ★ **[+ADD USERS] で自分の Google アカウントを必ず追加** ★
+   （これを忘れると認証時に「アクセスがブロックされました」になります）
+5. 概要画面 → ダッシュボードに戻る
+
+> ⏰ 同意画面が「テスト」状態だと発行トークンは 7 日で失効します。
+> 再認証すれば継続利用可。恒久化したければ同じ画面で **[アプリを公開]** →
+> 本番モードに切り替え (個人用途なら審査通常不要)。
 
 #### 5. OAuth クライアント ID を作成
-左メニュー **[APIとサービス] → [認証情報]** →
-**[認証情報を作成] → [OAuth クライアント ID]**
-- アプリケーションの種類: **★ デスクトップ アプリ ★** （Web アプリ不可）
-- 名前: `clip-extractor desktop` (任意) → **作成**
+🔗 **直接 URL**: [console.cloud.google.com/apis/credentials](https://console.cloud.google.com/apis/credentials)
+
+1. ページ上部の **[+ 認証情報を作成]** をクリック
+2. プルダウンから **[OAuth クライアント ID]** を選択
+   (「API キー」「サービス アカウント」ではなく **OAuth クライアント ID**)
+3. 設定:
+   - アプリケーションの種類: **★ デスクトップ アプリ ★** （Web アプリ不可 = redirect_uri_mismatch の原因）
+   - 名前: `clip-extractor desktop` (任意)
+4. **作成**
 
 #### 6. JSON をダウンロード
 作成完了ダイアログの **[JSON をダウンロード]** ボタンを押す
