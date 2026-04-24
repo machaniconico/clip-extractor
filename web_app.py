@@ -165,20 +165,75 @@ def resolve_output_base(user_text: str) -> Path:
     return Path(__file__).resolve().parent / "output"
 
 
-def format_resolved_path(user_text: str) -> str:
-    """Pretty markdown line for the Settings tab's live-updating path hint."""
-    target = resolve_output_base(user_text)
-    label = "✅ カスタム" if (user_text or "").strip() else "📁 デフォルト"
-    return f"**実際の保存先** ({label}): `{target}`"
+def pick_folder_dialog(current_value: str) -> str:
+    """Open the native OS folder-picker and return the selected path.
+
+    On cancel / error, returns the current textbox value unchanged so
+    Gradio's .click() doesn't blank the field. Windows uses PowerShell's
+    FolderBrowserDialog (run in STA mode, which the control requires);
+    other OSes fall back to tkinter.filedialog.askdirectory.
+    """
+    initial = resolve_output_base(current_value)
+    try:
+        initial.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    fallback = current_value if (current_value or "").strip() else str(initial)
+
+    if os.name == "nt":
+        try:
+            ps_cmd = (
+                "Add-Type -AssemblyName System.Windows.Forms | Out-Null;"
+                "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
+                f"$d.SelectedPath = '{str(initial).replace(chr(39), chr(39)*2)}';"
+                "$d.Description = '保存先フォルダを選択';"
+                "$d.ShowNewFolderButton = $true;"
+                "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
+                "{ [Console]::Out.WriteLine($d.SelectedPath) }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Sta", "-Command", ps_cmd],
+                capture_output=True, text=True, timeout=300,
+                encoding="utf-8", errors="replace",
+            )
+            picked = (result.stdout or "").strip()
+            if picked:
+                return picked
+        except Exception as exc:
+            logger.warning(f"PowerShell folder picker failed: {exc}")
+    else:
+        try:
+            import tkinter as _tk
+            from tkinter import filedialog as _fd
+            _root = _tk.Tk()
+            _root.withdraw()
+            _root.attributes("-topmost", True)
+            picked = _fd.askdirectory(
+                title="保存先フォルダを選択",
+                initialdir=str(initial),
+            )
+            _root.destroy()
+            if picked:
+                return picked
+        except Exception as exc:
+            logger.warning(f"tkinter folder picker failed: {exc}")
+
+    return fallback
 
 
-def open_output_folder(current_base: str) -> str:
-    """Create (if missing) and open the output base dir in Explorer / Finder."""
+def open_output_folder(current_base: str) -> None:
+    """Create (if missing) and open the output base dir in Explorer / Finder.
+
+    Uses gr.Info / gr.Warning for feedback instead of a persistent status
+    textbox — fire-and-forget. Never raises.
+    """
     target = resolve_output_base(current_base)
     try:
         target.mkdir(parents=True, exist_ok=True)
     except Exception as exc:
-        return f"[ERR] フォルダを作成できません: {exc}"
+        gr.Warning(f"フォルダを作成できません: {exc}")
+        return
     try:
         if os.name == "nt":
             os.startfile(str(target))
@@ -186,9 +241,9 @@ def open_output_folder(current_base: str) -> str:
             import subprocess as _sp
             opener = "open" if sys.platform == "darwin" else "xdg-open"
             _sp.Popen([opener, str(target)])
+        gr.Info(f"開きました: {target}")
     except Exception as exc:
-        return f"[WARN] フォルダは作成しましたが開けません ({target}): {exc}"
-    return f"[OK] 開きました: {target}"
+        gr.Warning(f"フォルダは作成しましたが開けません ({target}): {exc}")
 
 
 from chapters import generate_chapter_text, write_chapter_file
@@ -711,37 +766,33 @@ def create_ui():
                             )
 
                         gr.HTML("<h3 style='margin-top: 1.5em;'>出力先 / Output Destination</h3>")
-                        output_base_dir = gr.Textbox(
-                            label="保存先フォルダ (任意)",
-                            value=defaults.get("output_base_dir", ""),
-                            placeholder="空欄 = clip-extractor/output/ に出力",
-                            info="絶対パス (D:/clips) / 相対パス / ~/videos いずれも可。各 Generate ごとに output_<日時>/ サブフォルダが自動生成されます。",
-                        )
-                        output_base_resolved = gr.Markdown(
-                            format_resolved_path(defaults.get("output_base_dir", ""))
-                        )
+                        _saved_base = (defaults.get("output_base_dir", "") or "").strip()
+                        _initial_path = _saved_base or str(resolve_output_base(""))
                         with gr.Row():
-                            open_output_btn = gr.Button(
-                                "📂 保存先フォルダを開く",
-                                variant="secondary",
-                                size="sm",
+                            browse_output_btn = gr.Button(
+                                "📁 保存先フォルダを選択…",
+                                variant="primary",
                                 scale=1,
                             )
-                            open_output_msg = gr.Textbox(
-                                label="",
-                                interactive=False,
-                                show_label=False,
-                                scale=3,
+                            open_output_btn = gr.Button(
+                                "📂 現在のフォルダを開く",
+                                variant="secondary",
+                                scale=1,
                             )
-                        output_base_dir.change(
-                            fn=format_resolved_path,
+                        output_base_dir = gr.Textbox(
+                            label="現在の保存先",
+                            value=_initial_path,
+                            info="上のボタンから選ぶか、直接パスを編集できます。空欄にすると clip-extractor/output/ に戻ります。各 Generate ごとに output_<日時>/ サブフォルダが自動生成されます。",
+                        )
+                        browse_output_btn.click(
+                            fn=pick_folder_dialog,
                             inputs=output_base_dir,
-                            outputs=output_base_resolved,
+                            outputs=output_base_dir,
                         )
                         open_output_btn.click(
                             fn=open_output_folder,
                             inputs=output_base_dir,
-                            outputs=open_output_msg,
+                            outputs=None,
                         )
 
                 with gr.Row():
