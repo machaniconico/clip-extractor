@@ -6,10 +6,39 @@ import os
 import shutil
 import subprocess
 import traceback
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 import gradio as gr
+
+
+@dataclass
+class ProcessResult:
+    """Structured result from the processing pipeline.
+
+    Fields line up with the Gradio outputs wired in generate_btn.click:
+    (log_output, highlights_output, download_output, drive_link_output,
+    chapters_output). Building this dataclass instead of scattering raw
+    5-tuples across every return statement keeps the field order in one
+    place — adding/removing a field no longer requires touching every
+    early-exit and error branch.
+    """
+    log: str = ""
+    highlights: str = ""
+    download_path: Path | None = None
+    drive_link: str = ""
+    chapters_text: str = ""
+
+    def as_gradio_outputs(self) -> tuple:
+        """Order matches generate_btn.click(outputs=[...])."""
+        return (
+            self.log,
+            self.highlights,
+            self.download_path,
+            self.drive_link,
+            self.chapters_text,
+        )
 
 # --- File logging setup ---
 # Use TEMP dir to avoid Japanese path issues with OneDrive/Desktop
@@ -152,7 +181,7 @@ def process_video(
         try:
             modes.validate()
         except ValueError as mode_err:
-            return f"Error: {mode_err}", "", None, "", ""
+            return ProcessResult(log=f"Error: {mode_err}").as_gradio_outputs()
         log(f"Modes: clips={modes.enable_clips}, chapters={modes.enable_chapters}")
 
         # Pre-validate YouTube auth before starting the heavy pipeline.
@@ -161,17 +190,19 @@ def process_video(
         if auto_append_youtube:
             yt_status = youtube_api.check_auth_status()
             if not yt_status["configured"]:
-                return (
-                    "Error: 概要欄に自動追加が有効ですが credentials.json が未設定です。"
-                    "Settings タブの『YouTube API 認証』で配置手順を確認してください。",
-                    "", None, "", "",
-                )
+                return ProcessResult(
+                    log=(
+                        "Error: 概要欄に自動追加が有効ですが credentials.json が未設定です。"
+                        "Settings タブの『YouTube API 認証』で配置手順を確認してください。"
+                    ),
+                ).as_gradio_outputs()
             if not yt_status["authenticated"]:
-                return (
-                    "Error: YouTube 認証が切れています。Settings タブの"
-                    "『YouTube API 認証』で『認証する』を押して再認証してください。",
-                    "", None, "", "",
-                )
+                return ProcessResult(
+                    log=(
+                        "Error: YouTube 認証が切れています。Settings タブの"
+                        "『YouTube API 認証』で『認証する』を押して再認証してください。"
+                    ),
+                ).as_gradio_outputs()
             log(f"YouTube auth pre-check: {youtube_api.auth_status_summary()}")
 
         # Create ONE output directory that is reused for download + processing,
@@ -209,7 +240,9 @@ def process_video(
             video_path = download_video(input_url.strip(), output_dir / "source")
             log(f"Downloaded: {video_path.name}")
         else:
-            return "Error: URLを入力するかファイルをアップロードしてください", "", None, "", ""
+            return ProcessResult(
+                log="Error: URLを入力するかファイルをアップロードしてください",
+            ).as_gradio_outputs()
 
         # Step 1: Video info
         progress(0.1, desc="[Step 1/6] Analyzing video...")
@@ -380,7 +413,13 @@ def process_video(
 
         log(f"\nDone! Output: {output_dir}")
 
-        return "\n".join(logs), highlights_summary, zip_path, drive_link, chapters_text
+        return ProcessResult(
+            log="\n".join(logs),
+            highlights=highlights_summary,
+            download_path=zip_path,
+            drive_link=drive_link,
+            chapters_text=chapters_text,
+        ).as_gradio_outputs()
 
     except subprocess.CalledProcessError as e:
         err_detail = f"Command failed: {e.cmd}\nReturn code: {e.returncode}"
@@ -390,13 +429,13 @@ def process_video(
             err_detail += f"\nstderr: {e.stderr[:500]}"
         logger.error(err_detail)
         log(f"\nError (subprocess): {err_detail}")
-        return "\n".join(logs), "", None, "", ""
+        return ProcessResult(log="\n".join(logs)).as_gradio_outputs()
     except Exception as e:
         tb = traceback.format_exc()
         logger.error(f"Error: {e}\n{tb}")
         log(f"\nError: {e}")
         log(tb)
-        return "\n".join(logs), "", None, "", ""
+        return ProcessResult(log="\n".join(logs)).as_gradio_outputs()
 
 
 def create_ui():
