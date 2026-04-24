@@ -13,6 +13,20 @@ Centralises what drive_upload.py and youtube_api.py used to duplicate:
 
 Callers still expose module-level TOKEN_PATH / CREDENTIALS_PATH constants
 so existing monkey-patch-based tests keep working.
+
+## Surprising behaviours by design
+
+- **Import-time migration.** drive_upload.py and youtube_api.py call
+  migrate_legacy_file() at module load so their module-level path
+  constants resolve to the canonical (user config dir) location even on
+  the first import after the upgrade. The side effect is idempotent —
+  if the destination already exists the legacy file is left untouched,
+  and failures downgrade to copy-then-warn rather than raising.
+- **check_auth_status() may write to disk.** When a cached token is
+  expired but still refreshable, this function silently refreshes it
+  and rewrites the file so subsequent callers see a valid token. The UI
+  treats the function as a pure read, but for persistence across
+  process restarts the write-through is load-bearing.
 """
 
 from __future__ import annotations

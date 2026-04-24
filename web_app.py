@@ -23,6 +23,9 @@ class ProcessResult:
     5-tuples across every return statement keeps the field order in one
     place — adding/removing a field no longer requires touching every
     early-exit and error branch.
+
+    download_path=None clears the gr.File output widget; a real Path
+    value populates it with the resulting zip.
     """
     log: str = ""
     highlights: str = ""
@@ -143,7 +146,7 @@ def save_defaults(ai_provider, ai_model,
     SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return "Settings saved as default!"
 from chapters import generate_chapter_text, write_chapter_file
-from downloader import is_youtube_url, download_video
+from downloader import download_video
 from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
 from clipper import extract_clips, get_video_info

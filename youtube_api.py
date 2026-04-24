@@ -192,9 +192,8 @@ def auth_status_summary() -> str:
 
 # ----- credentials.json install helpers (UI file-drop support) -----
 
-def validate_credentials_json(path: Path | str) -> tuple[bool, str]:
-    """Thin re-export of _google_auth.validate_credentials_json."""
-    return _google_auth.validate_credentials_json(path)
+# Re-export unchanged — the YouTube layer adds no logic beyond forwarding.
+validate_credentials_json = _google_auth.validate_credentials_json
 
 
 def install_credentials_from_file(src_path: Path | str | None) -> str:
