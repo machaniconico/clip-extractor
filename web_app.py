@@ -695,6 +695,11 @@ def create_ui():
 **所要時間: 約 10 分** — 最初の 1 回だけ必要な作業です。
 プロジェクト同梱の `CREDENTIALS_SETUP.txt` にも同じ手順があります。
 
+> 💰 **料金について**: Google Drive API / YouTube Data API v3 ともに
+> **個人利用の範囲では完全無料** です。クレジットカード登録も不要。
+> YouTube 側にのみ「1日 10,000 units」のクォータがあり、概要欄更新は
+> 1回 50 units なので **1日約 200 動画まで** は確実に無料で動きます。
+
 ---
 
 #### 1. Google Cloud Console にアクセス
@@ -916,6 +921,11 @@ def create_ui():
 **どちらの機能も 1 つの `credentials.json` で動きます。** 詳細な手順は
 プロジェクト同梱の **`CREDENTIALS_SETUP.txt`** を参照するか、
 Settings タブの「📘 credentials.json の取得手順」アコーディオンを展開してください。
+
+> 💰 **料金**: 両 API とも **個人利用では無料** (クレカ登録不要)。
+> YouTube 側のみ「1日 10,000 units」のクォータがあり、概要欄更新は
+> 1回 50 units なので **1日約 200 動画** まで無料で動きます。
+> Drive は API 呼び出し自体に課金なし (ストレージは Drive 容量を使用)。
 
 手順の要約:
 1. [Google Cloud Console](https://console.cloud.google.com/) で新規プロジェクトを作成
