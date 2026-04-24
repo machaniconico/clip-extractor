@@ -15,6 +15,7 @@ from clipper import extract_clips, get_video_info
 from subtitles import generate_all_srts
 from premiere_xml import generate_combined_xml, generate_individual_xmls
 from modes import GenerationModes
+import youtube_api
 
 
 def main():
@@ -44,11 +45,13 @@ def main():
     parser.add_argument("--language", default="ja", help="Language code (default: ja)")
     parser.add_argument("--font-config", default=None, help="Path to font config JSON file")
     parser.add_argument("--no-clips", action="store_true",
-                        help="切り抜き生成を無効化 (概要欄テキストのみ生成)")
+                        help="切り抜き生成を無効化 (タイムスタンプのみ生成)")
     parser.add_argument("--no-chapters", action="store_true",
-                        help="概要欄テキスト生成を無効化 (切り抜きのみ)")
+                        help="タイムスタンプ (概要欄) 生成を無効化 (切り抜きのみ)")
     parser.add_argument("--chapter-prompt", default="",
-                        help="概要欄専用プロンプト (--no-clips 時のみ使用)")
+                        help="タイムスタンプ専用プロンプト (--no-clips 時のみ使用)")
+    parser.add_argument("--auto-append-youtube", action="store_true",
+                        help="タイムスタンプを YouTube の概要欄に自動追記 (URL 入力 + credentials.json 必須)")
 
     args = parser.parse_args()
 
@@ -79,6 +82,12 @@ def main():
 
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir}")
+
+    # Capture YouTube video id for the optional auto-append step. Only
+    # meaningful when the input is a URL — local files never have one.
+    youtube_video_id = youtube_api.extract_video_id(args.input) if is_youtube_url(args.input) else None
+    if youtube_video_id:
+        print(f"YouTube video id: {youtube_video_id}")
 
     # Step 1: Get video file
     if is_youtube_url(args.input):
@@ -184,8 +193,9 @@ def main():
                 )
 
     # Step 9: Generate YouTube chapter description text (auto-chapter on upload)
+    chapters_text = ""
     if modes.enable_chapters:
-        print("\n--- Chapter Text (YouTube description) ---")
+        print("\n--- タイムスタンプ (概要欄) ---")
         chapters_path = output_dir / "chapters.txt"
         video_duration = float(video_info.get("duration", 0))
         chapters_text = generate_chapter_text(highlights, video_duration=video_duration)
@@ -193,7 +203,24 @@ def main():
         print(chapters_text)
         print(f"\nSaved: {chapters_path}")
     else:
-        print("\n[Skip chapters] Chapter generation disabled (--no-chapters)")
+        print("\n[Skip chapters] タイムスタンプ (概要欄) 生成を無効化 (--no-chapters)")
+
+    # Optional auto-append to YouTube video description
+    if args.auto_append_youtube and modes.enable_chapters and chapters_text:
+        if not youtube_video_id:
+            print("\n[Skip auto-append] URL 入力ではないため YouTube 概要欄への自動追記はスキップ")
+        elif not youtube_api.is_configured():
+            print("\n[Skip auto-append] credentials.json が未設定のためスキップ")
+        else:
+            print("\n--- YouTube 概要欄に自動追加 ---")
+            try:
+                yt_service = youtube_api.get_youtube_service()
+                youtube_api.update_video_description(
+                    yt_service, youtube_video_id, chapters_text, position="prepend",
+                )
+                print(f"YouTube 概要欄に自動追加: video_id={youtube_video_id}")
+            except Exception as yt_err:
+                print(f"[Warn] YouTube 概要欄更新失敗: {yt_err} (他の出力は維持されています)", file=sys.stderr)
 
     # Summary
     print("\n" + "=" * 50)

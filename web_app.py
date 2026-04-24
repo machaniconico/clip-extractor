@@ -62,6 +62,7 @@ def load_defaults() -> dict:
         "ai_provider": "gemini", "ai_model": "gemini-3-flash-preview",
         "enable_clips": True, "enable_chapters": True,
         "clip_prompt": "", "chapter_prompt": "",
+        "auto_append_youtube": False,
         "num_clips": 5, "min_duration": 30, "max_duration": 90,
         "output_mode": "combined", "generate_shorts": False,
         "whisper_model": "large-v3", "language": "ja",
@@ -78,6 +79,7 @@ def load_defaults() -> dict:
 
 def save_defaults(ai_provider, ai_model,
                   enable_clips, enable_chapters, clip_prompt, chapter_prompt,
+                  auto_append_youtube,
                   num_clips, min_duration, max_duration,
                   whisper_model, language,
                   font_name, font_size, font_color):
@@ -86,6 +88,7 @@ def save_defaults(ai_provider, ai_model,
         "ai_provider": ai_provider, "ai_model": ai_model,
         "enable_clips": bool(enable_clips), "enable_chapters": bool(enable_chapters),
         "clip_prompt": clip_prompt, "chapter_prompt": chapter_prompt,
+        "auto_append_youtube": bool(auto_append_youtube),
         "num_clips": int(num_clips),
         "min_duration": int(min_duration), "max_duration": int(max_duration),
         "whisper_model": whisper_model, "language": language,
@@ -103,6 +106,7 @@ from subtitles import generate_all_srts
 from premiere_xml import generate_combined_xml, generate_individual_xmls
 from drive_upload import upload_output_directory, is_configured as drive_is_configured
 from modes import GenerationModes
+import youtube_api
 
 
 def process_video(
@@ -112,6 +116,7 @@ def process_video(
     clip_prompt: str,
     enable_chapters: bool,
     chapter_prompt: str,
+    auto_append_youtube: bool,
     num_clips: int,
     output_mode: str,
     generate_shorts: bool,
@@ -156,6 +161,14 @@ def process_video(
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = Path(f"./output_{timestamp}")
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Capture the source video ID (only meaningful for YouTube URL input).
+        # We use this later for the optional auto-append-to-YouTube step.
+        youtube_video_id: str | None = None
+        if input_url and input_url.strip():
+            youtube_video_id = youtube_api.extract_video_id(input_url.strip())
+            if youtube_video_id:
+                log(f"YouTube video id: {youtube_video_id}")
 
         # Determine input source
         if input_file is not None:
@@ -310,7 +323,7 @@ def process_video(
             zip_path = shutil.make_archive(str(output_dir), "zip", str(output_dir))
             log(f"  ZIP created: {zip_path}")
 
-        # YouTube chapter description text (auto-chapter on upload).
+        # タイムスタンプ (概要欄) text — auto-chapter on upload.
         # Only generated when the chapters mode is enabled.
         chapters_text = ""
         if modes.enable_chapters:
@@ -323,7 +336,28 @@ def process_video(
             except Exception as ch_err:
                 log(f"Chapter generation failed: {ch_err}")
         else:
-            log("[Skip chapters] Chapter generation disabled")
+            log("[Skip chapters] タイムスタンプ (概要欄) 生成を無効化")
+
+        # Auto-append to YouTube video description.
+        # Only runs when: chapters generated AND user enabled it AND we have a
+        # video id (URL input, not a local file upload).
+        if auto_append_youtube and modes.enable_chapters and chapters_text:
+            if not youtube_video_id:
+                log("[Skip auto-append] URL 入力ではないため YouTube 概要欄への自動追記はスキップ")
+            elif not youtube_api.is_configured():
+                log("[Skip auto-append] credentials.json 未設定のため YouTube 概要欄への自動追記はスキップ")
+            else:
+                progress(0.97, desc="YouTube 概要欄に自動追加中...")
+                try:
+                    yt_service = youtube_api.get_youtube_service()
+                    youtube_api.update_video_description(
+                        yt_service, youtube_video_id, chapters_text, position="prepend",
+                    )
+                    log(f"  YouTube 概要欄に自動追加: video_id={youtube_video_id}")
+                except Exception as yt_err:
+                    tb = traceback.format_exc()
+                    logger.error(f"YouTube 概要欄更新失敗: {yt_err}\n{tb}")
+                    log(f"  YouTube 概要欄更新失敗: {yt_err} (他の出力は維持)")
 
         log(f"\nDone! Output: {output_dir}")
 
@@ -390,16 +424,21 @@ def create_ui():
                         )
                     with gr.Column():
                         enable_chapters = gr.Checkbox(
-                            label="概要欄テキストを生成",
+                            label="タイムスタンプ(概要欄)を生成",
                             value=defaults.get("enable_chapters", True),
                             info="YouTube 自動チャプター有効の 0:00 形式テキストを出力",
                         )
                         chapter_prompt = gr.Textbox(
-                            label="概要欄用プロンプト (任意)",
+                            label="タイムスタンプ用プロンプト (任意)",
                             value=defaults.get("chapter_prompt", ""),
                             placeholder="例: 話題が切り替わる節目だけを抜き出して",
                             lines=2,
                             info="切り抜きが無効のときだけ使われます",
+                        )
+                        auto_append_youtube = gr.Checkbox(
+                            label="概要欄に自動追加 (YouTube)",
+                            value=defaults.get("auto_append_youtube", False),
+                            info="URL入力時のみ有効。初回は credentials.json 配置 + ブラウザ認証が必要",
                         )
 
                 with gr.Row():
@@ -540,6 +579,7 @@ def create_ui():
                     fn=save_defaults,
                     inputs=[ai_provider, ai_model,
                             enable_clips, enable_chapters, clip_prompt, chapter_prompt,
+                            auto_append_youtube,
                             num_clips, min_duration, max_duration,
                             whisper_model, language,
                             font_name, font_size, font_color],
@@ -569,8 +609,8 @@ def create_ui():
 
                 with gr.Row():
                     chapters_output = gr.Textbox(
-                        label="概要欄テキスト (YouTube チャプター自動有効)",
-                        info="先頭が必ず 0:00 から始まるため、YouTube がアップロード時に自動でチャプターとして認識します。そのままコピーして動画の概要欄に貼り付けてください。",
+                        label="タイムスタンプ (概要欄)",
+                        info="先頭が必ず 0:00 から始まるため、YouTube がアップロード時に自動でチャプターとして認識します。そのままコピーして動画の概要欄に貼り付けるか、『概要欄に自動追加』を有効にして API で直接反映させてください。",
                         lines=8,
                         show_copy_button=True,
                         interactive=False,
@@ -588,6 +628,7 @@ def create_ui():
             inputs=[
                 input_url, input_file,
                 enable_clips, clip_prompt, enable_chapters, chapter_prompt,
+                auto_append_youtube,
                 num_clips, output_mode,
                 generate_shorts, generate_zip, ai_provider, ai_model, api_key,
                 min_duration, max_duration,
@@ -640,11 +681,18 @@ def create_ui():
 3. 出力された Shorts には字幕が焼き込まれ、そのまま YouTube Shorts / TikTok にアップロード可能
 4. 通常の横クリップ（landscape）は字幕が焼き込まれず、Premiere Pro で SRT キャプションを自由に調整できる状態のまま
 
-### YouTube 概要欄の自動チャプター
-1. Generate 完了後、Output タブ下部の「概要欄テキスト」にチャプター形式のタイムスタンプ一覧が表示される（例: `0:00 イントロ` / `3:42 ハイライト1` …）
+### タイムスタンプ (概要欄)
+1. Generate 完了後、Output タブ下部の「タイムスタンプ (概要欄)」にチャプター形式の一覧が表示される（例: `0:00 イントロ` / `3:42 ハイライト1` …）
 2. そのままコピーして YouTube アップロード時の概要欄に貼り付ける
 3. 先頭が必ず `0:00` から始まるため YouTube が自動でチャプターとして認識し、動画プレイヤー上にチャプターマーカーが表示される
 4. `output_*/chapters.txt` にも同じ内容が保存されている
+
+### 概要欄に自動追加 (YouTube API)
+1. Input タブで「概要欄に自動追加」をチェック（初期設定は無効）
+2. 初回のみ: `credentials.json` を `clip-extractor/` フォルダに配置し、ブラウザで YouTube 権限を承認（`youtube_token.json` が自動生成）
+3. URL 入力モードで Generate を実行すると、該当動画の概要欄にタイムスタンプが prepend（先頭挿入）される
+4. ローカルファイル入力時は対象動画が特定できないため、この機能はスキップされログに表示される
+5. scope は `youtube.force-ssl` — 自分がアップロード済みの動画のみ更新可能
             """)
 
     return app
