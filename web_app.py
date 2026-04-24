@@ -88,6 +88,7 @@ def save_defaults(ai_provider, ai_model, custom_prompt, num_clips,
     }
     SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return "Settings saved as default!"
+from chapters import generate_chapter_text, write_chapter_file
 from downloader import is_youtube_url, download_video
 from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
@@ -153,7 +154,7 @@ def process_video(
             video_path = download_video(input_url.strip(), output_dir / "source")
             log(f"Downloaded: {video_path.name}")
         else:
-            return "Error: URLを入力するかファイルをアップロードしてください", "", None, ""
+            return "Error: URLを入力するかファイルをアップロードしてください", "", None, "", ""
 
         # Step 1: Video info
         progress(0.1, desc="[Step 1/6] Analyzing video...")
@@ -200,28 +201,34 @@ def process_video(
 
         log(f"  Found {len(highlights)} highlights")
 
-        # Step 4: Extract clips
+        # Step 4: Extract clips (normal landscape, no burn-in — Premiere edits SRT separately)
         progress(0.6, desc="[Step 4/6] Extracting clips...")
         log("[Step 4/6] Extracting clips...")
         clips_dir = output_dir / "clips"
         clip_paths = extract_clips(video_path, highlights, clips_dir)
         log(f"  Extracted {len(clip_paths)} clips")
 
-        shorts_paths = []
-        if generate_shorts:
-            progress(0.7, desc="Generating shorts (9:16)...")
-            shorts_dir = output_dir / "shorts"
-            shorts_paths = extract_clips(video_path, highlights, shorts_dir, shorts=True)
-            log(f"  Generated {len(shorts_paths)} shorts")
-
-        # Step 5: Subtitles
-        progress(0.8, desc="[Step 5/6] Generating subtitles...")
+        # Step 5: Subtitles for clips (SRT for Premiere captions)
+        progress(0.7, desc="[Step 5/6] Generating subtitles...")
         log("[Step 5/6] Generating subtitles...")
         srt_paths = generate_all_srts(segments, highlights, clips_dir)
-        shorts_srt_paths: list[Path] = []
-        if generate_shorts and shorts_paths:
-            shorts_srt_paths = generate_all_srts(segments, highlights, output_dir / "shorts")
         log(f"  Generated {len(srt_paths)} SRT files")
+
+        # Shorts (9:16) — generate SRTs first, then extract with font-styled burn-in
+        shorts_paths: list[Path] = []
+        shorts_srt_paths: list[Path] = []
+        if generate_shorts:
+            progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
+            shorts_dir = output_dir / "shorts"
+            shorts_dir.mkdir(parents=True, exist_ok=True)
+            shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
+            shorts_paths = extract_clips(
+                video_path, highlights, shorts_dir,
+                shorts=True,
+                srt_paths=shorts_srt_paths,
+                font_config=font_config,
+            )
+            log(f"  Generated {len(shorts_paths)} shorts with {font_config.font_name} @ {font_config.font_size}pt")
 
         # Step 6: Premiere Pro XML
         progress(0.85, desc="[Step 6/6] Exporting XML...")
@@ -271,9 +278,20 @@ def process_video(
             zip_path = shutil.make_archive(str(output_dir), "zip", str(output_dir))
             log(f"  ZIP created: {zip_path}")
 
+        # YouTube chapter description text (auto-chapter on upload)
+        chapters_text = ""
+        try:
+            video_duration = float(video_info.get("duration", 0))
+            chapters_text = generate_chapter_text(highlights, video_duration=video_duration)
+            chapters_path = output_dir / "chapters.txt"
+            write_chapter_file(highlights, chapters_path, video_duration=video_duration)
+            log(f"Chapters saved: {chapters_path}")
+        except Exception as ch_err:
+            log(f"Chapter generation failed: {ch_err}")
+
         log(f"\nDone! Output: {output_dir}")
 
-        return "\n".join(logs), highlights_summary, zip_path, drive_link
+        return "\n".join(logs), highlights_summary, zip_path, drive_link, chapters_text
 
     except subprocess.CalledProcessError as e:
         err_detail = f"Command failed: {e.cmd}\nReturn code: {e.returncode}"
@@ -283,13 +301,13 @@ def process_video(
             err_detail += f"\nstderr: {e.stderr[:500]}"
         logger.error(err_detail)
         log(f"\nError (subprocess): {err_detail}")
-        return "\n".join(logs), "", None, ""
+        return "\n".join(logs), "", None, "", ""
     except Exception as e:
         tb = traceback.format_exc()
         logger.error(f"Error: {e}\n{tb}")
         log(f"\nError: {e}")
         log(tb)
-        return "\n".join(logs), "", None, ""
+        return "\n".join(logs), "", None, "", ""
 
 
 def create_ui():
@@ -476,6 +494,15 @@ def create_ui():
                         interactive=False,
                     )
 
+                with gr.Row():
+                    chapters_output = gr.Textbox(
+                        label="概要欄テキスト (YouTube チャプター自動有効)",
+                        info="先頭が必ず 0:00 から始まるため、YouTube がアップロード時に自動でチャプターとして認識します。そのままコピーして動画の概要欄に貼り付けてください。",
+                        lines=8,
+                        show_copy_button=True,
+                        interactive=False,
+                    )
+
         # Generate button
         generate_btn = gr.Button(
             "Generate Clips / 生成開始",
@@ -492,7 +519,7 @@ def create_ui():
                 whisper_model, language, font_name, font_size, font_color,
                 upload_to_drive,
             ],
-            outputs=[log_output, highlights_output, download_output, drive_link_output],
+            outputs=[log_output, highlights_output, download_output, drive_link_output, chapters_output],
             concurrency_limit=1,
         )
 
@@ -525,6 +552,18 @@ def create_ui():
 3. OAuth 2.0 クライアントID（デスクトップアプリ）を作成
 4. `credentials.json` をダウンロードして `clip-extractor/` フォルダに配置
 5. 初回実行時にブラウザで認証
+
+### ショート動画のフォント設定（9:16 出力のみ）
+1. Settings タブの Font Settings でフォント名・サイズ・色を選択
+2. 「ショート動画 (9:16) も生成」をチェックして Generate
+3. 出力された Shorts には字幕が焼き込まれ、そのまま YouTube Shorts / TikTok にアップロード可能
+4. 通常の横クリップ（landscape）は字幕が焼き込まれず、Premiere Pro で SRT キャプションを自由に調整できる状態のまま
+
+### YouTube 概要欄の自動チャプター
+1. Generate 完了後、Output タブ下部の「概要欄テキスト」にチャプター形式のタイムスタンプ一覧が表示される（例: `0:00 イントロ` / `3:42 ハイライト1` …）
+2. そのままコピーして YouTube アップロード時の概要欄に貼り付ける
+3. 先頭が必ず `0:00` から始まるため YouTube が自動でチャプターとして認識し、動画プレイヤー上にチャプターマーカーが表示される
+4. `output_*/chapters.txt` にも同じ内容が保存されている
             """)
 
     return app

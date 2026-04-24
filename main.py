@@ -6,6 +6,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from chapters import generate_chapter_text, write_chapter_file
 from config import FontConfig
 from downloader import is_youtube_url, download_video
 from transcriber import transcribe, segments_to_text
@@ -95,26 +96,34 @@ def main():
         custom_prompt=args.prompt,
     )
 
-    # Step 5: Extract clips
+    # Step 5: Extract clips (normal landscape, no subtitle burn-in — kept
+    # unburned so the Premiere Pro editing flow can style SRT captions freely)
     print("\n--- Clip Extraction ---")
     clips_dir = output_dir / "clips"
     clip_paths = extract_clips(video_path, highlights, clips_dir)
 
-    shorts_paths = []
-    if args.shorts:
-        print("\n--- Shorts Conversion (9:16) ---")
-        shorts_dir = output_dir / "shorts"
-        shorts_paths = extract_clips(video_path, highlights, shorts_dir, shorts=True)
-
-    # Step 6: Generate subtitles
+    # Step 6: Subtitles for clips (SRT, imported separately in Premiere)
     print("\n--- Subtitle Generation ---")
     srt_paths = generate_all_srts(segments, highlights, clips_dir)
     print(f"Generated {len(srt_paths)} SRT files")
 
-    if args.shorts and shorts_paths:
-        generate_all_srts(segments, highlights, output_dir / "shorts")
+    # Step 7: Shorts (9:16) with burned-in subtitles using font_config.
+    # SRT must be generated into shorts_dir first so the burn-in step can
+    # reference it via ffmpeg's subtitles filter.
+    shorts_paths = []
+    if args.shorts:
+        print("\n--- Shorts Conversion (9:16) with burned-in subtitles ---")
+        shorts_dir = output_dir / "shorts"
+        shorts_dir.mkdir(parents=True, exist_ok=True)
+        shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
+        shorts_paths = extract_clips(
+            video_path, highlights, shorts_dir,
+            shorts=True,
+            srt_paths=shorts_srt_paths,
+            font_config=font_config,
+        )
 
-    # Step 7: Export Premiere Pro XML
+    # Step 8: Export Premiere Pro XML
     print("\n--- Premiere Pro XML Export ---")
 
     if args.mode == "combined":
@@ -127,8 +136,6 @@ def main():
 
         if args.shorts and shorts_paths:
             shorts_xml_path = output_dir / "project_shorts.xml"
-            shorts_srt_paths = list((output_dir / "shorts").glob("*.srt"))
-            shorts_srt_paths.sort()
             shorts_video_info = {**video_info, "width": 1080, "height": 1920}
             generate_combined_xml(
                 shorts_paths, shorts_srt_paths, highlights, shorts_video_info,
@@ -142,13 +149,20 @@ def main():
         print(f"Individual XMLs: {len(xml_paths)} files")
 
         if args.shorts and shorts_paths:
-            shorts_srt_paths = list((output_dir / "shorts").glob("*.srt"))
-            shorts_srt_paths.sort()
             shorts_video_info = {**video_info, "width": 1080, "height": 1920}
             generate_individual_xmls(
                 shorts_paths, shorts_srt_paths, highlights,
                 shorts_video_info, output_dir / "shorts",
             )
+
+    # Step 9: Generate YouTube chapter description text (auto-chapter on upload)
+    print("\n--- Chapter Text (YouTube description) ---")
+    chapters_path = output_dir / "chapters.txt"
+    video_duration = float(video_info.get("duration", 0))
+    chapters_text = generate_chapter_text(highlights, video_duration=video_duration)
+    write_chapter_file(highlights, chapters_path, video_duration=video_duration)
+    print(chapters_text)
+    print(f"\nSaved: {chapters_path}")
 
     # Summary
     print("\n" + "=" * 50)
