@@ -621,10 +621,54 @@ def create_ui():
                             value=youtube_api.auth_status_summary(),
                             interactive=False,
                         )
+
+                        # --- Step 1: credentials.json setup (developer-side OAuth client) ---
+                        gr.HTML("<h4>① credentials.json を取得・配置</h4>")
+                        gr.HTML(
+                            "<p style='color:#666; margin-top:-0.5em;'>"
+                            "まだ無い場合は Google Cloud Console でデスクトップアプリ用の "
+                            "OAuth クライアントを作成し、ダウンロードした JSON をここにドロップしてください。</p>"
+                        )
+                        creds_upload = gr.File(
+                            label="credentials.json (ドラッグ＆ドロップ可)",
+                            file_types=[".json"],
+                            type="filepath",
+                        )
+                        with gr.Row():
+                            creds_open_console_btn = gr.Button(
+                                "Google Cloud Console を開く",
+                                variant="secondary",
+                            )
+                        creds_setup_msg = gr.Textbox(
+                            label="セットアップメッセージ",
+                            interactive=False,
+                            value="",
+                        )
+
+                        # --- Step 2: OAuth actions ---
+                        gr.HTML("<h4>② 認証アクション</h4>")
                         with gr.Row():
                             yt_auth_btn = gr.Button("認証する", variant="primary")
                             yt_revoke_btn = gr.Button("認証解除", variant="secondary")
                             yt_refresh_btn = gr.Button("ステータス更新", variant="secondary")
+
+                        def _yt_install_creds(src_path):
+                            msg = youtube_api.install_credentials_from_file(src_path)
+                            return msg, youtube_api.auth_status_summary()
+
+                        def _yt_open_console():
+                            import webbrowser
+                            try:
+                                webbrowser.open(youtube_api.GOOGLE_CLOUD_CONSOLE_URL)
+                                return (
+                                    "ブラウザで Google Cloud Console を開きました。\n"
+                                    "1) YouTube Data API v3 を『有効にする』\n"
+                                    "2) 左の『認証情報』→『認証情報を作成』→『OAuth クライアント ID』\n"
+                                    "3) アプリの種類: 『デスクトップアプリ』を選択して作成\n"
+                                    "4) ダウンロードした JSON を上の欄にドロップ"
+                                )
+                            except Exception as _e:
+                                return f"ブラウザ起動失敗: {_e} / URL: {youtube_api.GOOGLE_CLOUD_CONSOLE_URL}"
 
                         def _yt_do_auth():
                             try:
@@ -632,9 +676,8 @@ def create_ui():
                                 if not ok:
                                     return (
                                         "credentials.json が見つかりません。"
-                                        "Google Cloud Console で YouTube Data API v3 を有効化し、"
-                                        "OAuth クライアント (デスクトップアプリ) を作成、"
-                                        "credentials.json を clip-extractor/ に配置してください。"
+                                        "上の『credentials.json』欄にファイルをドロップしてから、"
+                                        "もう一度『認証する』を押してください。"
                                     )
                                 return youtube_api.auth_status_summary()
                             except Exception as _e:
@@ -648,6 +691,15 @@ def create_ui():
                         def _yt_do_refresh():
                             return youtube_api.auth_status_summary()
 
+                        creds_upload.upload(
+                            fn=_yt_install_creds,
+                            inputs=creds_upload,
+                            outputs=[creds_setup_msg, yt_auth_status_box],
+                        )
+                        creds_open_console_btn.click(
+                            fn=_yt_open_console,
+                            outputs=creds_setup_msg,
+                        )
                         yt_auth_btn.click(fn=_yt_do_auth, outputs=yt_auth_status_box)
                         yt_revoke_btn.click(fn=_yt_do_revoke, outputs=yt_auth_status_box)
                         yt_refresh_btn.click(fn=_yt_do_refresh, outputs=yt_auth_status_box)
@@ -769,12 +821,18 @@ def create_ui():
 4. `output_*/chapters.txt` にも同じ内容が保存されている
 
 ### 概要欄に自動追加 (YouTube API)
-1. Google Cloud Console で YouTube Data API v3 を有効化し、OAuth 2.0 クライアント（デスクトップアプリ）を作成
-2. ダウンロードした `credentials.json` を `clip-extractor/` フォルダに配置（Drive API と兼用可）
-3. Settings タブの「YouTube API 認証」セクションで「認証する」ボタンをクリック → ブラウザで承認 → `youtube_token.json` が自動生成される
-4. Input タブの「概要欄に自動追加」をチェックして Generate（URL 入力のみ対応、ローカルファイル時は自動スキップ）
-5. 該当動画の概要欄にタイムスタンプが prepend（先頭挿入）される
-6. scope は `youtube.force-ssl` — 自分がアップロード済みの動画のみ更新可能
+#### 初回セットアップ（UI 完結・手動コピー不要）
+1. Settings タブの「YouTube API 認証」セクションで「Google Cloud Console を開く」ボタンをクリック
+2. ブラウザで開かれたページから YouTube Data API v3 を**有効化**
+3. 左メニュー「認証情報」→「認証情報を作成」→「OAuth クライアント ID」→ アプリの種類で**デスクトップアプリ**を選択して作成
+4. ダウンロードされた `client_secret_*.json` を、Settings タブの「credentials.json」欄にドラッグ＆ドロップ（検証後に自動で正しい場所に配置されます）
+5. 「認証する」ボタン → ブラウザで Google アカウント承認 → `youtube_token.json` が自動生成
+6. Input タブの「概要欄に自動追加」をチェックして Generate
+
+#### 仕様
+- URL 入力のみ対応（ローカルファイル時は自動スキップ）
+- 該当動画の概要欄にタイムスタンプが prepend（先頭挿入）される
+- scope は `youtube.force-ssl` — 自分がアップロード済みの動画のみ更新可能
 
 ### 認証切れの挙動
 - 起動時にコンソールログへ状態が表示される（認証済み / 期限切れ / 未認証 / 未設定）

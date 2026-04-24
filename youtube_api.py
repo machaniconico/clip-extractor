@@ -9,7 +9,9 @@ Requires credentials.json (OAuth client secrets, shared with drive_upload.py)
 and stores the per-scope token in youtube_token.json.
 """
 
+import json
 import re
+import shutil
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -246,3 +248,68 @@ def auth_status_summary() -> str:
         err = s.get("error") or "token 不正"
         return f"要再認証: {err}"
     return "未認証: Settings タブで『認証する』を押してください"
+
+
+# ----- credentials.json install helpers (UI file-drop support) -----
+
+def validate_credentials_json(path: Path | str) -> tuple[bool, str]:
+    """Peek at a JSON file and tell whether it looks like an OAuth secrets file.
+
+    Returns (ok, message). When ok is False the message explains why so the
+    UI can surface it; when ok is True the message summarises what was found
+    (e.g. which project / client type) for confirmation.
+    """
+    path = Path(path)
+    if not path.exists():
+        return False, f"ファイルが見つかりません: {path}"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        return False, f"JSON として読めません: {e}"
+    except Exception as e:
+        return False, f"読込失敗: {e}"
+
+    # Google OAuth client secrets always have exactly one of these top-level
+    # keys. 'installed' = desktop / CLI apps (what we need).  'web' = hosted
+    # web apps and will not work with our local-server redirect flow.
+    if "installed" in data:
+        section = data["installed"]
+        client_type = "installed (desktop)"
+    elif "web" in data:
+        return False, (
+            "このクレデンシャルは Web アプリ用です。OAuth クライアント作成時に "
+            "『デスクトップアプリ』タイプを選び直してください。"
+        )
+    else:
+        return False, "OAuth クライアント構造ではありません (installed キーが見当たらない)"
+
+    for required in ("client_id", "client_secret"):
+        if required not in section:
+            return False, f"必須フィールド {required!r} がありません"
+
+    project_id = section.get("project_id", "(project_id なし)")
+    return True, f"有効な credentials.json — type: {client_type}, project: {project_id}"
+
+
+def install_credentials_from_file(src_path: Path | str) -> str:
+    """Validate and copy an uploaded credentials.json into CREDENTIALS_PATH.
+
+    Returns a human-readable status message describing the outcome. Never
+    raises — UI handlers render the string directly."""
+    if src_path is None:
+        return "ファイルが選択されていません"
+    ok, detail = validate_credentials_json(src_path)
+    if not ok:
+        return f"配置を中止: {detail}"
+    try:
+        shutil.copy2(str(src_path), str(CREDENTIALS_PATH))
+    except Exception as e:
+        return f"ファイルコピー失敗: {e}"
+    return f"配置完了: {detail}. 次は『認証する』ボタンを押してください。"
+
+
+# Deep link to the YouTube Data API v3 library page so users only have to
+# click "Enable" rather than hunt for the API in the console.
+GOOGLE_CLOUD_CONSOLE_URL = (
+    "https://console.cloud.google.com/apis/library/youtube.googleapis.com"
+)

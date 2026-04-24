@@ -178,6 +178,117 @@ def test_auth_status_summary_unauthenticated():
         youtube_api.TOKEN_PATH = orig_tok
 
 
+def test_validate_credentials_json_missing_file():
+    import tempfile
+    from youtube_api import validate_credentials_json
+    with tempfile.TemporaryDirectory() as td:
+        missing = Path(td) / "nope.json"
+        ok, msg = validate_credentials_json(missing)
+        assert ok is False
+        assert "見つかりません" in msg
+
+
+def test_validate_credentials_json_malformed():
+    import tempfile
+    from youtube_api import validate_credentials_json
+    with tempfile.TemporaryDirectory() as td:
+        bad = Path(td) / "bad.json"
+        bad.write_text("not json at all", encoding="utf-8")
+        ok, msg = validate_credentials_json(bad)
+        assert ok is False
+        assert "JSON" in msg
+
+
+def test_validate_credentials_json_web_client_rejected():
+    import tempfile
+    from youtube_api import validate_credentials_json
+    with tempfile.TemporaryDirectory() as td:
+        web = Path(td) / "web.json"
+        web.write_text(
+            '{"web": {"client_id": "x", "client_secret": "y"}}',
+            encoding="utf-8",
+        )
+        ok, msg = validate_credentials_json(web)
+        assert ok is False
+        assert "Web" in msg or "デスクトップ" in msg
+
+
+def test_validate_credentials_json_desktop_happy():
+    import tempfile
+    from youtube_api import validate_credentials_json
+    with tempfile.TemporaryDirectory() as td:
+        good = Path(td) / "good.json"
+        good.write_text(
+            '{"installed": {"client_id": "id", "client_secret": "sec", "project_id": "p-1"}}',
+            encoding="utf-8",
+        )
+        ok, msg = validate_credentials_json(good)
+        assert ok is True
+        assert "installed" in msg
+        assert "p-1" in msg
+
+
+def test_validate_credentials_json_missing_client_secret():
+    import tempfile
+    from youtube_api import validate_credentials_json
+    with tempfile.TemporaryDirectory() as td:
+        partial = Path(td) / "part.json"
+        partial.write_text(
+            '{"installed": {"client_id": "id"}}',
+            encoding="utf-8",
+        )
+        ok, msg = validate_credentials_json(partial)
+        assert ok is False
+        assert "client_secret" in msg
+
+
+def test_install_credentials_from_file_copies_and_reports():
+    import tempfile
+    import youtube_api
+    orig_creds = youtube_api.CREDENTIALS_PATH
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "user_creds.json"
+            src.write_text(
+                '{"installed": {"client_id": "id", "client_secret": "sec"}}',
+                encoding="utf-8",
+            )
+            dest = Path(td) / "credentials.json"
+            youtube_api.CREDENTIALS_PATH = dest
+            msg = youtube_api.install_credentials_from_file(src)
+            assert "配置完了" in msg, f"unexpected message: {msg!r}"
+            assert dest.exists(), "destination file must be written"
+            assert dest.read_text(encoding="utf-8") == src.read_text(encoding="utf-8")
+    finally:
+        youtube_api.CREDENTIALS_PATH = orig_creds
+
+
+def test_install_credentials_from_file_rejects_none():
+    from youtube_api import install_credentials_from_file
+    msg = install_credentials_from_file(None)
+    assert "選択されていません" in msg
+
+
+def test_install_credentials_from_file_rejects_web_client():
+    import tempfile
+    import youtube_api
+    orig_creds = youtube_api.CREDENTIALS_PATH
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "web.json"
+            src.write_text(
+                '{"web": {"client_id": "id", "client_secret": "sec"}}',
+                encoding="utf-8",
+            )
+            dest = Path(td) / "credentials.json"
+            youtube_api.CREDENTIALS_PATH = dest
+            msg = youtube_api.install_credentials_from_file(src)
+            assert "中止" in msg
+            assert not dest.exists(), "destination must not be touched on rejection"
+    finally:
+        youtube_api.CREDENTIALS_PATH = orig_creds
+
+
 def run_all():
     test_extract_id_standard_watch_url()
     test_extract_id_short_url()
@@ -197,6 +308,14 @@ def run_all():
     test_revoke_auth_with_existing_token()
     test_auth_status_summary_not_configured()
     test_auth_status_summary_unauthenticated()
+    test_validate_credentials_json_missing_file()
+    test_validate_credentials_json_malformed()
+    test_validate_credentials_json_web_client_rejected()
+    test_validate_credentials_json_desktop_happy()
+    test_validate_credentials_json_missing_client_secret()
+    test_install_credentials_from_file_copies_and_reports()
+    test_install_credentials_from_file_rejects_none()
+    test_install_credentials_from_file_rejects_web_client()
     print("All tests passed")
 
 
