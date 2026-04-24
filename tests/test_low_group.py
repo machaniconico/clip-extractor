@@ -3,7 +3,8 @@
 Covers:
 - downloader.build_output_template — byte-limited title to keep Windows
   MAX_PATH safe with Japanese titles.
-- web_app.load_gemini_api_key — env var beats the on-disk .gemini_key file.
+- web_app.load_gemini_api_key — file-first precedence: the app-specific
+  .gemini_key file wins over a system-wide GEMINI_API_KEY env var.
 """
 
 import os
@@ -48,7 +49,10 @@ def test_output_template_respects_output_dir():
 
 # ---- web_app.load_gemini_api_key ---------------------------------------
 
-def test_gemini_key_env_var_wins_over_file():
+def test_gemini_key_file_wins_over_env():
+    """File-first precedence: .gemini_key is app-specific intent, so it
+    must override a system-wide GEMINI_API_KEY that may belong to an
+    unrelated project. Changed from env-first in an earlier version."""
     import web_app
 
     with tempfile.TemporaryDirectory() as td:
@@ -57,7 +61,19 @@ def test_gemini_key_env_var_wins_over_file():
         with mock.patch.object(web_app, "GEMINI_KEY_FILE", fake_file):
             with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "from-env"}, clear=False):
                 got = web_app.load_gemini_api_key()
-        assert got == "from-env", f"expected env to win, got {got!r}"
+        assert got == "from-file", f"expected file to win, got {got!r}"
+
+
+def test_gemini_key_env_used_when_no_file():
+    """When .gemini_key is absent, fall back to the env var."""
+    import web_app
+
+    with tempfile.TemporaryDirectory() as td:
+        missing_file = Path(td) / ".gemini_key_absent"
+        with mock.patch.object(web_app, "GEMINI_KEY_FILE", missing_file):
+            with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "from-env"}, clear=False):
+                got = web_app.load_gemini_api_key()
+        assert got == "from-env", f"expected env fallback, got {got!r}"
 
 
 def test_gemini_key_falls_back_to_file():
@@ -115,7 +131,8 @@ def run_all():
     test_output_template_uses_byte_limit()
     test_output_template_default_byte_limit_is_100()
     test_output_template_respects_output_dir()
-    test_gemini_key_env_var_wins_over_file()
+    test_gemini_key_file_wins_over_env()
+    test_gemini_key_env_used_when_no_file()
     test_gemini_key_falls_back_to_file()
     test_gemini_key_empty_env_falls_back_to_file()
     test_gemini_key_returns_empty_when_nothing_available()

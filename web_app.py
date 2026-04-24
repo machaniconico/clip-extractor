@@ -90,18 +90,22 @@ GEMINI_KEY_FILE = Path(__file__).parent / ".gemini_key"
 
 
 def load_gemini_api_key(env_var: str = "GEMINI_API_KEY") -> str:
-    """Return the Gemini API key, preferring the environment variable.
+    """Return the Gemini API key.
 
-    Env var > on-disk file. This lets CI / secret managers override the
-    saved file without editing it, and keeps the key out of the project
-    tree entirely when the env var is set. Falls back to the legacy
-    .gemini_key file so existing installs keep working untouched.
+    File-first precedence: .gemini_key > env var > empty. The file
+    represents a key the user explicitly saved via the UI for this
+    specific install, so it wins over a system-wide environment
+    variable that may belong to a different project entirely. Env var
+    is kept as a fallback so CI / fresh installs without a saved file
+    still work.
     """
+    if GEMINI_KEY_FILE.exists():
+        saved = GEMINI_KEY_FILE.read_text(encoding="utf-8").strip()
+        if saved:
+            return saved
     val = os.environ.get(env_var, "").strip()
     if val:
         return val
-    if GEMINI_KEY_FILE.exists():
-        return GEMINI_KEY_FILE.read_text(encoding="utf-8").strip()
     return ""
 
 
