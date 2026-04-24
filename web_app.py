@@ -105,6 +105,28 @@ def load_gemini_api_key(env_var: str = "GEMINI_API_KEY") -> str:
     return ""
 
 
+def save_gemini_api_key(key_text: str) -> None:
+    """Persist the Gemini API key to GEMINI_KEY_FILE, or delete the file
+    when the textbox is cleared.
+
+    Uses gr.Info / gr.Warning for feedback since this is wired to a
+    Gradio button click. Never raises — a failed write surfaces as a
+    warning toast, keeping the UI responsive.
+    """
+    text = (key_text or "").strip()
+    try:
+        if text:
+            GEMINI_KEY_FILE.write_text(text, encoding="utf-8")
+            gr.Info("API キーを .gemini_key に保存しました。次回起動時から自動で読み込まれます。")
+        elif GEMINI_KEY_FILE.exists():
+            GEMINI_KEY_FILE.unlink()
+            gr.Info("API キーをクリアしました (.gemini_key を削除)。")
+        else:
+            gr.Warning("保存する API キーが空です。textbox にキーを入力してから押してください。")
+    except Exception as exc:
+        gr.Warning(f"API キーの保存に失敗しました: {exc}")
+
+
 def load_defaults() -> dict:
     """Load saved default settings."""
     defaults = {
@@ -739,7 +761,17 @@ def create_ui():
                             value=saved_api_key,
                             placeholder="OpenAI / Gemini のAPIキーを入力",
                             type="password",
-                            info="Claudeの場合は不要 (CLI使用)",
+                            info="Claudeの場合は不要 (CLI使用)。下の『保存』ボタンで .gemini_key に書き出すと 次回起動時から自動読み込みされます。",
+                        )
+                        save_api_key_btn = gr.Button(
+                            "💾 このキーを保存 (.gemini_key)",
+                            variant="secondary",
+                            size="sm",
+                        )
+                        save_api_key_btn.click(
+                            fn=save_gemini_api_key,
+                            inputs=api_key,
+                            outputs=None,
                         )
 
                         def update_models(provider):
