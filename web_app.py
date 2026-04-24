@@ -688,9 +688,11 @@ def create_ui():
                         )
 
                     with gr.Column(scale=1):
-                        num_clips = gr.Slider(
-                            minimum=1, maximum=10, value=defaults["num_clips"], step=1,
+                        num_clips = gr.Number(
+                            minimum=1, maximum=50, value=defaults["num_clips"],
+                            precision=0,
                             label="クリップ数",
+                            info="1〜50 個。大きくしすぎると面白くないシーンも混ざりやすくなります (推奨: 3〜10)",
                         )
                         output_mode = gr.Radio(
                             choices=["combined", "individual"],
