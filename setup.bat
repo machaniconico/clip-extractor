@@ -151,8 +151,8 @@ echo [OK] CUDA libraries installed (if GPU available)
 :: 7. Desktop shortcut
 :: ==========================================
 echo.
-echo [7/7] Creating desktop shortcut...
-powershell -NoProfile -Command "try { $desktop = [Environment]::GetFolderPath('Desktop'); $ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut(\"$desktop\Clip Extractor.lnk\"); $sc.TargetPath = '%~dp0Clip Extractor.bat'; $sc.WorkingDirectory = '%~dp0'; $sc.Save(); Write-Host '[OK] Desktop shortcut created' } catch { Write-Host '[WARN] Could not create shortcut:' $_.Exception.Message }"
+echo [7/7] Creating desktop shortcut with icon...
+powershell -NoProfile -Command "try { $desktop = [Environment]::GetFolderPath('Desktop'); $ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut(\"$desktop\Clip Extractor.lnk\"); $sc.TargetPath = '%~dp0Clip Extractor.bat'; $sc.WorkingDirectory = '%~dp0'; $iconPath = '%~dp0assets\icon.ico'; if (Test-Path $iconPath) { $sc.IconLocation = $iconPath } else { Write-Host '[WARN] assets\icon.ico not found, using default icon' }; $sc.Description = 'Clip Extractor - highlight detection + video clipping'; $sc.Save(); Write-Host '[OK] Desktop shortcut created with icon' } catch { Write-Host '[WARN] Could not create shortcut:' $_.Exception.Message }"
 
 echo.
 echo ==========================================
