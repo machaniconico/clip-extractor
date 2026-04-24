@@ -1,42 +1,31 @@
-"""Google Drive upload module."""
+"""Google Drive upload module.
 
-import json
+OAuth plumbing lives in _google_auth; this module is a thin Drive-specific
+wrapper over it. Token + credentials live in the user's per-OS config
+directory (see _google_auth.get_user_config_dir).
+"""
+
 from pathlib import Path
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+import _google_auth
+
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-TOKEN_PATH = Path(__file__).parent / "token.json"
-CREDENTIALS_PATH = Path(__file__).parent / "credentials.json"
+
+# Migrate legacy files from the project root (one-shot, idempotent).
+_google_auth.migrate_legacy_file("token.json")
+_google_auth.migrate_legacy_file("credentials.json")
+
+TOKEN_PATH = _google_auth.get_user_config_dir() / "token.json"
+CREDENTIALS_PATH = _google_auth.get_user_config_dir() / "credentials.json"
 
 
 def get_drive_service():
     """Authenticate and return Google Drive service."""
-    creds = None
-
-    if TOKEN_PATH.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not CREDENTIALS_PATH.exists():
-                raise FileNotFoundError(
-                    "credentials.json が見つかりません。\n"
-                    "Google Cloud Console から OAuth 2.0 クライアントIDの認証情報をダウンロードし、\n"
-                    f"{CREDENTIALS_PATH} に配置してください。"
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
-            creds = flow.run_local_server(port=0)
-
-        TOKEN_PATH.write_text(creds.to_json())
-
-    return build("drive", "v3", credentials=creds)
+    return _google_auth.build_authenticated_service(
+        "drive", "v3", SCOPES, TOKEN_PATH, CREDENTIALS_PATH,
+    )
 
 
 def create_folder(service, folder_name: str, parent_id: str = None) -> str:

@@ -57,7 +57,7 @@ def main():
     parser.add_argument("--youtube-setup", action="store_true",
                         help="YouTube OAuth 認証を実行して終了 (初回セットアップ)")
     parser.add_argument("--youtube-revoke", action="store_true",
-                        help="YouTube 認証を解除 (youtube_token.json を削除)")
+                        help="YouTube 認証を解除 (ユーザー設定ディレクトリの youtube_token.json を削除)")
     parser.add_argument("--youtube-status", action="store_true",
                         help="現在の YouTube 認証ステータスを表示して終了")
 
@@ -80,9 +80,13 @@ def main():
             print(f"認証失敗: {setup_err}", file=sys.stderr)
             sys.exit(1)
         if not ok:
-            print("credentials.json が見つかりません。Google Cloud Console から "
-                  "OAuth クライアントを作成して clip-extractor/ に配置してください。",
-                  file=sys.stderr)
+            print(
+                "credentials.json が見つかりません。Google Cloud Console から "
+                "OAuth クライアント (デスクトップアプリ) を作成し、\n"
+                f"  {youtube_api.CREDENTIALS_PATH}\n"
+                "に配置してください (Settings UI 経由のドロップでも可)。",
+                file=sys.stderr,
+            )
             sys.exit(1)
         print("YouTube 認証完了:", youtube_api.auth_status_summary())
         sys.exit(0)

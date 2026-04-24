@@ -627,7 +627,8 @@ def create_ui():
                         gr.HTML(
                             "<p style='color:#666; margin-top:-0.5em;'>"
                             "まだ無い場合は Google Cloud Console でデスクトップアプリ用の "
-                            "OAuth クライアントを作成し、ダウンロードした JSON をここにドロップしてください。</p>"
+                            "OAuth クライアントを作成し、ダウンロードした JSON をここにドロップしてください。<br/>"
+                            f"<small>保存先 (OS ユーザー設定ディレクトリ): <code>{youtube_api.CREDENTIALS_PATH}</code></small></p>"
                         )
                         creds_upload = gr.File(
                             label="credentials.json (ドラッグ＆ドロップ可)",
@@ -799,7 +800,7 @@ def create_ui():
 1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクト作成
 2. Drive API を有効化
 3. OAuth 2.0 クライアントID（デスクトップアプリ）を作成
-4. `credentials.json` をダウンロードして `clip-extractor/` フォルダに配置
+4. `credentials.json` をダウンロードして Settings タブの「credentials.json」欄にドラッグ＆ドロップ（ユーザー設定ディレクトリ `%APPDATA%/clip-extractor/`（Windows）/ `~/.config/clip-extractor/`（Linux）/ `~/Library/Application Support/clip-extractor/`（macOS）に自動配置）
 5. 初回実行時にブラウザで認証
 
 ### 生成モード（切り抜き / 概要欄 の独立選択）
@@ -826,7 +827,7 @@ def create_ui():
 2. ブラウザで開かれたページから YouTube Data API v3 を**有効化**
 3. 左メニュー「認証情報」→「認証情報を作成」→「OAuth クライアント ID」→ アプリの種類で**デスクトップアプリ**を選択して作成
 4. ダウンロードされた `client_secret_*.json` を、Settings タブの「credentials.json」欄にドラッグ＆ドロップ（検証後に自動で正しい場所に配置されます）
-5. 「認証する」ボタン → ブラウザで Google アカウント承認 → `youtube_token.json` が自動生成
+5. 「認証する」ボタン → ブラウザで Google アカウント承認 → `youtube_token.json` がユーザー設定ディレクトリに自動生成（`%APPDATA%/clip-extractor/` などプロジェクト外で管理）
 6. Input タブの「概要欄に自動追加」をチェックして Generate
 
 #### 仕様
