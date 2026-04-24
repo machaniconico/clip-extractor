@@ -298,25 +298,25 @@ def process_video(
             if output_mode == "combined":
                 xml_path = output_dir / "project.xml"
                 generate_combined_xml(
-                    clip_paths, srt_paths, highlights, video_info, xml_path,
+                    clip_paths, highlights, video_info, xml_path,
                     project_name=video_path.stem,
                 )
                 if generate_shorts and shorts_paths:
                     shorts_video_info = {**video_info, "width": 1080, "height": 1920}
                     generate_combined_xml(
-                        shorts_paths, shorts_srt_paths, highlights, shorts_video_info,
+                        shorts_paths, highlights, shorts_video_info,
                         output_dir / "project_shorts.xml",
                         project_name=f"{video_path.stem}_shorts",
                     )
                 log("  Premiere Pro XML (combined mode) exported")
             else:
                 generate_individual_xmls(
-                    clip_paths, srt_paths, highlights, video_info, clips_dir,
+                    clip_paths, highlights, video_info, clips_dir,
                 )
                 if generate_shorts and shorts_paths:
                     shorts_video_info = {**video_info, "width": 1080, "height": 1920}
                     generate_individual_xmls(
-                        shorts_paths, shorts_srt_paths, highlights,
+                        shorts_paths, highlights,
                         shorts_video_info, output_dir / "shorts",
                     )
                 log("  Premiere Pro XML (individual mode) exported")

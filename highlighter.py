@@ -65,7 +65,12 @@ def _call_claude(user_prompt):
 
 
 def _call_openai(user_prompt, api_key, model="gpt-4.1"):
-    """Call OpenAI ChatGPT API."""
+    """Call OpenAI ChatGPT API.
+
+    `response_format={"type": "json_object"}` forces JSON output — this
+    makes the response guaranteed-parseable by `json.loads` without
+    relying on regex cleanup.
+    """
     try:
         from openai import OpenAI
     except ImportError:
@@ -73,19 +78,38 @@ def _call_openai(user_prompt, api_key, model="gpt-4.1"):
 
     print(f"Analyzing transcript with OpenAI ({model})...")
     client = OpenAI(api_key=api_key)
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.3,
-    )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+            response_format={"type": "json_object"},
+        )
+    except Exception:
+        # Some older chat models (or custom-compatible endpoints) don't
+        # support response_format; retry without it and fall back on the
+        # downstream JSON extractor.
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.3,
+        )
     return response.choices[0].message.content
 
 
 def _call_gemini(user_prompt, api_key, model="gemini-3-flash-preview"):
-    """Call Google Gemini API."""
+    """Call Google Gemini API.
+
+    `response_mime_type="application/json"` asks Gemini 1.5+ to emit a
+    single JSON value with no prose. Models that don't support it raise
+    at request time — we retry plain and fall back on _extract_json_object.
+    """
     try:
         import google.generativeai as genai
     except ImportError:
@@ -97,8 +121,73 @@ def _call_gemini(user_prompt, api_key, model="gemini-3-flash-preview"):
         model_name=model,
         system_instruction=SYSTEM_PROMPT,
     )
-    response = gmodel.generate_content(user_prompt)
+    try:
+        response = gmodel.generate_content(
+            user_prompt,
+            generation_config={"response_mime_type": "application/json"},
+        )
+    except Exception:
+        response = gmodel.generate_content(user_prompt)
     return response.text
+
+
+def _extract_json_object(text: str | None) -> dict | None:
+    """Pull the first complete JSON object out of arbitrary LLM text.
+
+    Strategies (in order):
+      1. ```json ... ``` / ``` ... ``` code fence (common with chat models
+         that ignore instructions to "output JSON only")
+      2. Balanced-brace scan from each '{' — tolerates strings containing
+         braces, escaped quotes, and multiple JSON objects in one reply
+         (picks the first that parses)
+
+    Returns None when no parseable object is found. Never raises."""
+    if not text:
+        return None
+
+    # Try code fences first — LLMs often wrap JSON in fences even when asked not to
+    for pattern in (r"```json\s*\n?(.*?)\n?```", r"```\s*\n?(.*?)\n?```"):
+        m = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        if m:
+            candidate = m.group(1).strip()
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass  # fall through
+
+    # Balanced-brace scan — handles nested objects, strings with `{`/`}`,
+    # and multiple JSON objects (picks the first valid one).
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i in range(start, len(text)):
+            c = text[i]
+            if escape_next:
+                escape_next = False
+                continue
+            if in_string:
+                if c == "\\":
+                    escape_next = True
+                elif c == '"':
+                    in_string = False
+                continue
+            if c == '"':
+                in_string = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:i + 1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break  # this `{` block was malformed; try the next one
+        start = text.find("{", start + 1)
+
+    return None
 
 
 def detect_highlights(
@@ -123,25 +212,43 @@ def detect_highlights(
     else:
         response_text = _call_claude(user_prompt)
 
-    # Extract JSON from response
-    json_match = re.search(r'\{[\s\S]*\}', response_text)
-    if not json_match:
-        raise ValueError("AI did not return valid JSON")
+    data = _extract_json_object(response_text)
+    if data is None:
+        snippet = (response_text or "")[:300]
+        raise ValueError(
+            f"AI did not return parseable JSON. Response snippet: {snippet!r}"
+        )
 
-    data = json.loads(json_match.group())
-    highlights = data.get("highlights", [])
+    raw_highlights = data.get("highlights", [])
+    valid_highlights: list[dict] = []
+    for h in raw_highlights:
+        if not isinstance(h, dict):
+            print(f"[Warn] skipping non-dict highlight: {h!r}")
+            continue
+        if "start" not in h or "end" not in h:
+            print(f"[Warn] skipping highlight missing start/end keys: {h!r}")
+            continue
+        try:
+            h["start_sec"] = _parse_timestamp(h["start"])
+            h["end_sec"] = _parse_timestamp(h["end"])
+            h["duration"] = h["end_sec"] - h["start_sec"]
+        except (ValueError, TypeError) as e:
+            print(f"[Warn] skipping highlight with bad timestamp ({e}): {h!r}")
+            continue
+        h.setdefault("title", "")
+        h.setdefault("reason", "")
+        valid_highlights.append(h)
 
-    # Parse timestamps to seconds
-    for h in highlights:
-        h["start_sec"] = _parse_timestamp(h["start"])
-        h["end_sec"] = _parse_timestamp(h["end"])
-        h["duration"] = h["end_sec"] - h["start_sec"]
+    if not valid_highlights:
+        raise ValueError(
+            f"AI returned JSON but no valid highlights (keys: {list(data.keys())})"
+        )
 
-    print(f"Found {len(highlights)} highlights:")
-    for i, h in enumerate(highlights, 1):
+    print(f"Found {len(valid_highlights)} highlights:")
+    for i, h in enumerate(valid_highlights, 1):
         print(f"  {i}. [{h['start']} -> {h['end']}] {h['title']} ({h['duration']:.0f}s)")
 
-    return highlights
+    return valid_highlights
 
 
 def _parse_timestamp(ts: str) -> float:

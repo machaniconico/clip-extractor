@@ -133,9 +133,11 @@ def update_video_description(
         "id": video_id,
         "snippet": {
             # title + categoryId are required by videos.update — the API
-            # rejects snippet updates that omit either with HTTP 400.
-            "title": snippet["title"],
-            "categoryId": snippet["categoryId"],
+            # rejects snippet updates that omit either with HTTP 400. The
+            # `get` fallback to "22" (People & Blogs) covers rare private-
+            # video responses where YouTube omits categoryId in the snippet.
+            "title": snippet.get("title", ""),
+            "categoryId": snippet.get("categoryId", "22"),
             "description": new_desc,
         },
     }

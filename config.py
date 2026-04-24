@@ -18,7 +18,9 @@ DEFAULT_FONT_CONFIG = {
 @dataclass
 class FontConfig:
     font_name: str = "Noto Sans JP"
-    font_size: int = 48
+    # 96 is tuned for 1080×1920 Shorts; matches default_settings.json and
+    # DEFAULT_FONT_CONFIG (the previous 48 default was a stale leftover).
+    font_size: int = 96
     font_color: str = "#FFFFFF"
     outline_color: str = "#000000"
     outline_width: int = 3

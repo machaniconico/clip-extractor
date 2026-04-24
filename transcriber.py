@@ -7,10 +7,25 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Add NVIDIA CUDA DLL paths so faster-whisper can find cublas64_12.dll etc.
-for _nvidia_dir in Path(os.path.dirname(os.__file__)).glob("site-packages/nvidia/*/bin"):
-    os.add_dll_directory(str(_nvidia_dir))
-    if str(_nvidia_dir) not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = str(_nvidia_dir) + os.pathsep + os.environ.get("PATH", "")
+# The previous implementation globbed from os.__file__, which points to stdlib
+# (not site-packages) under venvs / embeddable Python / Anaconda — the glob
+# silently returned zero matches and the GPU was falsely marked unavailable.
+# importlib.util.find_spec resolves the real site-packages location wherever
+# `nvidia` was actually installed (base install or venv).
+import importlib.util as _importlib_util
+_nvidia_spec = _importlib_util.find_spec("nvidia")
+if _nvidia_spec and _nvidia_spec.submodule_search_locations:
+    _nvidia_root = Path(_nvidia_spec.submodule_search_locations[0])
+    for _nvidia_dir in _nvidia_root.glob("*/bin"):
+        if _nvidia_dir.is_dir():
+            try:
+                os.add_dll_directory(str(_nvidia_dir))
+            except (AttributeError, OSError):
+                # add_dll_directory is Windows-only (Python 3.8+); other
+                # platforms rely on LD_LIBRARY_PATH instead.
+                pass
+            if str(_nvidia_dir) not in os.environ.get("PATH", ""):
+                os.environ["PATH"] = str(_nvidia_dir) + os.pathsep + os.environ.get("PATH", "")
 
 from faster_whisper import WhisperModel
 from tqdm import tqdm

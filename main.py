@@ -215,7 +215,7 @@ def main():
         if args.mode == "combined":
             xml_path = output_dir / "project.xml"
             generate_combined_xml(
-                clip_paths, srt_paths, highlights, video_info, xml_path,
+                clip_paths, highlights, video_info, xml_path,
                 project_name=video_path.stem,
             )
             print(f"Combined XML: {xml_path}")
@@ -224,20 +224,20 @@ def main():
                 shorts_xml_path = output_dir / "project_shorts.xml"
                 shorts_video_info = {**video_info, "width": 1080, "height": 1920}
                 generate_combined_xml(
-                    shorts_paths, shorts_srt_paths, highlights, shorts_video_info,
+                    shorts_paths, highlights, shorts_video_info,
                     shorts_xml_path, project_name=f"{video_path.stem}_shorts",
                 )
                 print(f"Shorts XML: {shorts_xml_path}")
         else:
             xml_paths = generate_individual_xmls(
-                clip_paths, srt_paths, highlights, video_info, clips_dir,
+                clip_paths, highlights, video_info, clips_dir,
             )
             print(f"Individual XMLs: {len(xml_paths)} files")
 
             if args.shorts and shorts_paths:
                 shorts_video_info = {**video_info, "width": 1080, "height": 1920}
                 generate_individual_xmls(
-                    shorts_paths, shorts_srt_paths, highlights,
+                    shorts_paths, highlights,
                     shorts_video_info, output_dir / "shorts",
                 )
 
@@ -271,24 +271,30 @@ def main():
             except Exception as yt_err:
                 print(f"[Warn] YouTube 概要欄更新失敗: {yt_err} (他の出力は維持されています)", file=sys.stderr)
 
-    # Summary
+    # Summary — show clip-side guidance only when clips were actually
+    # produced; otherwise point the user at chapters.txt.
     print("\n" + "=" * 50)
     print("Done!")
     print(f"Output: {output_dir}")
-    print(f"Clips: {len(clip_paths)} files")
-    if shorts_paths:
-        print(f"Shorts: {len(shorts_paths)} files")
-    print(f"SRT: {len(srt_paths)} files")
-    print(f"Mode: {args.mode}")
-    print()
-    print("Premiere Proで開く:")
-    if args.mode == "combined":
-        print(f"  File > Import > {output_dir / 'project.xml'}")
-    else:
-        print(f"  File > Import > {clips_dir}/*.xml")
-    print()
-    print("SRT字幕の読み込み:")
-    print("  File > Import > *.srt (キャプショントラックとして読み込み)")
+    if modes.enable_clips:
+        print(f"Clips: {len(clip_paths)} files")
+        if shorts_paths:
+            print(f"Shorts: {len(shorts_paths)} files")
+        print(f"SRT: {len(srt_paths)} files")
+        print(f"Mode: {args.mode}")
+        print()
+        print("Premiere Proで開く:")
+        if args.mode == "combined":
+            print(f"  File > Import > {output_dir / 'project.xml'}")
+        else:
+            print(f"  File > Import > {clips_dir}/*.xml")
+        print()
+        print("SRT字幕の読み込み:")
+        print("  File > Import > *.srt (キャプショントラックとして読み込み)")
+    if modes.enable_chapters and chapters_text:
+        print()
+        print("タイムスタンプ (概要欄):")
+        print(f"  {output_dir / 'chapters.txt'} の内容をYouTubeの概要欄に貼り付け")
     print("=" * 50)
 
 
