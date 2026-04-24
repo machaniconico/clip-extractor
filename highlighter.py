@@ -103,7 +103,7 @@ def _call_openai(user_prompt, api_key, model="gpt-4.1"):
     return response.choices[0].message.content
 
 
-def _call_gemini(user_prompt, api_key, model="gemini-3-flash-preview"):
+def _call_gemini(user_prompt, api_key, model="gemini-2.5-flash"):
     """Call Google Gemini API.
 
     `response_mime_type="application/json"` asks Gemini 1.5+ to emit a
@@ -207,7 +207,7 @@ def detect_highlights(
         model = ai_model or "gpt-4.1"
         response_text = _call_openai(user_prompt, api_key, model)
     elif ai_provider == "gemini":
-        model = ai_model or "gemini-3-flash-preview"
+        model = ai_model or "gemini-2.5-flash"
         response_text = _call_gemini(user_prompt, api_key, model)
     else:
         response_text = _call_claude(user_prompt)

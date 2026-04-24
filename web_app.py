@@ -134,7 +134,7 @@ def save_gemini_api_key(key_text: str) -> None:
 def load_defaults() -> dict:
     """Load saved default settings."""
     defaults = {
-        "ai_provider": "gemini", "ai_model": "gemini-3-flash-preview",
+        "ai_provider": "gemini", "ai_model": "gemini-2.5-flash",
         "enable_clips": True, "enable_chapters": True,
         "clip_prompt": "", "chapter_prompt": "",
         "auto_append_youtube": False,
@@ -757,7 +757,7 @@ def create_ui():
                             value="",
                             label="モデル",
                             allow_custom_value=True,
-                            info="空欄でデフォルト (Claude=CLI, OpenAI=gpt-4.1, Gemini=gemini-3-flash-preview)",
+                            info="空欄でデフォルト (Claude=CLI, OpenAI=gpt-4.1, Gemini=gemini-2.5-flash)",
                         )
                         saved_api_key = load_gemini_api_key()
                         api_key = gr.Textbox(
@@ -782,7 +782,7 @@ def create_ui():
                             if provider == "openai":
                                 return gr.update(choices=["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o4-mini", "o3", "o3-mini"], value="gpt-4.1")
                             elif provider == "gemini":
-                                return gr.update(choices=["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"], value="gemini-3-flash-preview")
+                                return gr.update(choices=["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"], value="gemini-2.5-flash")
                             else:
                                 return gr.update(choices=[], value="")
 
