@@ -38,9 +38,18 @@ def download_video(url: str, output_dir: Path) -> Path:
     print(f"Downloading: {url}")
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
-        filepath = ydl.prepare_filename(info)
-        # Ensure .mp4 extension after merge
-        filepath = Path(filepath).with_suffix(".mp4")
+        filepath = Path(ydl.prepare_filename(info))
+
+    # merge_output_format=mp4 normally produces a .mp4 sibling; if it does,
+    # prefer it. Otherwise fall back to whatever yt-dlp actually wrote so we
+    # never return a path that does not exist on disk.
+    merged = filepath.with_suffix(".mp4")
+    if merged.exists():
+        filepath = merged
+    elif not filepath.exists():
+        raise FileNotFoundError(
+            f"yt-dlp reported success but neither {merged} nor {filepath} exists."
+        )
 
     print(f"Downloaded: {filepath}")
     return filepath

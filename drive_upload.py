@@ -87,17 +87,23 @@ def upload_output_directory(output_dir: Path, drive_folder_name: str = None) -> 
     main_folder_id = create_folder(service, drive_folder_name)
     uploaded = {"folder_name": drive_folder_name, "files": []}
 
+    # Cache subfolder ids keyed by their relative tuple-path so we don't
+    # create the same folder (e.g. "clips") once per file inside it.
+    folder_cache: dict[tuple, str] = {(): main_folder_id}
+
     # Upload all files recursively
     for file_path in sorted(output_dir.rglob("*")):
         if file_path.is_file():
-            # Determine parent folder
             rel_path = file_path.relative_to(output_dir)
-            parent_id = main_folder_id
+            parts = rel_path.parts[:-1]  # directory parts only
 
-            # Create subfolders if needed
-            if len(rel_path.parts) > 1:
-                for part in rel_path.parts[:-1]:
-                    parent_id = create_folder(service, part, parent_id)
+            # Walk/create folders, caching each intermediate id
+            parent_id = main_folder_id
+            for depth in range(1, len(parts) + 1):
+                key = parts[:depth]
+                if key not in folder_cache:
+                    folder_cache[key] = create_folder(service, key[-1], parent_id)
+                parent_id = folder_cache[key]
 
             result = upload_file(service, file_path, parent_id)
             uploaded["files"].append({

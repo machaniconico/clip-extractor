@@ -23,18 +23,28 @@ def main():
     # Check external dependencies
     import shutil
 
-    missing = []
+    missing_required = []
+    missing_optional = []
     if not shutil.which("ffmpeg"):
-        missing.append("FFmpeg (https://ffmpeg.org/download.html)")
+        missing_required.append("FFmpeg (https://ffmpeg.org/download.html)")
     if not shutil.which("claude"):
-        missing.append("Claude Code CLI (npm install -g @anthropic-ai/claude-code)")
+        # Claude CLI is optional — only needed when ai_provider = "claude".
+        # OpenAI / Gemini users can proceed without it.
+        missing_optional.append("Claude Code CLI (npm install -g @anthropic-ai/claude-code) — Claudeモード使用時のみ必要")
 
-    if missing:
+    if missing_required:
         print("=" * 50)
-        print("WARNING: 以下の外部ツールが見つかりません:")
-        for m in missing:
+        print("ERROR: 以下の必須ツールが見つかりません:")
+        for m in missing_required:
             print(f"  - {m}")
         print("PATHに追加してから再起動してください。")
+        print("=" * 50)
+        print()
+    if missing_optional:
+        print("=" * 50)
+        print("INFO: 以下の任意ツールが見つかりません (OpenAI/Gemini 使用時は不要):")
+        for m in missing_optional:
+            print(f"  - {m}")
         print("=" * 50)
         print()
 

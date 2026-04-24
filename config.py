@@ -27,7 +27,7 @@ class FontConfig:
 
     @classmethod
     def from_file(cls, path: Path) -> "FontConfig":
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 

@@ -145,7 +145,8 @@ def detect_highlights(
 
 
 def _parse_timestamp(ts: str) -> float:
-    """Parse HH:MM:SS.mmm or MM:SS.mmm to seconds."""
+    """Parse HH:MM:SS.mmm, HH:MM:SS,mmm, or MM:SS.mmm to seconds."""
+    ts = ts.strip().replace(",", ".")
     parts = ts.split(":")
     if len(parts) == 3:
         h, m, s = parts

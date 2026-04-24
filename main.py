@@ -6,7 +6,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from config import AppConfig, FontConfig
+from config import FontConfig
 from downloader import is_youtube_url, download_video
 from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights

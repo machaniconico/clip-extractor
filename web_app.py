@@ -126,6 +126,13 @@ def process_video(
         logs.append(msg)
 
     try:
+        # Create ONE output directory that is reused for download + processing,
+        # so both the source video and the generated clips live together (and
+        # are covered by a single Drive upload).
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path(f"./output_{timestamp}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
         # Determine input source
         if input_file is not None:
             original_path = Path(input_file)
@@ -135,7 +142,7 @@ def process_video(
                 str(original_path).encode("ascii")
                 video_path = original_path
             except UnicodeEncodeError:
-                safe_dir = Path(original_path.parent / "_safe")
+                safe_dir = output_dir / "_safe"
                 safe_dir.mkdir(parents=True, exist_ok=True)
                 safe_name = f"input{original_path.suffix}"
                 video_path = safe_dir / safe_name
@@ -143,18 +150,10 @@ def process_video(
                 log(f"Copied to safe path: {video_path}")
         elif input_url and input_url.strip():
             progress(0.05, desc="Downloading video...")
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_dir = Path(f"./output_{timestamp}")
-            output_dir.mkdir(parents=True, exist_ok=True)
             video_path = download_video(input_url.strip(), output_dir / "source")
             log(f"Downloaded: {video_path.name}")
         else:
             return "Error: URLを入力するかファイルをアップロードしてください", "", None, ""
-
-        # Setup output directory
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = Path(f"./output_{timestamp}")
-        output_dir.mkdir(parents=True, exist_ok=True)
 
         # Step 1: Video info
         progress(0.1, desc="[Step 1/6] Analyzing video...")
