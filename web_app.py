@@ -535,6 +535,34 @@ def create_ui():
                             value=defaults.get("auto_append_youtube", False),
                             info="URL入力時のみ有効。初回は credentials.json 配置 + ブラウザ認証が必要",
                         )
+                        gr.Markdown(
+                            """
+<details>
+<summary>💡 <b>推奨フロー</b> — 初めて使う時はこれ (クリックで展開)</summary>
+
+**認証が通っている = 自動追加される状態** ではありません。
+上のチェックボックスが ON で、かつ Generate を押した時にだけ 1 回追記されます。
+最初の 1〜2 本は以下の順で試すのがおすすめ:
+
+1. **まず上のチェックは OFF のまま Generate**
+   → `output_*/chapters.txt` に書かれたタイムスタンプを目視確認
+   (プロンプト次第でイマイチな章立てになる場合あり)
+2. **内容 OK なら、上の ☑ を ON に戻して同じ URL で再 Generate**
+   → YouTube 側の概要欄先頭に追記される
+3. もし結果が気に入らなかった場合:
+   - YouTube Studio で該当動画の概要欄を直接編集して戻す
+   - または `タイムスタンプ用プロンプト` を調整して再実行
+     (※ 再実行するたびに先頭に prepend されるので、手動で古い分を削除してからがおすすめ)
+
+**注意点**:
+- 対象は**自分がアップロードした動画のみ** (`youtube.force-ssl` scope の制限)。切り抜きや他人の動画には追記不可
+- ローカル mp4 を投げた場合は自動スキップ (URL 入力が必須)
+- 追記は「既存の概要欄の先頭に prepend」。既存本文は消えません
+- 1 回の追記で YouTube クォータを 50 units 消費 (1日 10,000 units で 約 200 本)
+
+</details>
+"""
+                        )
 
                 with gr.Row():
                     with gr.Column(scale=2):
