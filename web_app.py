@@ -59,7 +59,9 @@ GEMINI_KEY_FILE = Path(__file__).parent / ".gemini_key"
 def load_defaults() -> dict:
     """Load saved default settings."""
     defaults = {
-        "ai_provider": "gemini", "ai_model": "gemini-3-flash-preview", "custom_prompt": "",
+        "ai_provider": "gemini", "ai_model": "gemini-3-flash-preview",
+        "enable_clips": True, "enable_chapters": True,
+        "clip_prompt": "", "chapter_prompt": "",
         "num_clips": 5, "min_duration": 30, "max_duration": 90,
         "output_mode": "combined", "generate_shorts": False,
         "whisper_model": "large-v3", "language": "ja",
@@ -74,13 +76,17 @@ def load_defaults() -> dict:
     return defaults
 
 
-def save_defaults(ai_provider, ai_model, custom_prompt, num_clips,
-                  min_duration, max_duration, whisper_model, language,
+def save_defaults(ai_provider, ai_model,
+                  enable_clips, enable_chapters, clip_prompt, chapter_prompt,
+                  num_clips, min_duration, max_duration,
+                  whisper_model, language,
                   font_name, font_size, font_color):
     """Save current settings as defaults."""
     data = {
         "ai_provider": ai_provider, "ai_model": ai_model,
-        "custom_prompt": custom_prompt, "num_clips": int(num_clips),
+        "enable_clips": bool(enable_clips), "enable_chapters": bool(enable_chapters),
+        "clip_prompt": clip_prompt, "chapter_prompt": chapter_prompt,
+        "num_clips": int(num_clips),
         "min_duration": int(min_duration), "max_duration": int(max_duration),
         "whisper_model": whisper_model, "language": language,
         "font_name": font_name, "font_size": int(font_size),
@@ -96,11 +102,16 @@ from clipper import extract_clips, get_video_info
 from subtitles import generate_all_srts
 from premiere_xml import generate_combined_xml, generate_individual_xmls
 from drive_upload import upload_output_directory, is_configured as drive_is_configured
+from modes import GenerationModes
 
 
 def process_video(
     input_url: str,
     input_file,
+    enable_clips: bool,
+    clip_prompt: str,
+    enable_chapters: bool,
+    chapter_prompt: str,
     num_clips: int,
     output_mode: str,
     generate_shorts: bool,
@@ -108,7 +119,6 @@ def process_video(
     ai_provider: str,
     ai_model: str,
     api_key: str,
-    custom_prompt: str,
     min_duration: int,
     max_duration: int,
     whisper_model: str,
@@ -127,6 +137,19 @@ def process_video(
         logs.append(msg)
 
     try:
+        # Validate generation modes — at least one must be enabled
+        modes = GenerationModes(
+            enable_clips=bool(enable_clips),
+            enable_chapters=bool(enable_chapters),
+            clip_prompt=clip_prompt or "",
+            chapter_prompt=chapter_prompt or "",
+        )
+        try:
+            modes.validate()
+        except ValueError as mode_err:
+            return f"Error: {mode_err}", "", None, "", ""
+        log(f"Modes: clips={modes.enable_clips}, chapters={modes.enable_chapters}")
+
         # Create ONE output directory that is reused for download + processing,
         # so both the source video and the generated clips live together (and
         # are covered by a single Drive upload).
@@ -187,7 +210,7 @@ def process_video(
             num_clips=num_clips,
             min_duration=min_duration,
             max_duration=max_duration,
-            custom_prompt=custom_prompt,
+            custom_prompt=modes.active_prompt,
             ai_provider=ai_provider,
             api_key=api_key,
             ai_model=ai_model,
@@ -201,63 +224,72 @@ def process_video(
 
         log(f"  Found {len(highlights)} highlights")
 
-        # Step 4: Extract clips (normal landscape, no burn-in — Premiere edits SRT separately)
-        progress(0.6, desc="[Step 4/6] Extracting clips...")
-        log("[Step 4/6] Extracting clips...")
-        clips_dir = output_dir / "clips"
-        clip_paths = extract_clips(video_path, highlights, clips_dir)
-        log(f"  Extracted {len(clip_paths)} clips")
-
-        # Step 5: Subtitles for clips (SRT for Premiere captions)
-        progress(0.7, desc="[Step 5/6] Generating subtitles...")
-        log("[Step 5/6] Generating subtitles...")
-        srt_paths = generate_all_srts(segments, highlights, clips_dir)
-        log(f"  Generated {len(srt_paths)} SRT files")
-
-        # Shorts (9:16) — generate SRTs first, then extract with font-styled burn-in
+        # Steps 4–6 are the clip pipeline (extract → SRT → Shorts → XML).
+        # When clip generation is disabled, we still keep the earlier highlight
+        # detection result so Step 7 (chapters) can use it.
+        clip_paths: list[Path] = []
+        srt_paths: list[Path] = []
         shorts_paths: list[Path] = []
         shorts_srt_paths: list[Path] = []
-        if generate_shorts:
-            progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
-            shorts_dir = output_dir / "shorts"
-            shorts_dir.mkdir(parents=True, exist_ok=True)
-            shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
-            shorts_paths = extract_clips(
-                video_path, highlights, shorts_dir,
-                shorts=True,
-                srt_paths=shorts_srt_paths,
-                font_config=font_config,
-            )
-            log(f"  Generated {len(shorts_paths)} shorts with {font_config.font_name} @ {font_config.font_size}pt")
 
-        # Step 6: Premiere Pro XML
-        progress(0.85, desc="[Step 6/6] Exporting XML...")
-        log("[Step 6/6] Exporting Premiere Pro XML...")
-        if output_mode == "combined":
-            xml_path = output_dir / "project.xml"
-            generate_combined_xml(
-                clip_paths, srt_paths, highlights, video_info, xml_path,
-                project_name=video_path.stem,
-            )
-            if generate_shorts and shorts_paths:
-                shorts_video_info = {**video_info, "width": 1080, "height": 1920}
+        if modes.enable_clips:
+            # Step 4: Extract clips (normal landscape, no burn-in — Premiere edits SRT separately)
+            progress(0.6, desc="[Step 4/6] Extracting clips...")
+            log("[Step 4/6] Extracting clips...")
+            clips_dir = output_dir / "clips"
+            clip_paths = extract_clips(video_path, highlights, clips_dir)
+            log(f"  Extracted {len(clip_paths)} clips")
+
+            # Step 5: Subtitles for clips (SRT for Premiere captions)
+            progress(0.7, desc="[Step 5/6] Generating subtitles...")
+            log("[Step 5/6] Generating subtitles...")
+            srt_paths = generate_all_srts(segments, highlights, clips_dir)
+            log(f"  Generated {len(srt_paths)} SRT files")
+
+            # Shorts (9:16) — generate SRTs first, then extract with font-styled burn-in
+            if generate_shorts:
+                progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
+                shorts_dir = output_dir / "shorts"
+                shorts_dir.mkdir(parents=True, exist_ok=True)
+                shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
+                shorts_paths = extract_clips(
+                    video_path, highlights, shorts_dir,
+                    shorts=True,
+                    srt_paths=shorts_srt_paths,
+                    font_config=font_config,
+                )
+                log(f"  Generated {len(shorts_paths)} shorts with {font_config.font_name} @ {font_config.font_size}pt")
+
+            # Step 6: Premiere Pro XML
+            progress(0.85, desc="[Step 6/6] Exporting XML...")
+            log("[Step 6/6] Exporting Premiere Pro XML...")
+            if output_mode == "combined":
+                xml_path = output_dir / "project.xml"
                 generate_combined_xml(
-                    shorts_paths, shorts_srt_paths, highlights, shorts_video_info,
-                    output_dir / "project_shorts.xml",
-                    project_name=f"{video_path.stem}_shorts",
+                    clip_paths, srt_paths, highlights, video_info, xml_path,
+                    project_name=video_path.stem,
                 )
-            log("  Premiere Pro XML (combined mode) exported")
-        else:
-            generate_individual_xmls(
-                clip_paths, srt_paths, highlights, video_info, clips_dir,
-            )
-            if generate_shorts and shorts_paths:
-                shorts_video_info = {**video_info, "width": 1080, "height": 1920}
+                if generate_shorts and shorts_paths:
+                    shorts_video_info = {**video_info, "width": 1080, "height": 1920}
+                    generate_combined_xml(
+                        shorts_paths, shorts_srt_paths, highlights, shorts_video_info,
+                        output_dir / "project_shorts.xml",
+                        project_name=f"{video_path.stem}_shorts",
+                    )
+                log("  Premiere Pro XML (combined mode) exported")
+            else:
                 generate_individual_xmls(
-                    shorts_paths, shorts_srt_paths, highlights,
-                    shorts_video_info, output_dir / "shorts",
+                    clip_paths, srt_paths, highlights, video_info, clips_dir,
                 )
-            log("  Premiere Pro XML (individual mode) exported")
+                if generate_shorts and shorts_paths:
+                    shorts_video_info = {**video_info, "width": 1080, "height": 1920}
+                    generate_individual_xmls(
+                        shorts_paths, shorts_srt_paths, highlights,
+                        shorts_video_info, output_dir / "shorts",
+                    )
+                log("  Premiere Pro XML (individual mode) exported")
+        else:
+            log("[Skip 4-6] Clip generation disabled — chapters-only run")
 
         # Google Drive upload
         drive_link = ""
@@ -278,16 +310,20 @@ def process_video(
             zip_path = shutil.make_archive(str(output_dir), "zip", str(output_dir))
             log(f"  ZIP created: {zip_path}")
 
-        # YouTube chapter description text (auto-chapter on upload)
+        # YouTube chapter description text (auto-chapter on upload).
+        # Only generated when the chapters mode is enabled.
         chapters_text = ""
-        try:
-            video_duration = float(video_info.get("duration", 0))
-            chapters_text = generate_chapter_text(highlights, video_duration=video_duration)
-            chapters_path = output_dir / "chapters.txt"
-            write_chapter_file(highlights, chapters_path, video_duration=video_duration)
-            log(f"Chapters saved: {chapters_path}")
-        except Exception as ch_err:
-            log(f"Chapter generation failed: {ch_err}")
+        if modes.enable_chapters:
+            try:
+                video_duration = float(video_info.get("duration", 0))
+                chapters_text = generate_chapter_text(highlights, video_duration=video_duration)
+                chapters_path = output_dir / "chapters.txt"
+                write_chapter_file(highlights, chapters_path, video_duration=video_duration)
+                log(f"Chapters saved: {chapters_path}")
+            except Exception as ch_err:
+                log(f"Chapter generation failed: {ch_err}")
+        else:
+            log("[Skip chapters] Chapter generation disabled")
 
         log(f"\nDone! Output: {output_dir}")
 
@@ -331,6 +367,41 @@ def create_ui():
         with gr.Tabs():
             # --- Input Tab ---
             with gr.Tab("Input / 入力"):
+                # Generation-mode selector: users can keep both on, or run just
+                # one side. When both are on, the clip-side prompt wins.
+                gr.HTML("<h3>生成モード / Generation Modes</h3>")
+                gr.HTML(
+                    "<p style='color:#666; margin-top:-0.5em; margin-bottom:0.5em;'>"
+                    "どちらか少なくとも 1 つは有効にしてください。両方有効の場合、"
+                    "切り抜き側のプロンプトだけが使われます。</p>"
+                )
+                with gr.Row():
+                    with gr.Column():
+                        enable_clips = gr.Checkbox(
+                            label="切り抜き動画を生成",
+                            value=defaults.get("enable_clips", True),
+                            info="クリップ抽出 + SRT + Premiere XML を出力",
+                        )
+                        clip_prompt = gr.Textbox(
+                            label="切り抜き用プロンプト (任意)",
+                            value=defaults.get("clip_prompt", ""),
+                            placeholder="例: 面白いシーンだけ選んで、ゲーム実況の名場面を中心に",
+                            lines=2,
+                        )
+                    with gr.Column():
+                        enable_chapters = gr.Checkbox(
+                            label="概要欄テキストを生成",
+                            value=defaults.get("enable_chapters", True),
+                            info="YouTube 自動チャプター有効の 0:00 形式テキストを出力",
+                        )
+                        chapter_prompt = gr.Textbox(
+                            label="概要欄用プロンプト (任意)",
+                            value=defaults.get("chapter_prompt", ""),
+                            placeholder="例: 話題が切り替わる節目だけを抜き出して",
+                            lines=2,
+                            info="切り抜きが無効のときだけ使われます",
+                        )
+
                 with gr.Row():
                     with gr.Column(scale=2):
                         input_url = gr.Textbox(
@@ -412,10 +483,10 @@ def create_ui():
 
                     with gr.Column():
                         gr.HTML("<h3>Highlight Detection</h3>")
-                        custom_prompt = gr.Textbox(
-                            label="カスタムプロンプト (任意)",
-                            placeholder="例: 面白いシーンだけ選んで、ゲーム実況の名場面を中心に",
-                            lines=2,
+                        gr.HTML(
+                            "<p style='color:#666; margin-top:-0.5em;'>"
+                            "プロンプトは Input タブの各モード欄で指定します。ここでは"
+                            "切り抜きの長さ範囲だけ指定。</p>"
                         )
                         with gr.Row():
                             min_duration = gr.Number(
@@ -467,8 +538,10 @@ def create_ui():
 
                 save_defaults_btn.click(
                     fn=save_defaults,
-                    inputs=[ai_provider, ai_model, custom_prompt, num_clips,
-                            min_duration, max_duration, whisper_model, language,
+                    inputs=[ai_provider, ai_model,
+                            enable_clips, enable_chapters, clip_prompt, chapter_prompt,
+                            num_clips, min_duration, max_duration,
+                            whisper_model, language,
                             font_name, font_size, font_color],
                     outputs=save_defaults_msg,
                 )
@@ -513,9 +586,11 @@ def create_ui():
         generate_btn.click(
             fn=process_video,
             inputs=[
-                input_url, input_file, num_clips, output_mode,
+                input_url, input_file,
+                enable_clips, clip_prompt, enable_chapters, chapter_prompt,
+                num_clips, output_mode,
                 generate_shorts, generate_zip, ai_provider, ai_model, api_key,
-                custom_prompt, min_duration, max_duration,
+                min_duration, max_duration,
                 whisper_model, language, font_name, font_size, font_color,
                 upload_to_drive,
             ],
@@ -552,6 +627,12 @@ def create_ui():
 3. OAuth 2.0 クライアントID（デスクトップアプリ）を作成
 4. `credentials.json` をダウンロードして `clip-extractor/` フォルダに配置
 5. 初回実行時にブラウザで認証
+
+### 生成モード（切り抜き / 概要欄 の独立選択）
+- **両方 ON (デフォルト)**: 切り抜き動画・SRT・Premiere XML・概要欄テキストをまとめて出力。切り抜き側のプロンプトだけが使われます（概要欄プロンプトは無視）。
+- **切り抜きのみ**: クリップ + SRT + XML を出力。概要欄テキストは生成されません。
+- **概要欄のみ**: ハイライト検出を概要欄プロンプトで実行し、`chapters.txt` だけを出力。クリップ抽出・SRT・XML はスキップ。
+- **両方 OFF**: エラーになります。1 つは有効にしてください。
 
 ### ショート動画のフォント設定（9:16 出力のみ）
 1. Settings タブの Font Settings でフォント名・サイズ・色を選択
