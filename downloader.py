@@ -6,6 +6,9 @@ from pathlib import Path
 import yt_dlp
 
 
+TITLE_BYTE_LIMIT = 100
+
+
 def is_youtube_url(input_path: str) -> bool:
     """Check if input is a YouTube URL."""
     return bool(re.match(
@@ -13,10 +16,22 @@ def is_youtube_url(input_path: str) -> bool:
     ))
 
 
+def build_output_template(output_dir: Path) -> str:
+    """Return the yt-dlp outtmpl for videos in this output_dir.
+
+    The title portion is byte-limited (not char-limited) via yt-dlp's
+    ``%(title).{N}B`` formatter so multi-byte Japanese titles don't blow
+    through the Windows MAX_PATH (~260) limit when the dir already sits
+    under a deep OneDrive / Desktop path. ``B`` trims on UTF-8 boundaries,
+    so we never end up with a broken codepoint in the filename.
+    """
+    return str(output_dir / f"%(title).{TITLE_BYTE_LIMIT}B.%(ext)s")
+
+
 def download_video(url: str, output_dir: Path) -> Path:
     """Download YouTube video and return the local file path."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_template = str(output_dir / "%(title)s.%(ext)s")
+    output_template = build_output_template(output_dir)
 
     ydl_opts = {
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",

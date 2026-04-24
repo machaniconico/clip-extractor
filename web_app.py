@@ -85,6 +85,22 @@ SETTINGS_FILE = Path(__file__).parent / "default_settings.json"
 GEMINI_KEY_FILE = Path(__file__).parent / ".gemini_key"
 
 
+def load_gemini_api_key(env_var: str = "GEMINI_API_KEY") -> str:
+    """Return the Gemini API key, preferring the environment variable.
+
+    Env var > on-disk file. This lets CI / secret managers override the
+    saved file without editing it, and keeps the key out of the project
+    tree entirely when the env var is set. Falls back to the legacy
+    .gemini_key file so existing installs keep working untouched.
+    """
+    val = os.environ.get(env_var, "").strip()
+    if val:
+        return val
+    if GEMINI_KEY_FILE.exists():
+        return GEMINI_KEY_FILE.read_text(encoding="utf-8").strip()
+    return ""
+
+
 def load_defaults() -> dict:
     """Load saved default settings."""
     defaults = {
@@ -575,9 +591,7 @@ def create_ui():
                             allow_custom_value=True,
                             info="空欄でデフォルト (Claude=CLI, OpenAI=gpt-4.1, Gemini=gemini-3-flash-preview)",
                         )
-                        saved_api_key = ""
-                        if GEMINI_KEY_FILE.exists():
-                            saved_api_key = GEMINI_KEY_FILE.read_text(encoding="utf-8").strip()
+                        saved_api_key = load_gemini_api_key()
                         api_key = gr.Textbox(
                             label="APIキー",
                             value=saved_api_key,
