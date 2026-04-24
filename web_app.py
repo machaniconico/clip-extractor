@@ -3,6 +3,7 @@
 
 import logging
 import os
+import sys
 import shutil
 import subprocess
 import traceback
@@ -115,6 +116,7 @@ def load_defaults() -> dict:
         "output_mode": "combined", "generate_shorts": False,
         "whisper_model": "large-v3", "language": "ja",
         "font_name": "Noto Sans JP", "font_size": 96, "font_color": "#FFFFFF",
+        "output_base_dir": "",
     }
     if SETTINGS_FILE.exists():
         try:
@@ -130,7 +132,8 @@ def save_defaults(ai_provider, ai_model,
                   auto_append_youtube,
                   num_clips, min_duration, max_duration,
                   whisper_model, language,
-                  font_name, font_size, font_color):
+                  font_name, font_size, font_color,
+                  output_base_dir):
     """Save current settings as defaults."""
     data = {
         "ai_provider": ai_provider, "ai_model": ai_model,
@@ -142,6 +145,7 @@ def save_defaults(ai_provider, ai_model,
         "whisper_model": whisper_model, "language": language,
         "font_name": font_name, "font_size": int(font_size),
         "font_color": font_color,
+        "output_base_dir": (output_base_dir or "").strip(),
     }
     SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return "Settings saved as default!"
@@ -180,6 +184,7 @@ def process_video(
     font_size: int,
     font_color: str,
     upload_to_drive: bool,
+    output_base_dir: str = "",
     progress=gr.Progress(),
 ):
     """Main processing pipeline for the web UI."""
@@ -228,8 +233,18 @@ def process_video(
         # so both the source video and the generated clips live together (and
         # are covered by a single Drive upload).
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = Path(f"./output_{timestamp}")
+        # Resolve output base directory:
+        # - If the user provided one via the UI textbox, honour it (absolute or relative)
+        # - Otherwise default to <repo>/output/ (repo = the dir containing this file)
+        # Each run gets its own timestamped subfolder inside that base.
+        _user_base = (output_base_dir or "").strip()
+        if _user_base:
+            base_dir = Path(_user_base).expanduser()
+        else:
+            base_dir = Path(__file__).resolve().parent / "output"
+        output_dir = base_dir / f"output_{timestamp}"
         output_dir.mkdir(parents=True, exist_ok=True)
+        log(f"Output base: {base_dir}")
 
         # Capture the source video ID (only meaningful for YouTube URL input).
         # We use this later for the optional auto-append-to-YouTube step.
@@ -603,6 +618,52 @@ def create_ui():
                             value=False,
                             info="要: credentials.json の設定",
                         )
+                        output_base_dir = gr.Textbox(
+                            label="保存先フォルダ (任意)",
+                            value=defaults.get("output_base_dir", ""),
+                            placeholder="空欄 = clip-extractor/output/ に出力",
+                            info="指定した場合はその配下に output_<日時>/ として保存。絶対パス (例: D:\\clips) / 相対パス / ~ いずれも可。",
+                        )
+                        with gr.Row():
+                            open_output_btn = gr.Button(
+                                "保存先フォルダを開く",
+                                variant="secondary",
+                                size="sm",
+                            )
+                            open_output_msg = gr.Textbox(
+                                label="",
+                                interactive=False,
+                                show_label=False,
+                                scale=3,
+                            )
+
+                        def _open_output_folder(current_base: str) -> str:
+                            """Create (if needed) and open the output base dir in Explorer."""
+                            base_text = (current_base or "").strip()
+                            if base_text:
+                                target = Path(base_text).expanduser()
+                            else:
+                                target = Path(__file__).resolve().parent / "output"
+                            try:
+                                target.mkdir(parents=True, exist_ok=True)
+                            except Exception as exc:
+                                return f"[ERR] フォルダを作成できません: {exc}"
+                            try:
+                                if os.name == "nt":
+                                    os.startfile(str(target))
+                                else:
+                                    import subprocess as _sp
+                                    opener = "open" if sys.platform == "darwin" else "xdg-open"
+                                    _sp.Popen([opener, str(target)])
+                            except Exception as exc:
+                                return f"[WARN] フォルダは作成しましたが開けません ({target}): {exc}"
+                            return f"[OK] 開きました: {target}"
+
+                        open_output_btn.click(
+                            fn=_open_output_folder,
+                            inputs=[output_base_dir],
+                            outputs=open_output_msg,
+                        )
 
             # --- Settings Tab ---
             with gr.Tab("Settings / 設定"):
@@ -920,7 +981,8 @@ def create_ui():
                             auto_append_youtube,
                             num_clips, min_duration, max_duration,
                             whisper_model, language,
-                            font_name, font_size, font_color],
+                            font_name, font_size, font_color,
+                            output_base_dir],
                     outputs=save_defaults_msg,
                 )
 
@@ -972,6 +1034,7 @@ def create_ui():
                 min_duration, max_duration,
                 whisper_model, language, font_name, font_size, font_color,
                 upload_to_drive,
+                output_base_dir,
             ],
             outputs=[log_output, highlights_output, download_output, drive_link_output, chapters_output],
             concurrency_limit=1,
