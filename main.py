@@ -16,6 +16,7 @@ from subtitles import generate_all_srts
 from premiere_xml import generate_combined_xml, generate_individual_xmls
 from modes import GenerationModes
 import youtube_api
+import drive_upload
 
 
 def main():
@@ -34,7 +35,8 @@ def main():
 
     parser.add_argument("input", nargs="?", default=None,
                         help="YouTube URL or local video file path "
-                             "(--youtube-setup/--youtube-revoke/--youtube-status 時は不要)")
+                             "(--youtube-setup/--youtube-revoke/--youtube-status "
+                             "--drive-setup/--drive-revoke/--drive-status 時は不要)")
     parser.add_argument("-o", "--output", default=None, help="Output directory (default: auto-generated)")
     parser.add_argument("-n", "--clips", type=int, default=5, help="Number of clips to extract (default: 5)")
     parser.add_argument("-m", "--mode", choices=["combined", "individual"], default="combined",
@@ -60,6 +62,12 @@ def main():
                         help="YouTube 認証を解除 (ユーザー設定ディレクトリの youtube_token.json を削除)")
     parser.add_argument("--youtube-status", action="store_true",
                         help="現在の YouTube 認証ステータスを表示して終了")
+    parser.add_argument("--drive-setup", action="store_true",
+                        help="Google Drive OAuth 認証を実行して終了 (初回セットアップ)")
+    parser.add_argument("--drive-revoke", action="store_true",
+                        help="Drive 認証を解除 (ユーザー設定ディレクトリの token.json を削除)")
+    parser.add_argument("--drive-status", action="store_true",
+                        help="現在の Drive 認証ステータスを表示して終了")
 
     args = parser.parse_args()
 
@@ -91,10 +99,39 @@ def main():
         print("YouTube 認証完了:", youtube_api.auth_status_summary())
         sys.exit(0)
 
+    # Drive auth-only subcommands (same pattern as the YouTube flags above).
+    if args.drive_status:
+        print(drive_upload.auth_status_summary())
+        sys.exit(0)
+    if args.drive_revoke:
+        removed = drive_upload.revoke_auth()
+        print(("認証解除しました: " if removed else "トークンは元々ありません: ")
+              + drive_upload.auth_status_summary())
+        sys.exit(0)
+    if args.drive_setup:
+        try:
+            ok = drive_upload.ensure_authenticated(force_reauth=False)
+        except Exception as setup_err:
+            print(f"認証失敗: {setup_err}", file=sys.stderr)
+            sys.exit(1)
+        if not ok:
+            print(
+                "credentials.json が見つかりません。\n"
+                "Google Cloud Console で OAuth クライアント(デスクトップアプリ)を作成し、\n"
+                "JSON を次の場所に配置してください:\n"
+                f"  {drive_upload.CREDENTIALS_PATH}\n"
+                "または Settings タブの UI からアップロード可能です。",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print("Drive 認証完了:", drive_upload.auth_status_summary())
+        sys.exit(0)
+
     # Normal processing path requires `input`.
     if args.input is None:
         parser.error("input (YouTube URL or local video file path) is required "
-                     "unless one of --youtube-setup / --youtube-revoke / --youtube-status is used")
+                     "unless one of --youtube-setup / --youtube-revoke / --youtube-status "
+                     "/ --drive-setup / --drive-revoke / --drive-status is used")
 
     # Pre-validate YouTube auth so we fail fast before the heavy pipeline.
     if args.auto_append_youtube:

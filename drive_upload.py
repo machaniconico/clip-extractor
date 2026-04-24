@@ -113,3 +113,66 @@ def upload_output_directory(output_dir: Path, drive_folder_name: str = None) -> 
 def is_configured() -> bool:
     """Check if Google Drive credentials are configured."""
     return CREDENTIALS_PATH.exists()
+
+
+def check_auth_status(
+    token_path: Path | None = None,
+    credentials_path: Path | None = None,
+) -> dict:
+    """Inspect the on-disk auth state without prompting the user.
+
+    Thin wrapper over _google_auth.check_auth_status that defaults the paths
+    to this module's constants (so UIs / tests that monkey-patch
+    drive_upload.TOKEN_PATH / CREDENTIALS_PATH keep working).
+    """
+    token_path = token_path or TOKEN_PATH
+    credentials_path = credentials_path or CREDENTIALS_PATH
+    return _google_auth.check_auth_status(token_path, credentials_path, SCOPES)
+
+
+def ensure_authenticated(force_reauth: bool = False) -> bool:
+    """Guarantee a usable token exists; runs the OAuth browser flow if needed.
+
+    Returns False when credentials.json is missing (nothing we can do
+    without it). Raises on genuine auth failures so callers can surface
+    the error.
+    """
+    if force_reauth:
+        revoke_auth()
+    if not CREDENTIALS_PATH.exists():
+        return False
+    get_drive_service()
+    return True
+
+
+def revoke_auth() -> bool:
+    """Delete token.json if present. Returns whether a file was removed."""
+    return _google_auth.revoke_token(TOKEN_PATH)
+
+
+def auth_status_summary() -> str:
+    """One-line human-readable status string for the Settings UI / CLI."""
+    s = check_auth_status()
+    if not s["configured"]:
+        return (
+            "未設定: Settings タブの『credentials.json』欄にファイルをドロップしてください "
+            f"(保存先: {CREDENTIALS_PATH})"
+        )
+    if s["authenticated"]:
+        return "認証済み (token 有効)"
+    if s["expired"]:
+        err = s.get("error")
+        return f"期限切れ: 再認証が必要{(' (' + err + ')') if err else ''}"
+    if s["token_exists"]:
+        err = s.get("error") or "token 不正"
+        return f"要再認証: {err}"
+    return "未認証: Settings タブまたは --drive-setup で認証してください"
+
+
+def install_credentials_from_file(src_path) -> str:
+    """Validate and copy an uploaded credentials.json into CREDENTIALS_PATH.
+
+    Delegates to _google_auth; reads the module-level CREDENTIALS_PATH so
+    tests that monkey-patch it keep working.
+    """
+    return _google_auth.install_credentials_from_file(src_path, CREDENTIALS_PATH)
