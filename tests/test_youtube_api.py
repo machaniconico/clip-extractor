@@ -78,7 +78,7 @@ def test_merge_none_and_empty_inputs():
     assert _merge_description("existing", None, "prepend") == "existing"
 
 
-def test_check_auth_status_no_credentials(tmp_path=None):
+def test_check_auth_status_no_credentials():
     """credentials.json も token もない → configured=False, authenticated=False."""
     import tempfile
     from youtube_api import check_auth_status
@@ -123,7 +123,7 @@ def test_check_auth_status_invalid_token_json():
         assert s["error"] is not None, "invalid json must surface as error string"
 
 
-def test_revoke_auth_with_existing_token(monkeypatch_target="youtube_api"):
+def test_revoke_auth_with_existing_token():
     """revoke_auth should delete youtube_token.json when present."""
     import tempfile
     import youtube_api
