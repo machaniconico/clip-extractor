@@ -143,3 +143,106 @@ def update_video_description(
         body["snippet"]["defaultLanguage"] = snippet["defaultLanguage"]
 
     return service.videos().update(part="snippet", body=body).execute()
+
+
+# ----- Auth lifecycle helpers (status / setup / revoke) -----
+
+def check_auth_status(
+    token_path: Path | None = None,
+    credentials_path: Path | None = None,
+) -> dict:
+    """Inspect the on-disk auth state without prompting the user.
+
+    Performs a silent token refresh when possible (so callers learn the
+    token is still good after its original expiry). Never opens a browser
+    and never raises — UI callers can render the result as-is.
+
+    Returns:
+        {
+          "configured":   credentials.json 存在するか,
+          "token_exists": youtube_token.json 存在するか,
+          "authenticated": 今すぐ API に使える状態か (refresh 済含む),
+          "expired":      token はあるが refresh にも失敗,
+          "error":        例外メッセージ (あれば)
+        }
+
+    `token_path` / `credentials_path` are for tests; production calls
+    pass nothing and the module constants are used.
+    """
+    token_path = token_path or TOKEN_PATH
+    credentials_path = credentials_path or CREDENTIALS_PATH
+
+    status = {
+        "configured": credentials_path.exists(),
+        "token_exists": token_path.exists(),
+        "authenticated": False,
+        "expired": False,
+        "error": None,
+    }
+    if not status["token_exists"]:
+        return status
+
+    try:
+        creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+    except Exception as e:
+        status["error"] = f"token 読込失敗: {e}"
+        return status
+
+    if creds.valid:
+        status["authenticated"] = True
+        return status
+
+    if creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+            token_path.write_text(creds.to_json(), encoding="utf-8")
+            status["authenticated"] = True
+            return status
+        except Exception as e:
+            status["expired"] = True
+            status["error"] = f"refresh 失敗: {e}"
+            return status
+
+    status["expired"] = True
+    return status
+
+
+def ensure_authenticated(force_reauth: bool = False) -> bool:
+    """Guarantee a usable token exists; runs the OAuth browser flow if needed.
+
+    Returns False when credentials.json is missing (nothing we can do
+    without it). Raises on genuine auth failures so callers can surface
+    the error — pre-validation UIs should catch broadly.
+    """
+    if force_reauth:
+        revoke_auth()
+    if not CREDENTIALS_PATH.exists():
+        return False
+    # get_youtube_service does the refresh-or-new-flow dance and writes
+    # the token to disk; we only care about the side effect.
+    get_youtube_service()
+    return True
+
+
+def revoke_auth() -> bool:
+    """Delete youtube_token.json if present. Returns whether a file was removed."""
+    if TOKEN_PATH.exists():
+        TOKEN_PATH.unlink()
+        return True
+    return False
+
+
+def auth_status_summary() -> str:
+    """One-line human-readable status string for the Settings UI / CLI."""
+    s = check_auth_status()
+    if not s["configured"]:
+        return "未設定: credentials.json を clip-extractor/ に配置してください"
+    if s["authenticated"]:
+        return "認証済み (token 有効)"
+    if s["expired"]:
+        err = s.get("error")
+        return f"期限切れ: 再認証が必要{(' (' + err + ')') if err else ''}"
+    if s["token_exists"]:
+        err = s.get("error") or "token 不正"
+        return f"要再認証: {err}"
+    return "未認証: Settings タブで『認証する』を押してください"

@@ -32,7 +32,9 @@ def main():
         """,
     )
 
-    parser.add_argument("input", help="YouTube URL or local video file path")
+    parser.add_argument("input", nargs="?", default=None,
+                        help="YouTube URL or local video file path "
+                             "(--youtube-setup/--youtube-revoke/--youtube-status 時は不要)")
     parser.add_argument("-o", "--output", default=None, help="Output directory (default: auto-generated)")
     parser.add_argument("-n", "--clips", type=int, default=5, help="Number of clips to extract (default: 5)")
     parser.add_argument("-m", "--mode", choices=["combined", "individual"], default="combined",
@@ -52,8 +54,55 @@ def main():
                         help="タイムスタンプ専用プロンプト (--no-clips 時のみ使用)")
     parser.add_argument("--auto-append-youtube", action="store_true",
                         help="タイムスタンプを YouTube の概要欄に自動追記 (URL 入力 + credentials.json 必須)")
+    parser.add_argument("--youtube-setup", action="store_true",
+                        help="YouTube OAuth 認証を実行して終了 (初回セットアップ)")
+    parser.add_argument("--youtube-revoke", action="store_true",
+                        help="YouTube 認証を解除 (youtube_token.json を削除)")
+    parser.add_argument("--youtube-status", action="store_true",
+                        help="現在の YouTube 認証ステータスを表示して終了")
 
     args = parser.parse_args()
+
+    # Handle auth-only subcommands before anything else. They don't need
+    # an `input` argument and should return immediately after.
+    if args.youtube_status:
+        print(youtube_api.auth_status_summary())
+        sys.exit(0)
+    if args.youtube_revoke:
+        removed = youtube_api.revoke_auth()
+        print(("認証解除しました: " if removed else "トークンは元々ありません: ")
+              + youtube_api.auth_status_summary())
+        sys.exit(0)
+    if args.youtube_setup:
+        try:
+            ok = youtube_api.ensure_authenticated(force_reauth=False)
+        except Exception as setup_err:
+            print(f"認証失敗: {setup_err}", file=sys.stderr)
+            sys.exit(1)
+        if not ok:
+            print("credentials.json が見つかりません。Google Cloud Console から "
+                  "OAuth クライアントを作成して clip-extractor/ に配置してください。",
+                  file=sys.stderr)
+            sys.exit(1)
+        print("YouTube 認証完了:", youtube_api.auth_status_summary())
+        sys.exit(0)
+
+    # Normal processing path requires `input`.
+    if args.input is None:
+        parser.error("input (YouTube URL or local video file path) is required "
+                     "unless one of --youtube-setup / --youtube-revoke / --youtube-status is used")
+
+    # Pre-validate YouTube auth so we fail fast before the heavy pipeline.
+    if args.auto_append_youtube:
+        yt_pre = youtube_api.check_auth_status()
+        if not yt_pre["configured"]:
+            print("Error: --auto-append-youtube は credentials.json が必要です。"
+                  "先に --youtube-setup を実行してください。", file=sys.stderr)
+            sys.exit(1)
+        if not yt_pre["authenticated"]:
+            print("Error: YouTube 認証が切れています。--youtube-setup で再認証してください。",
+                  file=sys.stderr)
+            sys.exit(1)
 
     # Validate generation modes — at least one side must be enabled.
     modes = GenerationModes(

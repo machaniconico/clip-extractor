@@ -155,6 +155,25 @@ def process_video(
             return f"Error: {mode_err}", "", None, "", ""
         log(f"Modes: clips={modes.enable_clips}, chapters={modes.enable_chapters}")
 
+        # Pre-validate YouTube auth before starting the heavy pipeline.
+        # We only want to discover an auth problem AFTER download/transcribe
+        # when the user explicitly asked for the auto-append step.
+        if auto_append_youtube:
+            yt_status = youtube_api.check_auth_status()
+            if not yt_status["configured"]:
+                return (
+                    "Error: 概要欄に自動追加が有効ですが credentials.json が未設定です。"
+                    "Settings タブの『YouTube API 認証』で配置手順を確認してください。",
+                    "", None, "", "",
+                )
+            if not yt_status["authenticated"]:
+                return (
+                    "Error: YouTube 認証が切れています。Settings タブの"
+                    "『YouTube API 認証』で『認証する』を押して再認証してください。",
+                    "", None, "", "",
+                )
+            log(f"YouTube auth pre-check: {youtube_api.auth_status_summary()}")
+
         # Create ONE output directory that is reused for download + processing,
         # so both the source video and the generated clips live together (and
         # are covered by a single Drive upload).
@@ -384,6 +403,24 @@ def create_ui():
     """Create the Gradio web interface."""
     defaults = load_defaults()
 
+    # Startup auth probe — silent (no browser). Just log the current state
+    # so the user sees in the console whether their YouTube token is ready.
+    try:
+        _yt_status = youtube_api.check_auth_status()
+        if _yt_status["authenticated"]:
+            logger.info("YouTube auth: 認証済み (token 有効)")
+        elif _yt_status["expired"]:
+            logger.warning(
+                f"YouTube auth: 期限切れ — Settings タブで再認証してください "
+                f"({_yt_status.get('error') or ''})"
+            )
+        elif _yt_status["configured"]:
+            logger.info("YouTube auth: 未認証 (credentials.json は配置済、初回認証が必要)")
+        else:
+            logger.info("YouTube auth: 未設定 (credentials.json なし — auto-append 無効)")
+    except Exception as _yt_err:
+        logger.warning(f"YouTube auth startup probe failed: {_yt_err}")
+
     with gr.Blocks(
         title="Clip Extractor - 配信切り抜き自動生成",
         analytics_enabled=False,
@@ -572,6 +609,50 @@ def create_ui():
                             )
 
                 with gr.Row():
+                    with gr.Column():
+                        gr.HTML("<h3>YouTube API 認証</h3>")
+                        gr.HTML(
+                            "<p style='color:#666; margin-top:-0.5em;'>"
+                            "概要欄への自動追加を使う前にここで認証してください。"
+                            "起動時にトークンの状態を自動確認し、切れていたら再認証を促します。</p>"
+                        )
+                        yt_auth_status_box = gr.Textbox(
+                            label="認証ステータス",
+                            value=youtube_api.auth_status_summary(),
+                            interactive=False,
+                        )
+                        with gr.Row():
+                            yt_auth_btn = gr.Button("認証する", variant="primary")
+                            yt_revoke_btn = gr.Button("認証解除", variant="secondary")
+                            yt_refresh_btn = gr.Button("ステータス更新", variant="secondary")
+
+                        def _yt_do_auth():
+                            try:
+                                ok = youtube_api.ensure_authenticated(force_reauth=False)
+                                if not ok:
+                                    return (
+                                        "credentials.json が見つかりません。"
+                                        "Google Cloud Console で YouTube Data API v3 を有効化し、"
+                                        "OAuth クライアント (デスクトップアプリ) を作成、"
+                                        "credentials.json を clip-extractor/ に配置してください。"
+                                    )
+                                return youtube_api.auth_status_summary()
+                            except Exception as _e:
+                                return f"認証失敗: {_e}"
+
+                        def _yt_do_revoke():
+                            removed = youtube_api.revoke_auth()
+                            head = "認証解除しました: " if removed else "トークンは元々ありません: "
+                            return head + youtube_api.auth_status_summary()
+
+                        def _yt_do_refresh():
+                            return youtube_api.auth_status_summary()
+
+                        yt_auth_btn.click(fn=_yt_do_auth, outputs=yt_auth_status_box)
+                        yt_revoke_btn.click(fn=_yt_do_revoke, outputs=yt_auth_status_box)
+                        yt_refresh_btn.click(fn=_yt_do_refresh, outputs=yt_auth_status_box)
+
+                with gr.Row():
                     save_defaults_btn = gr.Button("デフォルトに設定", variant="secondary")
                     save_defaults_msg = gr.Textbox(label="", interactive=False, show_label=False)
 
@@ -688,11 +769,17 @@ def create_ui():
 4. `output_*/chapters.txt` にも同じ内容が保存されている
 
 ### 概要欄に自動追加 (YouTube API)
-1. Input タブで「概要欄に自動追加」をチェック（初期設定は無効）
-2. 初回のみ: `credentials.json` を `clip-extractor/` フォルダに配置し、ブラウザで YouTube 権限を承認（`youtube_token.json` が自動生成）
-3. URL 入力モードで Generate を実行すると、該当動画の概要欄にタイムスタンプが prepend（先頭挿入）される
-4. ローカルファイル入力時は対象動画が特定できないため、この機能はスキップされログに表示される
-5. scope は `youtube.force-ssl` — 自分がアップロード済みの動画のみ更新可能
+1. Google Cloud Console で YouTube Data API v3 を有効化し、OAuth 2.0 クライアント（デスクトップアプリ）を作成
+2. ダウンロードした `credentials.json` を `clip-extractor/` フォルダに配置（Drive API と兼用可）
+3. Settings タブの「YouTube API 認証」セクションで「認証する」ボタンをクリック → ブラウザで承認 → `youtube_token.json` が自動生成される
+4. Input タブの「概要欄に自動追加」をチェックして Generate（URL 入力のみ対応、ローカルファイル時は自動スキップ）
+5. 該当動画の概要欄にタイムスタンプが prepend（先頭挿入）される
+6. scope は `youtube.force-ssl` — 自分がアップロード済みの動画のみ更新可能
+
+### 認証切れの挙動
+- 起動時にコンソールログへ状態が表示される（認証済み / 期限切れ / 未認証 / 未設定）
+- Generate 実行前にも pre-validation が走り、認証が切れていれば早期にエラー表示（長い処理が無駄にならない）
+- 期限切れなら Settings タブから「認証する」を押すだけで再認証可能
             """)
 
     return app
