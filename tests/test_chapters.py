@@ -91,7 +91,7 @@ def test_missing_title_fallback():
     assert lines[2] == "0:50 シーン2"
 
 
-def test_write_chapter_file(tmp_dir: Path | None = None):
+def test_write_chapter_file():
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "chapters.txt"
