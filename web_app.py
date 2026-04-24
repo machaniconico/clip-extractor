@@ -686,6 +686,66 @@ def create_ui():
                             "OAuth クライアントを作成し、ダウンロードした JSON をここにドロップしてください。<br/>"
                             f"<small>保存先 (OS ユーザー設定ディレクトリ): <code>{youtube_api.CREDENTIALS_PATH}</code></small></p>"
                         )
+                        with gr.Accordion(
+                            "📘 credentials.json の取得手順 (クリックで展開) — 初めての方はこちら",
+                            open=False,
+                        ):
+                            gr.Markdown(
+                                """
+**所要時間: 約 10 分** — 最初の 1 回だけ必要な作業です。
+プロジェクト同梱の `CREDENTIALS_SETUP.txt` にも同じ手順があります。
+
+---
+
+#### 1. Google Cloud Console にアクセス
+[https://console.cloud.google.com/](https://console.cloud.google.com/) を開く
+（初回は Google アカウントでログイン）
+
+#### 2. 新しいプロジェクトを作成
+画面上部の **プロジェクトセレクタ** → **新しいプロジェクト**
+- プロジェクト名: `clip-extractor` (任意)
+- 作成後、上部セレクタで このプロジェクトに切り替え
+
+#### 3. 使う API を有効化
+左メニュー **[APIとサービス] → [ライブラリ]** から検索して有効化:
+- **Google Drive API** ── 出力を Drive にアップロードする場合
+- **YouTube Data API v3** ── 概要欄を自動更新する場合
+
+両方使うなら両方有効化（片方だけでも OK）。
+
+#### 4. OAuth 同意画面を設定 (初回のみ)
+左メニュー **[APIとサービス] → [OAuth同意画面]**
+- User Type: **外部** → 作成
+- アプリ名 / サポートメール / 連絡先を入力して保存
+- **テストユーザーに自分のアカウントを必ず追加** ← これを忘れると認証時に拒否されます
+
+#### 5. OAuth クライアント ID を作成
+左メニュー **[APIとサービス] → [認証情報]** →
+**[認証情報を作成] → [OAuth クライアント ID]**
+- アプリケーションの種類: **★ デスクトップ アプリ ★** （Web アプリ不可）
+- 名前: `clip-extractor desktop` (任意) → **作成**
+
+#### 6. JSON をダウンロード
+作成完了ダイアログの **[JSON をダウンロード]** ボタンを押す
+（閉じてしまっても 認証情報一覧の右端 ↓ アイコンから何度でも再取得可能）
+
+⚠️ このファイルは機密情報です。公開リポジトリにコミットしないでください。
+
+#### 7. 下の欄にドラッグ & ドロップ 👇
+`client_secret_xxxxxx.json` を下の **credentials.json** 欄にドロップするだけで、
+ユーザー設定ディレクトリに自動配置されます。
+手動配置したい場合は `CREDENTIALS_SETUP.txt` の [7/8] を参照。
+
+#### 8. 「② 認証アクション」で「認証する」
+ブラウザで Google 承認画面 → 完了後は自動でトークンが更新されるので手動操作不要。
+
+---
+
+**困ったとき:** `CREDENTIALS_SETUP.txt` の「トラブルシューティング」節を参照。
+よくある症状: テストユーザー未追加 / OAuth クライアントが「ウェブ アプリ」
+になっている / テスト公開のまま 7 日経過でトークン失効。
+"""
+                            )
                         creds_upload = gr.File(
                             label="credentials.json (ドラッグ＆ドロップ可)",
                             file_types=[".json"],
@@ -852,12 +912,23 @@ def create_ui():
 4. Photoshopでフォント・装飾・エフェクトを自由に編集
 5. 保存するとPremiere Proに即反映
 
-### Google Drive アップロード
-1. [Google Cloud Console](https://console.cloud.google.com/) でプロジェクト作成
-2. Drive API を有効化
-3. OAuth 2.0 クライアントID（デスクトップアプリ）を作成
-4. `credentials.json` をダウンロードして Settings タブの「credentials.json」欄にドラッグ＆ドロップ（ユーザー設定ディレクトリ `%APPDATA%/clip-extractor/`（Windows）/ `~/.config/clip-extractor/`（Linux）/ `~/Library/Application Support/clip-extractor/`（macOS）に自動配置）
-5. 初回実行時にブラウザで認証
+### Google Drive アップロード / YouTube 概要欄自動更新 — 共通のセットアップ
+**どちらの機能も 1 つの `credentials.json` で動きます。** 詳細な手順は
+プロジェクト同梱の **`CREDENTIALS_SETUP.txt`** を参照するか、
+Settings タブの「📘 credentials.json の取得手順」アコーディオンを展開してください。
+
+手順の要約:
+1. [Google Cloud Console](https://console.cloud.google.com/) で新規プロジェクトを作成
+2. **Google Drive API** / **YouTube Data API v3** のうち使うものを有効化
+3. OAuth 同意画面を「外部」で作成し、**テストユーザーに自分のアカウントを追加**
+4. OAuth 2.0 クライアント ID を **「デスクトップ アプリ」** で作成（★ Web アプリ不可）
+5. JSON をダウンロードして、Settings タブの「credentials.json」欄にドラッグ＆ドロップ
+6. Settings タブから「認証する」、または CLI で
+   `python main.py --youtube-setup` / `python main.py --drive-setup`
+
+配置先: `%APPDATA%/clip-extractor/`（Windows）/
+`~/Library/Application Support/clip-extractor/`（macOS）/
+`~/.config/clip-extractor/`（Linux）— プロジェクト外で管理されます。
 
 ### 生成モード（切り抜き / 概要欄 の独立選択）
 - **両方 ON (デフォルト)**: 切り抜き動画・SRT・Premiere XML・概要欄テキストをまとめて出力。切り抜き側のプロンプトだけが使われます（概要欄プロンプトは無視）。
@@ -878,12 +949,17 @@ def create_ui():
 4. `output_*/chapters.txt` にも同じ内容が保存されている
 
 ### 概要欄に自動追加 (YouTube API)
-#### 初回セットアップ（UI 完結・手動コピー不要）
+#### 初回セットアップ
+**初めての方へ**: Settings タブの「📘 credentials.json の取得手順」
+アコーディオンを開くと、画面キャプチャ付きの手順が表示されます。
+またプロジェクト同梱の `CREDENTIALS_SETUP.txt` に同じ内容があります。
+
+最短手順:
 1. Settings タブの「YouTube API 認証」セクションで「Google Cloud Console を開く」ボタンをクリック
-2. ブラウザで開かれたページから YouTube Data API v3 を**有効化**
-3. 左メニュー「認証情報」→「認証情報を作成」→「OAuth クライアント ID」→ アプリの種類で**デスクトップアプリ**を選択して作成
-4. ダウンロードされた `client_secret_*.json` を、Settings タブの「credentials.json」欄にドラッグ＆ドロップ（検証後に自動で正しい場所に配置されます）
-5. 「認証する」ボタン → ブラウザで Google アカウント承認 → `youtube_token.json` がユーザー設定ディレクトリに自動生成（`%APPDATA%/clip-extractor/` などプロジェクト外で管理）
+2. **YouTube Data API v3** を有効化 → OAuth 同意画面でテストユーザー追加
+3. 「デスクトップ アプリ」で OAuth クライアント ID 作成 → JSON をダウンロード
+4. Settings タブの「credentials.json」欄にドラッグ＆ドロップ
+5. 「認証する」→ ブラウザで Google 承認 → `youtube_token.json` が自動生成
 6. Input タブの「概要欄に自動追加」をチェックして Generate
 
 #### 仕様
@@ -895,6 +971,7 @@ def create_ui():
 - 起動時にコンソールログへ状態が表示される（認証済み / 期限切れ / 未認証 / 未設定）
 - Generate 実行前にも pre-validation が走り、認証が切れていれば早期にエラー表示（長い処理が無駄にならない）
 - 期限切れなら Settings タブから「認証する」を押すだけで再認証可能
+- CLI で状態確認: `python main.py --youtube-status` / `python main.py --drive-status`
             """)
 
     return app
