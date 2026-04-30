@@ -16,7 +16,7 @@ def open_browser():
     """Open browser after a short delay."""
     import time
     time.sleep(2)
-    webbrowser.open("http://localhost:8080")
+    webbrowser.open("http://localhost:7860")
 
 
 def main():
@@ -52,7 +52,7 @@ def main():
     threading.Thread(target=open_browser, daemon=True).start()
 
     print("Clip Extractor を起動しています...")
-    print("ブラウザで http://localhost:8080 が開きます")
+    print("ブラウザで http://localhost:7860 が開きます")
     print("終了するにはこのウィンドウを閉じてください")
     print()
 
@@ -62,7 +62,7 @@ def main():
     app.queue()
     app.launch(
         server_name="0.0.0.0",
-        server_port=8080,
+        server_port=7860,
         ssr_mode=False,
         inbrowser=False,  # we handle browser open ourselves
     )
