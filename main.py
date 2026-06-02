@@ -42,6 +42,12 @@ def main():
     parser.add_argument("-m", "--mode", choices=["combined", "individual"], default="combined",
                         help="Output mode: combined (1 XML, multiple sequences) or individual (separate XMLs)")
     parser.add_argument("-s", "--shorts", action="store_true", help="Also generate 9:16 vertical shorts")
+    parser.add_argument("--shorts-mode", choices=["crop", "blur", "pad"], default="crop",
+                        help="ショート動画の変換モード (default: crop)")
+    parser.add_argument("--shorts-crop", choices=["center", "left", "right"], default="center",
+                        help="ショート動画の横クロップ位置 (default: center)")
+    parser.add_argument("--no-shorts-title", action="store_true",
+                        help="ショート動画冒頭のタイトル焼き込みを無効化")
     parser.add_argument("-p", "--prompt", default="", help="Custom prompt for highlight detection")
     parser.add_argument("--min-duration", type=int, default=30, help="Minimum clip duration in seconds")
     parser.add_argument("--max-duration", type=int, default=90, help="Maximum clip duration in seconds")
@@ -246,6 +252,9 @@ def main():
                 shorts=True,
                 srt_paths=shorts_srt_paths,
                 font_config=font_config,
+                crop_x=args.shorts_crop,
+                shorts_mode=args.shorts_mode,
+                shorts_title=not args.no_shorts_title,
             )
     else:
         print("\n[Skip 5-7] Clip generation disabled (--no-clips) — chapters-only run")

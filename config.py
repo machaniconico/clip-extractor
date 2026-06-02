@@ -54,6 +54,9 @@ class AppConfig:
     clip_max_duration: int = 90
     output_mode: str = "combined"  # "combined" or "individual"
     shorts: bool = False
+    shorts_crop: str = "center"  # "center" | "left" | "right"
+    shorts_mode: str = "crop"  # "crop" | "blur" | "pad"
+    shorts_title: bool = True
     highlight_prompt: str = ""
     font_config: FontConfig = field(default_factory=FontConfig)
     whisper_model: str = "large-v3"

@@ -140,6 +140,8 @@ def load_defaults() -> dict:
         "auto_append_youtube": False,
         "num_clips": 5, "min_duration": 30, "max_duration": 90,
         "output_mode": "combined", "generate_shorts": False,
+        "shorts_mode": "crop", "shorts_crop": "center",
+        "shorts_title": True,
         "whisper_model": "large-v3", "language": "ja",
         "font_name": "Noto Sans JP", "font_size": 96, "font_color": "#FFFFFF",
         "output_base_dir": "",
@@ -156,7 +158,8 @@ def load_defaults() -> dict:
 def save_defaults(ai_provider, ai_model,
                   enable_clips, enable_chapters, clip_prompt, chapter_prompt,
                   auto_append_youtube,
-                  num_clips, min_duration, max_duration,
+                  num_clips, output_mode, generate_shorts, shorts_mode, shorts_crop, shorts_title,
+                  min_duration, max_duration,
                   whisper_model, language,
                   font_name, font_size, font_color,
                   output_base_dir):
@@ -167,6 +170,9 @@ def save_defaults(ai_provider, ai_model,
         "clip_prompt": clip_prompt, "chapter_prompt": chapter_prompt,
         "auto_append_youtube": bool(auto_append_youtube),
         "num_clips": int(num_clips),
+        "output_mode": output_mode, "generate_shorts": bool(generate_shorts),
+        "shorts_mode": shorts_mode, "shorts_crop": shorts_crop,
+        "shorts_title": bool(shorts_title),
         "min_duration": int(min_duration), "max_duration": int(max_duration),
         "whisper_model": whisper_model, "language": language,
         "font_name": font_name, "font_size": int(font_size),
@@ -295,6 +301,9 @@ def process_video(
     num_clips: int,
     output_mode: str,
     generate_shorts: bool,
+    shorts_mode: str,
+    shorts_crop: str,
+    shorts_title: bool,
     generate_zip: bool,
     ai_provider: str,
     ai_model: str,
@@ -476,6 +485,9 @@ def process_video(
                     shorts=True,
                     srt_paths=shorts_srt_paths,
                     font_config=font_config,
+                    crop_x=shorts_crop,
+                    shorts_mode=shorts_mode,
+                    shorts_title=shorts_title,
                 )
                 log(f"  Generated {len(shorts_paths)} shorts with {font_config.font_name} @ {font_config.font_size}pt")
 
@@ -728,7 +740,25 @@ def create_ui():
                         )
                         generate_shorts = gr.Checkbox(
                             label="ショート動画 (9:16) も生成",
-                            value=False,
+                            value=defaults.get("generate_shorts", False),
+                            info="字幕を焼き込んだ縦型クリップを shorts/ に追加出力。下の『デフォルトに設定』で保存されます",
+                        )
+                        shorts_mode = gr.Radio(
+                            choices=["crop", "blur", "pad"],
+                            value=defaults.get("shorts_mode", "crop"),
+                            label="ショート動画の変換モード",
+                            info="crop: 縦型に切り抜き / blur: ぼかし背景 / pad: 黒帯で全体表示",
+                        )
+                        shorts_crop = gr.Radio(
+                            choices=["center", "left", "right"],
+                            value=defaults.get("shorts_crop", "center"),
+                            label="ショート動画のクロップ位置",
+                            info="crop モードで縦型に切り出す時の横位置。center=中央 / left=左寄せ / right=右寄せ",
+                        )
+                        shorts_title = gr.Checkbox(
+                            label="ショート冒頭にタイトルを表示",
+                            value=defaults.get("shorts_title", True),
+                            info="各ショートの最初の4秒だけ、上部中央にタイトルを焼き込みます",
                         )
                         generate_zip = gr.Checkbox(
                             label="ZIPファイルを生成",
@@ -1095,7 +1125,8 @@ def create_ui():
                     inputs=[ai_provider, ai_model,
                             enable_clips, enable_chapters, clip_prompt, chapter_prompt,
                             auto_append_youtube,
-                            num_clips, min_duration, max_duration,
+                            num_clips, output_mode, generate_shorts, shorts_mode, shorts_crop, shorts_title,
+                            min_duration, max_duration,
                             whisper_model, language,
                             font_name, font_size, font_color,
                             output_base_dir],
@@ -1146,7 +1177,7 @@ def create_ui():
                 enable_clips, clip_prompt, enable_chapters, chapter_prompt,
                 auto_append_youtube,
                 num_clips, output_mode,
-                generate_shorts, generate_zip, ai_provider, ai_model, api_key,
+                generate_shorts, shorts_mode, shorts_crop, shorts_title, generate_zip, ai_provider, ai_model, api_key,
                 min_duration, max_duration,
                 whisper_model, language, font_name, font_size, font_color,
                 upload_to_drive,

@@ -1,11 +1,58 @@
 """Video clip extraction using FFmpeg."""
 
+import logging
 import subprocess
+import unicodedata
+from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from config import FontConfig
+
+logger = logging.getLogger(__name__)
+
+_SHORTS_PAD_FILTER = (
+    "scale=1080:1920:force_original_aspect_ratio=decrease,"
+    "pad=1080:1920:(ow-iw)/2:(oh-ih)/2"
+)
+_SHORTS_BLUR_FILTER = (
+    "split=2[bg][fg];"
+    "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
+    "crop=1080:1920,boxblur=20[bg];"
+    "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
+    "[bg][fg]overlay=(W-w)/2:(H-h)/2"
+)
+_TITLE_FONT_SIZE = 80
+_TITLE_WRAP_FULLWIDTH_CHARS = 14
+_JAPANESE_FONT_KEYWORDS = (
+    "noto sans cjk jp",
+    "noto sans jp",
+    "noto serif cjk jp",
+    "noto serif jp",
+    "source han sans",
+    "source han serif",
+    "ipaexgothic",
+    "ipaexmincho",
+    "ipagothic",
+    "ipamincho",
+    "biz udgothic",
+    "biz udpgothic",
+    "biz udmincho",
+    "biz udpmincho",
+    "yu gothic",
+    "yugothic",
+    "meiryo",
+    "ms gothic",
+    "ms mincho",
+    "m plus",
+    "takao",
+    "vl gothic",
+)
+
+
+class _DefaultTitleFontConfig:
+    font_name = "Noto Sans JP"
 
 
 def get_video_info(video_path: Path) -> dict:
@@ -73,6 +120,177 @@ def _build_subtitles_filter(srt_path: Path, font_config: "FontConfig") -> str:
     return f"subtitles='{escaped}':force_style='{style}'"
 
 
+def _shorts_crop_filter(crop_x: str = "center") -> str:
+    """9:16 縦クロップ + 1080x1920 スケールの vf フィルタを生成。crop_x で横位置を選ぶ。"""
+    w = "ih*9/16"
+    if crop_x == "left":
+        x = "0"
+    elif crop_x == "right":
+        x = "iw-ih*9/16"
+    else:  # center (default)
+        x = "(iw-ih*9/16)/2"
+    return f"crop={w}:ih:{x}:0,scale=1080:1920"
+
+
+def _shorts_base_vf(mode: str = "crop", crop_x: str = "center") -> str:
+    """Return the base 9:16 Shorts vf chain for crop/blur/pad modes."""
+    if mode == "crop":
+        return _shorts_crop_filter(crop_x)
+    if mode == "pad":
+        return _SHORTS_PAD_FILTER
+    if mode == "blur":
+        return _SHORTS_BLUR_FILTER
+    logger.warning("Unknown shorts_mode=%r; falling back to crop", mode)
+    return _shorts_crop_filter(crop_x)
+
+
+def _title_char_width(ch: str) -> int:
+    """Display width where full-width Japanese characters count as 2."""
+    return 2 if unicodedata.east_asian_width(ch) in {"F", "W", "A"} else 1
+
+
+def _wrap_title_text(title: str, fullwidth_chars: int = _TITLE_WRAP_FULLWIDTH_CHARS) -> str:
+    """Wrap title at roughly 13-15 full-width characters per line."""
+    limit = fullwidth_chars * 2
+    lines: list[str] = []
+
+    for raw_line in (title or "").strip().splitlines():
+        current = ""
+        current_width = 0
+        for ch in raw_line:
+            ch_width = _title_char_width(ch)
+            if current and current_width + ch_width > limit:
+                lines.append(current.rstrip())
+                current = ch.lstrip()
+                current_width = sum(_title_char_width(c) for c in current)
+            else:
+                current += ch
+                current_width += ch_width
+        if current:
+            lines.append(current.rstrip())
+
+    return "\n".join(line for line in lines if line)
+
+
+def _escape_drawtext_text(value: str) -> str:
+    """Escape text for ffmpeg drawtext option syntax."""
+    escaped: list[str] = []
+    for ch in value:
+        if ch == "\n":
+            # drawtext renders an actual newline (0x0A) as a line break; the
+            # literal sequence "\n" would print a stray "n" instead. Keep the
+            # real newline so _wrap_title_text's wrapping survives to the video.
+            escaped.append("\n")
+        elif ch in {"\\", ":", "'", "%"}:
+            escaped.append("\\" + ch)
+        else:
+            escaped.append(ch)
+    return "".join(escaped)
+
+
+def _escape_drawtext_path(path: str) -> str:
+    """Escape a fontfile path for ffmpeg drawtext option syntax."""
+    normalized = path.replace("\\", "/")
+    return _escape_drawtext_text(normalized)
+
+
+@lru_cache(maxsize=1)
+def _fontconfig_fonts() -> tuple[tuple[str, str], ...]:
+    """Return (fontfile, family) rows from fc-list, or empty when unavailable."""
+    try:
+        result = subprocess.run(
+            ["fc-list", ":", "file", "family"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=5,
+            check=False,
+        )
+    except Exception as exc:
+        logger.warning("Could not run fc-list for title font detection: %s", exc)
+        return ()
+
+    if result.returncode != 0:
+        logger.warning("fc-list failed while detecting title fonts: %s", result.stderr.strip())
+        return ()
+
+    fonts: list[tuple[str, str]] = []
+    for line in result.stdout.splitlines():
+        path_text, sep, family = line.partition(":")
+        if not sep:
+            continue
+        path_text = path_text.strip()
+        family = family.strip()
+        if path_text and family and Path(path_text).exists():
+            fonts.append((path_text, family))
+    return tuple(fonts)
+
+
+@lru_cache(maxsize=32)
+def _resolve_title_fontfile(font_name: str) -> str | None:
+    """Find a fontfile for the requested or fallback Japanese font, if possible."""
+    requested = (font_name or "").strip()
+    fonts = _fontconfig_fonts()
+    if not fonts:
+        logger.warning(
+            "No fontconfig fonts found; drawtext will use font=%r and may render tofu",
+            requested or "Sans",
+        )
+        return None
+
+    requested_lower = requested.lower()
+    if requested_lower:
+        for path_text, family in fonts:
+            families = [item.strip().lower() for item in family.split(",")]
+            if requested_lower in families or requested_lower in family.lower():
+                return path_text
+
+    for path_text, family in fonts:
+        haystack = f"{family} {Path(path_text).name}".lower()
+        if any(keyword in haystack for keyword in _JAPANESE_FONT_KEYWORDS):
+            if requested:
+                logger.warning(
+                    "Title font %r was not found by fc-list; using Japanese fontfile fallback: %s",
+                    requested,
+                    path_text,
+                )
+            return path_text
+
+    logger.warning(
+        "No Japanese fontfile found via fc-list; drawtext will use font=%r and may render tofu",
+        requested or "Sans",
+    )
+    return None
+
+
+def _build_title_drawtext(title: str, font_config: "FontConfig") -> str:
+    """Build a drawtext filter that shows the clip title for the first 4 seconds."""
+    wrapped_title = _wrap_title_text(title)
+    if not wrapped_title:
+        return ""
+
+    font_name = getattr(font_config, "font_name", "Noto Sans JP") or "Noto Sans JP"
+    fontfile = _resolve_title_fontfile(font_name)
+    parts = [
+        f"font='{_escape_drawtext_text(font_name)}'",
+    ]
+    if fontfile:
+        parts.append(f"fontfile='{_escape_drawtext_path(fontfile)}'")
+    parts.extend([
+        f"text='{_escape_drawtext_text(wrapped_title)}'",
+        "expansion=none",
+        "fontcolor=white",
+        f"fontsize={_TITLE_FONT_SIZE}",
+        "x=(w-text_w)/2",
+        "y=140",
+        "box=1",
+        "boxcolor=black@0.5",
+        "boxborderw=24",
+        "enable='lt(t\\,4)'",
+    ])
+    return "drawtext=" + ":".join(parts)
+
+
 def extract_clip(
     video_path: Path,
     output_path: Path,
@@ -81,6 +299,10 @@ def extract_clip(
     shorts: bool = False,
     srt_path: Path | None = None,
     font_config: "FontConfig | None" = None,
+    crop_x: str = "center",
+    shorts_mode: str = "crop",
+    shorts_title: bool = True,
+    title: str = "",
 ) -> Path:
     """Extract a clip from the video."""
     duration = end_sec - start_sec
@@ -96,7 +318,9 @@ def extract_clip(
 
     vf_filters = []
     if shorts:
-        vf_filters.append("crop=ih*9/16:ih,scale=1080:1920")
+        vf_filters.append(_shorts_base_vf(shorts_mode, crop_x))
+    if shorts and shorts_title and title:
+        vf_filters.append(_build_title_drawtext(title, font_config or _DefaultTitleFontConfig()))
     if shorts and srt_path is not None and font_config is not None:
         vf_filters.append(_build_subtitles_filter(srt_path, font_config))
     if vf_filters:
@@ -124,6 +348,9 @@ def extract_clips(
     shorts: bool = False,
     srt_paths: list[Path] | None = None,
     font_config: "FontConfig | None" = None,
+    crop_x: str = "center",
+    shorts_mode: str = "crop",
+    shorts_title: bool = True,
 ) -> list[Path]:
     """Extract all highlight clips."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -146,6 +373,10 @@ def extract_clips(
             shorts,
             srt_path=srt_path,
             font_config=font_config,
+            crop_x=crop_x,
+            shorts_mode=shorts_mode,
+            shorts_title=shorts_title,
+            title=h.get("title", ""),
         )
         clip_paths.append(clip_path)
 
@@ -182,5 +413,33 @@ if __name__ == "__main__":
     filt = _build_subtitles_filter(Path("C:/Users/x/clip.srt"), fc)
     assert filt.startswith("subtitles='C\\:/Users/x/clip.srt'"), f"bad escape: {filt}"
     assert "force_style='FontName=Noto Sans JP" in filt, f"style missing: {filt}"
+
+    # _shorts_crop_filter: center (default) / left / right horizontal positions
+    center_f = _shorts_crop_filter("center")
+    assert "(iw-ih*9/16)/2" in center_f, f"center x missing: {center_f}"
+    assert "scale=1080:1920" in center_f, f"center scale missing: {center_f}"
+    assert _shorts_base_vf("crop", "center") == center_f, "crop base must keep existing behavior"
+    assert center_f == "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920", center_f
+
+    left_f = _shorts_crop_filter("left")
+    assert ":0:0" in left_f, f"left x missing: {left_f}"
+    assert "scale=1080:1920" in left_f, f"left scale missing: {left_f}"
+
+    right_f = _shorts_crop_filter("right")
+    assert "iw-ih*9/16:0" in right_f, f"right x missing: {right_f}"
+    assert "scale=1080:1920" in right_f, f"right scale missing: {right_f}"
+
+    assert _shorts_base_vf("pad") == _SHORTS_PAD_FILTER, "pad base mismatch"
+    assert _shorts_base_vf("blur") == _SHORTS_BLUR_FILTER, "blur base mismatch"
+
+    title_f = _build_title_drawtext("A:B's 50% C\\D あいうえおかきくけこさしすせそ", fc)
+    for expected in [
+        "drawtext=", "font='Noto Sans JP'", "text='A\\:B\\'s 50\\% C\\\\D",
+        "fontsize=80", "fontcolor=white", "box=1", "boxcolor=black@0.5",
+        "boxborderw=24", "x=(w-text_w)/2", "y=140", "enable='lt(t\\,4)'",
+    ]:
+        assert expected in title_f, f"missing: {expected} in {title_f}"
+    assert "\n" in title_f, f"title should wrap long text: {title_f}"
+    assert r"\n" not in title_f, f"newline must be a real 0x0A, not literal: {title_f}"
 
     print("clipper.py self-test: all assertions passed")
