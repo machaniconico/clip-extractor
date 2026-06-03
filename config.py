@@ -58,6 +58,8 @@ class AppConfig:
     shorts_mode: str = "crop"  # "crop" | "blur" | "pad"
     shorts_title: bool = True
     generate_thumbnails: bool = False
+    audio_fusion: bool = False
+    audio_alpha: float = 0.35
     highlight_prompt: str = ""
     font_config: FontConfig = field(default_factory=FontConfig)
     whisper_model: str = "large-v3"

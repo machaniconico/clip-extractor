@@ -9,6 +9,8 @@
   "shorts_crop": "center",
   "shorts_title": true,
   "generate_thumbnails": false,
+  "audio_fusion": false,
+  "audio_alpha": 0.35,
   "min_duration": 30,
   "max_duration": 90,
   "whisper_model": "large-v3",

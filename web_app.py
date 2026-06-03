@@ -142,6 +142,7 @@ def load_defaults() -> dict:
         "output_mode": "combined", "generate_shorts": False,
         "shorts_mode": "crop", "shorts_crop": "center",
         "shorts_title": True, "generate_thumbnails": False,
+        "audio_fusion": False, "audio_alpha": 0.35,
         "whisper_model": "large-v3", "language": "ja",
         "font_name": "Noto Sans JP", "font_size": 96, "font_color": "#FFFFFF",
         "output_base_dir": "",
@@ -163,7 +164,8 @@ def save_defaults(ai_provider, ai_model,
                   whisper_model, language,
                   font_name, font_size, font_color,
                   output_base_dir,
-                  generate_thumbnails=False):
+                  generate_thumbnails=False,
+                  audio_fusion=False, audio_alpha=0.35):
     """Save current settings as defaults."""
     data = {
         "ai_provider": ai_provider, "ai_model": ai_model,
@@ -180,6 +182,8 @@ def save_defaults(ai_provider, ai_model,
         "font_color": font_color,
         "output_base_dir": (output_base_dir or "").strip(),
         "generate_thumbnails": bool(generate_thumbnails),
+        "audio_fusion": bool(audio_fusion),
+        "audio_alpha": float(audio_alpha),
     }
     SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return "Settings saved as default!"
@@ -284,6 +288,7 @@ from chapters import generate_chapter_text, write_chapter_file
 from downloader import download_video
 from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
+from audio_energy import fuse_audio_energy
 from clipper import extract_clips, generate_thumbnails as generate_thumbnail_candidates, get_video_info
 from subtitles import generate_all_srts
 from premiere_xml import generate_combined_xml, generate_individual_xmls
@@ -320,6 +325,8 @@ def process_video(
     upload_to_drive: bool,
     output_base_dir: str = "",
     generate_thumbnails: bool = False,
+    audio_fusion: bool = False,
+    audio_alpha: float = 0.35,
     progress=gr.Progress(),
 ):
     """Main processing pipeline for the web UI."""
@@ -446,6 +453,17 @@ def process_video(
             api_key=api_key,
             ai_model=ai_model,
         )
+
+        if audio_fusion:
+            alpha = float(audio_alpha if audio_alpha is not None else 0.35)
+            log(f"  Applying audio excitement fusion (alpha={alpha:.2f})")
+            highlights = fuse_audio_energy(
+                video_path,
+                highlights,
+                alpha=alpha,
+                min_duration=min_duration,
+                max_duration=max_duration,
+            )
 
         highlights_summary = ""
         for i, h in enumerate(highlights, 1):
@@ -787,6 +805,17 @@ def create_ui():
                             label="サムネイル候補を生成 / Generate thumbnail candidates",
                             value=defaults.get("generate_thumbnails", False),
                             info="各クリップからタイトル入りの代表フレーム画像を生成します",
+                        )
+                        audio_fusion = gr.Checkbox(
+                            label="音声盛り上がり融合 / Audio excitement fusion",
+                            value=defaults.get("audio_fusion", False),
+                            info="音量や急な盛り上がりを使ってクリップ順位を再調整します / Re-rank clips using loudness and sudden audio peaks",
+                        )
+                        audio_alpha = gr.Slider(
+                            0.0, 1.0,
+                            value=defaults.get("audio_alpha", 0.35),
+                            step=0.05,
+                            label="音声重み alpha / Audio weight",
                         )
                         generate_zip = gr.Checkbox(
                             label="ZIPファイルを生成",
@@ -1158,7 +1187,8 @@ def create_ui():
                             whisper_model, language,
                             font_name, font_size, font_color,
                             output_base_dir,
-                            generate_thumbnails],
+                            generate_thumbnails,
+                            audio_fusion, audio_alpha],
                     outputs=save_defaults_msg,
                 )
 
@@ -1212,6 +1242,8 @@ def create_ui():
                 upload_to_drive,
                 output_base_dir,
                 generate_thumbnails,
+                audio_fusion,
+                audio_alpha,
             ],
             outputs=[log_output, highlights_output, download_output, drive_link_output, chapters_output],
             concurrency_limit=1,

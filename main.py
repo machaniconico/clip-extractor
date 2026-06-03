@@ -11,6 +11,7 @@ from config import FontConfig
 from downloader import is_youtube_url, download_video
 from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
+from audio_energy import fuse_audio_energy
 from clipper import extract_clips, generate_thumbnails, get_video_info
 from subtitles import generate_all_srts
 from premiere_xml import generate_combined_xml, generate_individual_xmls
@@ -50,6 +51,10 @@ def main():
                         help="ショート動画冒頭のタイトル焼き込みを無効化")
     parser.add_argument("--thumbnails", action="store_true",
                         help="サムネイル候補画像を生成 / Generate thumbnail candidates")
+    parser.add_argument("--audio-fusion", action="store_true",
+                        help="音声の盛り上がりをハイライト順位に融合 / Fuse audio excitement into ranking")
+    parser.add_argument("--audio-alpha", type=float, default=0.35,
+                        help="音声重み alpha (0.0-1.0, default: 0.35) / Audio fusion weight")
     parser.add_argument("-p", "--prompt", default="", help="Custom prompt for highlight detection")
     parser.add_argument("--min-duration", type=int, default=30, help="Minimum clip duration in seconds")
     parser.add_argument("--max-duration", type=int, default=90, help="Maximum clip duration in seconds")
@@ -222,6 +227,16 @@ def main():
         max_duration=args.max_duration,
         custom_prompt=modes.active_prompt,
     )
+
+    if args.audio_fusion:
+        print(f"Applying audio excitement fusion (alpha={args.audio_alpha:.2f})...")
+        highlights = fuse_audio_energy(
+            video_path,
+            highlights,
+            alpha=args.audio_alpha,
+            min_duration=args.min_duration,
+            max_duration=args.max_duration,
+        )
 
     # Steps 5–8 are the clip pipeline. Skipped entirely when --no-clips.
     clip_paths = []

@@ -45,9 +45,11 @@ def test_process_video_signature_matches_generate_inputs():
     args = _function_args(module, "process_video")
     args = [arg for arg in args if arg != "progress"]
     assert args == _click_input_names(module, "generate_btn")
+    assert args[-3:] == ["generate_thumbnails", "audio_fusion", "audio_alpha"]
 
 
 def test_save_defaults_signature_matches_save_button_inputs():
     module = _module()
     args = _function_args(module, "save_defaults")
     assert args == _click_input_names(module, "save_defaults_btn")
+    assert args[-3:] == ["generate_thumbnails", "audio_fusion", "audio_alpha"]

@@ -34,6 +34,8 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         whisper_model="large-v3", language="ja",
         font_name="Noto Sans JP", font_size=96, font_color="#FFFFFF",
         output_base_dir="",
+        generate_thumbnails=False,
+        audio_fusion=False, audio_alpha=0.35,
     )
     args.update(overrides)
 
@@ -48,6 +50,8 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         args["whisper_model"], args["language"],
         args["font_name"], args["font_size"], args["font_color"],
         args["output_base_dir"],
+        args["generate_thumbnails"],
+        args["audio_fusion"], args["audio_alpha"],
     )
     assert settings_file.exists(), "save_defaults should write SETTINGS_FILE"
     return web_app.load_defaults()
@@ -73,6 +77,20 @@ def test_roundtrip_preserves_defaults(monkeypatch, tmp_path):
     assert loaded["shorts_mode"] == "crop", loaded
     assert loaded["shorts_crop"] == "center", loaded
     assert loaded["shorts_title"] is True, loaded
+    assert loaded["audio_fusion"] is False, loaded
+    assert loaded["audio_alpha"] == 0.35, loaded
+
+
+def test_roundtrip_audio_fusion_fields(monkeypatch, tmp_path):
+    loaded = _save_with(
+        monkeypatch, tmp_path,
+        generate_thumbnails=True,
+        audio_fusion=True,
+        audio_alpha=0.65,
+    )
+    assert loaded["generate_thumbnails"] is True, loaded
+    assert loaded["audio_fusion"] is True, loaded
+    assert loaded["audio_alpha"] == 0.65, loaded
 
 
 def test_does_not_touch_real_settings(monkeypatch, tmp_path):
