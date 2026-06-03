@@ -57,6 +57,7 @@ class AppConfig:
     shorts_crop: str = "center"  # "center" | "left" | "right"
     shorts_mode: str = "crop"  # "crop" | "blur" | "pad"
     shorts_title: bool = True
+    generate_thumbnails: bool = False
     highlight_prompt: str = ""
     font_config: FontConfig = field(default_factory=FontConfig)
     whisper_model: str = "large-v3"

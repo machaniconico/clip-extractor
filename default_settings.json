@@ -8,6 +8,7 @@
   "shorts_mode": "crop",
   "shorts_crop": "center",
   "shorts_title": true,
+  "generate_thumbnails": false,
   "min_duration": 30,
   "max_duration": 90,
   "whisper_model": "large-v3",

@@ -141,7 +141,7 @@ def load_defaults() -> dict:
         "num_clips": 5, "min_duration": 30, "max_duration": 90,
         "output_mode": "combined", "generate_shorts": False,
         "shorts_mode": "crop", "shorts_crop": "center",
-        "shorts_title": True,
+        "shorts_title": True, "generate_thumbnails": False,
         "whisper_model": "large-v3", "language": "ja",
         "font_name": "Noto Sans JP", "font_size": 96, "font_color": "#FFFFFF",
         "output_base_dir": "",
@@ -162,7 +162,8 @@ def save_defaults(ai_provider, ai_model,
                   min_duration, max_duration,
                   whisper_model, language,
                   font_name, font_size, font_color,
-                  output_base_dir):
+                  output_base_dir,
+                  generate_thumbnails=False):
     """Save current settings as defaults."""
     data = {
         "ai_provider": ai_provider, "ai_model": ai_model,
@@ -178,6 +179,7 @@ def save_defaults(ai_provider, ai_model,
         "font_name": font_name, "font_size": int(font_size),
         "font_color": font_color,
         "output_base_dir": (output_base_dir or "").strip(),
+        "generate_thumbnails": bool(generate_thumbnails),
     }
     SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return "Settings saved as default!"
@@ -282,7 +284,7 @@ from chapters import generate_chapter_text, write_chapter_file
 from downloader import download_video
 from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
-from clipper import extract_clips, get_video_info
+from clipper import extract_clips, generate_thumbnails as generate_thumbnail_candidates, get_video_info
 from subtitles import generate_all_srts
 from premiere_xml import generate_combined_xml, generate_individual_xmls
 from drive_upload import upload_output_directory, is_configured as drive_is_configured
@@ -317,6 +319,7 @@ def process_video(
     font_color: str,
     upload_to_drive: bool,
     output_base_dir: str = "",
+    generate_thumbnails: bool = False,
     progress=gr.Progress(),
 ):
     """Main processing pipeline for the web UI."""
@@ -459,6 +462,7 @@ def process_video(
         srt_paths: list[Path] = []
         shorts_paths: list[Path] = []
         shorts_srt_paths: list[Path] = []
+        thumbnail_paths: list[Path] = []
 
         if modes.enable_clips:
             # Step 4: Extract clips (normal landscape, no burn-in — Premiere edits SRT separately)
@@ -490,6 +494,25 @@ def process_video(
                     shorts_title=shorts_title,
                 )
                 log(f"  Generated {len(shorts_paths)} shorts with {font_config.font_name} @ {font_config.font_size}pt")
+
+            if generate_thumbnails:
+                progress(0.8, desc="Generating thumbnail candidates...")
+                if generate_shorts:
+                    thumbnail_dir = output_dir / "shorts"
+                    thumbnail_paths = generate_thumbnail_candidates(
+                        video_path, highlights, thumbnail_dir,
+                        vertical=True,
+                        crop_x=shorts_crop,
+                        shorts_mode=shorts_mode,
+                        font_config=font_config,
+                    )
+                    log(f"  Generated {len(thumbnail_paths)} vertical thumbnail candidates")
+                else:
+                    thumbnail_paths = generate_thumbnail_candidates(
+                        video_path, highlights, clips_dir,
+                        font_config=font_config,
+                    )
+                    log(f"  Generated {len(thumbnail_paths)} thumbnail candidates")
 
             # Step 6: Premiere Pro XML
             progress(0.85, desc="[Step 6/6] Exporting XML...")
@@ -759,6 +782,11 @@ def create_ui():
                             label="ショート冒頭にタイトルを表示",
                             value=defaults.get("shorts_title", True),
                             info="各ショートの最初の4秒だけ、上部中央にタイトルを焼き込みます",
+                        )
+                        generate_thumbnails = gr.Checkbox(
+                            label="サムネイル候補を生成 / Generate thumbnail candidates",
+                            value=defaults.get("generate_thumbnails", False),
+                            info="各クリップからタイトル入りの代表フレーム画像を生成します",
                         )
                         generate_zip = gr.Checkbox(
                             label="ZIPファイルを生成",
@@ -1129,7 +1157,8 @@ def create_ui():
                             min_duration, max_duration,
                             whisper_model, language,
                             font_name, font_size, font_color,
-                            output_base_dir],
+                            output_base_dir,
+                            generate_thumbnails],
                     outputs=save_defaults_msg,
                 )
 
@@ -1182,6 +1211,7 @@ def create_ui():
                 whisper_model, language, font_name, font_size, font_color,
                 upload_to_drive,
                 output_base_dir,
+                generate_thumbnails,
             ],
             outputs=[log_output, highlights_output, download_output, drive_link_output, chapters_output],
             concurrency_limit=1,

@@ -1,6 +1,7 @@
 """Video clip extraction using FFmpeg."""
 
 import logging
+import re
 import subprocess
 import unicodedata
 from functools import lru_cache
@@ -349,11 +350,11 @@ def _resolve_title_fontfile(font_name: str) -> str | None:
     return None
 
 
-def _build_title_drawtext(title: str, font_config: "FontConfig") -> str:
-    """Build a drawtext filter that shows the clip title for the first 4 seconds."""
+def _title_drawtext_parts(title: str, font_config: "FontConfig") -> list[str]:
+    """Build shared drawtext options for title overlays."""
     wrapped_title = _wrap_title_text(title)
     if not wrapped_title:
-        return ""
+        return []
 
     font_name = getattr(font_config, "font_name", "Noto Sans JP") or "Noto Sans JP"
     fontfile = _resolve_title_fontfile(font_name)
@@ -372,9 +373,110 @@ def _build_title_drawtext(title: str, font_config: "FontConfig") -> str:
         "box=1",
         "boxcolor=black@0.5",
         "boxborderw=24",
-        "enable='lt(t\\,4)'",
     ])
+    return parts
+
+
+def _build_title_drawtext(title: str, font_config: "FontConfig") -> str:
+    """Build a drawtext filter that shows the clip title for the first 4 seconds."""
+    parts = _title_drawtext_parts(title, font_config)
+    if not parts:
+        return ""
+
+    parts.append("enable='lt(t\\,4)'")
     return "drawtext=" + ":".join(parts)
+
+
+def _build_thumbnail_drawtext(title: str, font_config: "FontConfig") -> str:
+    """Build a drawtext filter for a still thumbnail title overlay."""
+    parts = _title_drawtext_parts(title, font_config)
+    if not parts:
+        return ""
+
+    return "drawtext=" + ":".join(parts)
+
+
+def _detect_scene_thumbnail_timestamp(
+    video_path: Path | None,
+    start_sec: float,
+    end_sec: float,
+) -> float | None:
+    """Return the first scene-change timestamp in the clip window, if found."""
+    if video_path is None:
+        return None
+
+    duration = max(0.0, end_sec - start_sec)
+    if duration <= 0:
+        return None
+
+    cmd = [
+        "ffmpeg", "-hide_banner",
+        "-ss", str(start_sec),
+        "-i", str(video_path),
+        "-t", str(duration),
+        "-vf", r"select='gt(scene\,0.4)',showinfo",
+        "-frames:v", "1",
+        "-f", "null",
+        "-",
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except Exception:
+        return None
+
+    match = re.search(r"pts_time:([-+]?\d+(?:\.\d+)?)", result.stderr or "")
+    if not match:
+        return None
+
+    timestamp = float(match.group(1))
+    if start_sec <= timestamp <= end_sec:
+        return timestamp
+    if 0 <= timestamp <= duration:
+        return start_sec + timestamp
+    return None
+
+
+def _select_thumbnail_timestamp(
+    start_sec: float,
+    end_sec: float,
+    strategy: str = "midpoint",
+) -> float:
+    """Select the representative timestamp for a thumbnail."""
+    return _select_thumbnail_timestamp_for_video(None, start_sec, end_sec, strategy)
+
+
+def _select_thumbnail_timestamp_for_video(
+    video_path: Path | None,
+    start_sec: float,
+    end_sec: float,
+    strategy: str = "midpoint",
+) -> float:
+    midpoint = (start_sec + end_sec) / 2
+    if strategy == "midpoint":
+        return midpoint
+
+    if strategy == "scene":
+        scene_timestamp = _detect_scene_thumbnail_timestamp(video_path, start_sec, end_sec)
+        if scene_timestamp is not None:
+            return scene_timestamp
+        logger.warning(
+            "No scene-change thumbnail frame found for %.3f-%.3f; "
+            "falling back to midpoint %.3f",
+            start_sec,
+            end_sec,
+            midpoint,
+        )
+        return midpoint
+
+    logger.warning("Unknown thumbnail strategy=%r; falling back to midpoint", strategy)
+    return midpoint
 
 
 def extract_clip(
@@ -417,6 +519,60 @@ def extract_clip(
     return output_path
 
 
+def generate_thumbnail(
+    video_path: Path,
+    output_path: Path,
+    start_sec: float,
+    end_sec: float,
+    *,
+    vertical: bool = False,
+    crop_x: str = "center",
+    shorts_mode: str = "crop",
+    title: str = "",
+    font_config: "FontConfig | None" = None,
+    strategy: str = "midpoint",
+) -> Path:
+    """Generate one representative still image for a highlight clip."""
+    video_path = Path(video_path)
+    output_path = Path(output_path)
+    if strategy == "scene":
+        timestamp = _select_thumbnail_timestamp_for_video(
+            video_path,
+            start_sec,
+            end_sec,
+            strategy,
+        )
+    else:
+        timestamp = _select_thumbnail_timestamp(start_sec, end_sec, strategy)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", str(timestamp),
+        "-i", str(video_path),
+        "-frames:v", "1",
+    ]
+
+    vf_filters: list[str] = []
+    if vertical:
+        vf_filters.append(_shorts_base_vf(shorts_mode, crop_x))
+
+    drawtext = _build_thumbnail_drawtext(
+        title,
+        font_config or _DefaultTitleFontConfig(),
+    )
+    if drawtext:
+        vf_filters.append(drawtext)
+    if vf_filters:
+        cmd.extend(["-vf", ",".join(vf_filters)])
+
+    if output_path.suffix.lower() in {".jpg", ".jpeg"}:
+        cmd.extend(["-q:v", "2"])
+
+    cmd.append(str(output_path))
+    subprocess.run(cmd, capture_output=True, check=True)
+    return output_path
+
+
 def format_time_range(start_sec: float, end_sec: float) -> str:
     """Format time range as HHhMMmSSs-HHhMMmSSs for filenames."""
     def fmt(sec: float) -> str:
@@ -425,6 +581,46 @@ def format_time_range(start_sec: float, end_sec: float) -> str:
         s = int(sec % 60)
         return f"{h:02d}h{m:02d}m{s:02d}s"
     return f"{fmt(start_sec)}-{fmt(end_sec)}"
+
+
+def generate_thumbnails(
+    video_path: Path,
+    highlights: list[dict],
+    output_dir: Path,
+    *,
+    vertical: bool = False,
+    crop_x: str = "center",
+    shorts_mode: str = "crop",
+    font_config: "FontConfig | None" = None,
+    img_format: str = "png",
+    strategy: str = "midpoint",
+) -> list[Path]:
+    """Generate thumbnail candidate images for all highlights."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    thumbnail_paths: list[Path] = []
+    ext = (img_format or "png").strip().lower().lstrip(".") or "png"
+
+    for i, h in enumerate(highlights, 1):
+        range_str = format_time_range(h["start_sec"], h["end_sec"])
+        thumbnail_path = output_dir / f"{range_str}_thumb.{ext}"
+
+        print(f"Generating thumbnail {i}/{len(highlights)}: {h.get('title', '')}...")
+        generate_thumbnail(
+            video_path,
+            thumbnail_path,
+            h["start_sec"],
+            h["end_sec"],
+            vertical=vertical,
+            crop_x=crop_x,
+            shorts_mode=shorts_mode,
+            title=h.get("title", ""),
+            font_config=font_config,
+            strategy=strategy,
+        )
+        thumbnail_paths.append(thumbnail_path)
+
+    return thumbnail_paths
 
 
 def extract_clips(
@@ -517,8 +713,10 @@ if __name__ == "__main__":
 
     assert _shorts_base_vf("pad") == _SHORTS_PAD_FILTER, "pad base mismatch"
     assert _shorts_base_vf("blur") == _SHORTS_BLUR_FILTER, "blur base mismatch"
+    assert _select_thumbnail_timestamp(10, 30) == 20.0, "thumbnail midpoint mismatch"
 
-    title_f = _build_title_drawtext("A:B's 50% C\\D あいうえおかきくけこさしすせそ", fc)
+    title_text = "A:B's 50% C\\D あいうえおかきくけこさしすせそ"
+    title_f = _build_title_drawtext(title_text, fc)
     for expected in [
         "drawtext=", "font='Noto Sans JP'", "text='A\\:B\\'s 50\\% C\\\\D",
         "fontsize=80", "fontcolor=white", "box=1", "boxcolor=black@0.5",
@@ -527,5 +725,17 @@ if __name__ == "__main__":
         assert expected in title_f, f"missing: {expected} in {title_f}"
     assert "\n" in title_f, f"title should wrap long text: {title_f}"
     assert r"\n" not in title_f, f"newline must be a real 0x0A, not literal: {title_f}"
+
+    thumb_f = _build_thumbnail_drawtext(title_text, fc)
+    assert thumb_f.startswith("drawtext="), f"thumbnail drawtext missing: {thumb_f}"
+    assert "enable=" not in thumb_f, f"thumbnail drawtext must not use enable: {thumb_f}"
+    for expected in [
+        "font='Noto Sans JP'", "text='A\\:B\\'s 50\\% C\\\\D",
+        "fontsize=80", "fontcolor=white", "box=1", "boxcolor=black@0.5",
+        "boxborderw=24", "x=(w-text_w)/2", "y=140",
+    ]:
+        assert expected in thumb_f, f"missing thumbnail part: {expected} in {thumb_f}"
+    assert title_f == f"{thumb_f}:enable='lt(t\\,4)'", "title/thumbnail style diverged"
+    assert _build_thumbnail_drawtext("   \n", fc) == "", "empty thumbnail title should skip drawtext"
 
     print("clipper.py self-test: all assertions passed")

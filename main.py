@@ -11,7 +11,7 @@ from config import FontConfig
 from downloader import is_youtube_url, download_video
 from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
-from clipper import extract_clips, get_video_info
+from clipper import extract_clips, generate_thumbnails, get_video_info
 from subtitles import generate_all_srts
 from premiere_xml import generate_combined_xml, generate_individual_xmls
 from modes import GenerationModes
@@ -48,6 +48,8 @@ def main():
                         help="ショート動画の横クロップ位置 (default: center)")
     parser.add_argument("--no-shorts-title", action="store_true",
                         help="ショート動画冒頭のタイトル焼き込みを無効化")
+    parser.add_argument("--thumbnails", action="store_true",
+                        help="サムネイル候補画像を生成 / Generate thumbnail candidates")
     parser.add_argument("-p", "--prompt", default="", help="Custom prompt for highlight detection")
     parser.add_argument("--min-duration", type=int, default=30, help="Minimum clip duration in seconds")
     parser.add_argument("--max-duration", type=int, default=90, help="Maximum clip duration in seconds")
@@ -226,6 +228,7 @@ def main():
     srt_paths = []
     shorts_paths = []
     shorts_srt_paths = []
+    thumbnail_paths = []
     clips_dir = output_dir / "clips"  # referenced later by XML + summary
 
     if modes.enable_clips:
@@ -256,6 +259,24 @@ def main():
                 shorts_mode=args.shorts_mode,
                 shorts_title=not args.no_shorts_title,
             )
+
+        if args.thumbnails:
+            print("\n--- Thumbnail Candidates ---")
+            if args.shorts:
+                thumbnail_dir = output_dir / "shorts"
+                thumbnail_paths = generate_thumbnails(
+                    video_path, highlights, thumbnail_dir,
+                    vertical=True,
+                    crop_x=args.shorts_crop,
+                    shorts_mode=args.shorts_mode,
+                    font_config=font_config,
+                )
+            else:
+                thumbnail_paths = generate_thumbnails(
+                    video_path, highlights, clips_dir,
+                    font_config=font_config,
+                )
+            print(f"Generated {len(thumbnail_paths)} thumbnail candidates")
     else:
         print("\n[Skip 5-7] Clip generation disabled (--no-clips) — chapters-only run")
 
@@ -330,6 +351,8 @@ def main():
         print(f"Clips: {len(clip_paths)} files")
         if shorts_paths:
             print(f"Shorts: {len(shorts_paths)} files")
+        if thumbnail_paths:
+            print(f"Thumbnails: {len(thumbnail_paths)} files")
         print(f"SRT: {len(srt_paths)} files")
         print(f"Mode: {args.mode}")
         print()
