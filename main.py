@@ -13,7 +13,7 @@ from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
 from audio_energy import fuse_audio_energy
 from clipper import extract_clips, generate_thumbnails, get_video_info
-from subtitles import generate_all_srts
+from subtitles import generate_all_karaoke_ass, generate_all_srts
 from premiere_xml import generate_combined_xml, generate_individual_xmls
 from modes import GenerationModes
 import youtube_api
@@ -55,6 +55,8 @@ def main():
                         help="音声の盛り上がりをハイライト順位に融合 / Fuse audio excitement into ranking")
     parser.add_argument("--audio-alpha", type=float, default=0.35,
                         help="音声重み alpha (0.0-1.0, default: 0.35) / Audio fusion weight")
+    parser.add_argument("--karaoke", action="store_true",
+                        help="ショート動画にワード単位カラオケ字幕を焼き込み / Burn word-level karaoke captions into Shorts")
     parser.add_argument("-p", "--prompt", default="", help="Custom prompt for highlight detection")
     parser.add_argument("--min-duration", type=int, default=30, help="Minimum clip duration in seconds")
     parser.add_argument("--max-duration", type=int, default=90, help="Maximum clip duration in seconds")
@@ -243,6 +245,7 @@ def main():
     srt_paths = []
     shorts_paths = []
     shorts_srt_paths = []
+    shorts_ass_paths = []
     thumbnail_paths = []
     clips_dir = output_dir / "clips"  # referenced later by XML + summary
 
@@ -258,17 +261,24 @@ def main():
         print(f"Generated {len(srt_paths)} SRT files")
 
         # Step 7: Shorts (9:16) with burned-in subtitles using font_config.
-        # SRT must be generated into shorts_dir first so the burn-in step can
-        # reference it via ffmpeg's subtitles filter.
+        # Subtitle assets must be generated into shorts_dir before burn-in so
+        # ffmpeg's subtitles filter can reference them.
         if args.shorts:
             print("\n--- Shorts Conversion (9:16) with burned-in subtitles ---")
             shorts_dir = output_dir / "shorts"
             shorts_dir.mkdir(parents=True, exist_ok=True)
-            shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
+            if args.karaoke:
+                shorts_ass_paths = generate_all_karaoke_ass(
+                    segments, highlights, shorts_dir, font_config,
+                )
+            else:
+                shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
             shorts_paths = extract_clips(
                 video_path, highlights, shorts_dir,
                 shorts=True,
                 srt_paths=shorts_srt_paths,
+                karaoke=args.karaoke,
+                ass_paths=shorts_ass_paths,
                 font_config=font_config,
                 crop_x=args.shorts_crop,
                 shorts_mode=args.shorts_mode,

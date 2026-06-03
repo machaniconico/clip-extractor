@@ -123,6 +123,11 @@ def _build_subtitles_filter(srt_path: Path, font_config: "FontConfig") -> str:
     return f"subtitles='{escaped}':force_style='{style}'"
 
 
+def _build_ass_subtitles_filter(ass_path: Path) -> str:
+    escaped = _escape_subtitles_path(ass_path)
+    return f"subtitles='{escaped}'"
+
+
 def _shorts_crop_filter(crop_x: str = "center") -> str:
     """9:16 縦クロップ + 1080x1920 スケールの vf フィルタを生成。crop_x で横位置を選ぶ。"""
     w = "ih*9/16"
@@ -491,6 +496,8 @@ def extract_clip(
     shorts_mode: str = "crop",
     shorts_title: bool = True,
     title: str = "",
+    karaoke: bool = False,
+    ass_path: Path | None = None,
 ) -> Path:
     """Extract a clip from the video."""
     duration = end_sec - start_sec
@@ -509,7 +516,9 @@ def extract_clip(
         vf_filters.append(_shorts_base_vf(shorts_mode, crop_x))
     if shorts and shorts_title and title:
         vf_filters.append(_build_title_drawtext(title, font_config or _DefaultTitleFontConfig()))
-    if shorts and srt_path is not None and font_config is not None:
+    if shorts and karaoke and ass_path is not None:
+        vf_filters.append(_build_ass_subtitles_filter(ass_path))
+    elif shorts and srt_path is not None and font_config is not None:
         vf_filters.append(_build_subtitles_filter(srt_path, font_config))
     if vf_filters:
         cmd.extend(["-vf", ",".join(vf_filters)])
@@ -633,6 +642,8 @@ def extract_clips(
     crop_x: str = "center",
     shorts_mode: str = "crop",
     shorts_title: bool = True,
+    karaoke: bool = False,
+    ass_paths: list[Path] | None = None,
 ) -> list[Path]:
     """Extract all highlight clips."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -645,6 +656,7 @@ def extract_clips(
         clip_path = output_dir / clip_name
 
         srt_path = srt_paths[i - 1] if srt_paths and i - 1 < len(srt_paths) else None
+        ass_path = ass_paths[i - 1] if ass_paths and i - 1 < len(ass_paths) else None
 
         print(f"Extracting clip {i}/{len(highlights)}: {h['title']}...")
         extract_clip(
@@ -659,6 +671,8 @@ def extract_clips(
             shorts_mode=shorts_mode,
             shorts_title=shorts_title,
             title=h.get("title", ""),
+            karaoke=karaoke,
+            ass_path=ass_path,
         )
         clip_paths.append(clip_path)
 
@@ -695,6 +709,10 @@ if __name__ == "__main__":
     filt = _build_subtitles_filter(Path("C:/Users/x/clip.srt"), fc)
     assert filt.startswith("subtitles='C\\:/Users/x/clip.srt'"), f"bad escape: {filt}"
     assert "force_style='FontName=Noto Sans JP" in filt, f"style missing: {filt}"
+
+    ass_filt = _build_ass_subtitles_filter(Path("C:/Users/x/clip.ass"))
+    assert ass_filt == "subtitles='C\\:/Users/x/clip.ass'", f"bad ASS escape: {ass_filt}"
+    assert "force_style" not in ass_filt, f"ASS filter must not force style: {ass_filt}"
 
     # _shorts_crop_filter: center (default) / left / right horizontal positions
     center_f = _shorts_crop_filter("center")

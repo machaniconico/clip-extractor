@@ -3,7 +3,7 @@
 import logging
 import os
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # Add NVIDIA CUDA DLL paths so faster-whisper can find cublas64_12.dll etc.
@@ -37,10 +37,18 @@ _model_cache = {"model": None, "model_size": None}
 
 
 @dataclass
+class Word:
+    start: float
+    end: float
+    text: str
+
+
+@dataclass
 class Segment:
     start: float
     end: float
     text: str
+    words: list[Word] = field(default_factory=list)
 
 
 def extract_audio(video_path: Path, audio_path: Path) -> None:
@@ -101,7 +109,12 @@ def transcribe(video_path: Path, model_size: str = "large-v3", language: str = "
 
         segments = []
         for seg in tqdm(raw_segments, desc="Processing segments"):
-            segments.append(Segment(start=seg.start, end=seg.end, text=seg.text.strip()))
+            segments.append(Segment(
+                start=seg.start,
+                end=seg.end,
+                text=seg.text.strip(),
+                words=[Word(w.start, w.end, w.word) for w in (seg.words or [])],
+            ))
     except Exception as e:
         logger.error(f"[Transcribe] Transcription failed: {e}")
         raise

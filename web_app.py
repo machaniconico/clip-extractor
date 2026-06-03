@@ -143,6 +143,7 @@ def load_defaults() -> dict:
         "shorts_mode": "crop", "shorts_crop": "center",
         "shorts_title": True, "generate_thumbnails": False,
         "audio_fusion": False, "audio_alpha": 0.35,
+        "karaoke": False,
         "whisper_model": "large-v3", "language": "ja",
         "font_name": "Noto Sans JP", "font_size": 96, "font_color": "#FFFFFF",
         "output_base_dir": "",
@@ -165,7 +166,8 @@ def save_defaults(ai_provider, ai_model,
                   font_name, font_size, font_color,
                   output_base_dir,
                   generate_thumbnails=False,
-                  audio_fusion=False, audio_alpha=0.35):
+                  audio_fusion=False, audio_alpha=0.35,
+                  karaoke=False):
     """Save current settings as defaults."""
     data = {
         "ai_provider": ai_provider, "ai_model": ai_model,
@@ -184,6 +186,7 @@ def save_defaults(ai_provider, ai_model,
         "generate_thumbnails": bool(generate_thumbnails),
         "audio_fusion": bool(audio_fusion),
         "audio_alpha": float(audio_alpha),
+        "karaoke": bool(karaoke),
     }
     SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return "Settings saved as default!"
@@ -290,7 +293,7 @@ from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
 from audio_energy import fuse_audio_energy
 from clipper import extract_clips, generate_thumbnails as generate_thumbnail_candidates, get_video_info
-from subtitles import generate_all_srts
+from subtitles import generate_all_karaoke_ass, generate_all_srts
 from premiere_xml import generate_combined_xml, generate_individual_xmls
 from drive_upload import upload_output_directory, is_configured as drive_is_configured
 from modes import GenerationModes
@@ -327,6 +330,7 @@ def process_video(
     generate_thumbnails: bool = False,
     audio_fusion: bool = False,
     audio_alpha: float = 0.35,
+    karaoke: bool = False,
     progress=gr.Progress(),
 ):
     """Main processing pipeline for the web UI."""
@@ -480,6 +484,7 @@ def process_video(
         srt_paths: list[Path] = []
         shorts_paths: list[Path] = []
         shorts_srt_paths: list[Path] = []
+        shorts_ass_paths: list[Path] = []
         thumbnail_paths: list[Path] = []
 
         if modes.enable_clips:
@@ -496,22 +501,30 @@ def process_video(
             srt_paths = generate_all_srts(segments, highlights, clips_dir)
             log(f"  Generated {len(srt_paths)} SRT files")
 
-            # Shorts (9:16) — generate SRTs first, then extract with font-styled burn-in
+            # Shorts (9:16) — generate subtitle assets first, then burn in.
             if generate_shorts:
                 progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
                 shorts_dir = output_dir / "shorts"
                 shorts_dir.mkdir(parents=True, exist_ok=True)
-                shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
+                if karaoke:
+                    shorts_ass_paths = generate_all_karaoke_ass(
+                        segments, highlights, shorts_dir, font_config,
+                    )
+                else:
+                    shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
                 shorts_paths = extract_clips(
                     video_path, highlights, shorts_dir,
                     shorts=True,
                     srt_paths=shorts_srt_paths,
+                    karaoke=bool(karaoke),
+                    ass_paths=shorts_ass_paths,
                     font_config=font_config,
                     crop_x=shorts_crop,
                     shorts_mode=shorts_mode,
                     shorts_title=shorts_title,
                 )
-                log(f"  Generated {len(shorts_paths)} shorts with {font_config.font_name} @ {font_config.font_size}pt")
+                subtitle_kind = "ASS karaoke" if karaoke else "SRT"
+                log(f"  Generated {len(shorts_paths)} shorts with {subtitle_kind} subtitles ({font_config.font_name} @ {font_config.font_size}pt)")
 
             if generate_thumbnails:
                 progress(0.8, desc="Generating thumbnail candidates...")
@@ -816,6 +829,11 @@ def create_ui():
                             value=defaults.get("audio_alpha", 0.35),
                             step=0.05,
                             label="音声重み alpha / Audio weight",
+                        )
+                        karaoke = gr.Checkbox(
+                            label="ワード単位カラオケ字幕 / Word-level karaoke captions",
+                            value=defaults.get("karaoke", False),
+                            info="ショート動画の焼き込み字幕を単語ごとにハイライトします / Highlight burned-in Shorts captions word by word",
                         )
                         generate_zip = gr.Checkbox(
                             label="ZIPファイルを生成",
@@ -1188,7 +1206,8 @@ def create_ui():
                             font_name, font_size, font_color,
                             output_base_dir,
                             generate_thumbnails,
-                            audio_fusion, audio_alpha],
+                            audio_fusion, audio_alpha,
+                            karaoke],
                     outputs=save_defaults_msg,
                 )
 
@@ -1244,6 +1263,7 @@ def create_ui():
                 generate_thumbnails,
                 audio_fusion,
                 audio_alpha,
+                karaoke,
             ],
             outputs=[log_output, highlights_output, download_output, drive_link_output, chapters_output],
             concurrency_limit=1,
