@@ -19,12 +19,14 @@ _SHORTS_PAD_FILTER = (
 _SHORTS_BLUR_FILTER = (
     "split=2[bg][fg];"
     "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
-    "crop=1080:1920,boxblur=20[bg];"
-    "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-    "[bg][fg]overlay=(W-w)/2:(H-h)/2"
+    "crop=1080:1920,boxblur=20[bgblur];"
+    "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fgscaled];"
+    "[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2"
 )
 _TITLE_FONT_SIZE = 80
 _TITLE_WRAP_FULLWIDTH_CHARS = 14
+_ZERO_WIDTH_JOINER = "\u200d"
+_EMOJI_VARIATION_SELECTOR = "\ufe0f"
 _JAPANESE_FONT_KEYWORDS = (
     "noto sans cjk jp",
     "noto sans jp",
@@ -149,6 +151,86 @@ def _title_char_width(ch: str) -> int:
     return 2 if unicodedata.east_asian_width(ch) in {"F", "W", "A"} else 1
 
 
+def _is_title_combining_mark(ch: str) -> bool:
+    return unicodedata.category(ch) in {"Mn", "Mc", "Me"}
+
+
+def _is_title_variation_selector(ch: str) -> bool:
+    return ch in {"\ufe0e", _EMOJI_VARIATION_SELECTOR}
+
+
+def _is_title_regional_indicator(ch: str) -> bool:
+    return 0x1F1E6 <= ord(ch) <= 0x1F1FF
+
+
+def _is_title_emoji_modifier(ch: str) -> bool:
+    return 0x1F3FB <= ord(ch) <= 0x1F3FF
+
+
+def _is_title_emoji_presentation(cluster: str) -> bool:
+    if _EMOJI_VARIATION_SELECTOR in cluster:
+        return True
+    if "\ufe0e" in cluster:
+        return False
+    return any(
+        _is_title_regional_indicator(ch) or 0x1F000 <= ord(ch) <= 0x1FAFF
+        for ch in cluster
+    )
+
+
+def _title_cluster_width(cluster: str) -> int:
+    """Display width for one minimal grapheme cluster."""
+    if not cluster:
+        return 0
+    if any(
+        _title_char_width(ch) == 2
+        for ch in cluster
+        if not (
+            ch == _ZERO_WIDTH_JOINER
+            or _is_title_combining_mark(ch)
+            or _is_title_variation_selector(ch)
+            or _is_title_emoji_modifier(ch)
+        )
+    ):
+        return 2
+    return 2 if _is_title_emoji_presentation(cluster) else 1
+
+
+def _title_grapheme_clusters(text: str):
+    """Yield minimal title grapheme clusters without third-party dependencies."""
+    current = ""
+
+    for ch in text:
+        if not current:
+            current = ch
+            continue
+
+        joins_previous = (
+            ch == _ZERO_WIDTH_JOINER
+            or current.endswith(_ZERO_WIDTH_JOINER)
+            or _is_title_combining_mark(ch)
+            or _is_title_variation_selector(ch)
+            or _is_title_emoji_modifier(ch)
+        )
+        if joins_previous:
+            current += ch
+            continue
+
+        if (
+            _is_title_regional_indicator(ch)
+            and len(current) == 1
+            and _is_title_regional_indicator(current)
+        ):
+            current += ch
+            continue
+
+        yield current
+        current = ch
+
+    if current:
+        yield current
+
+
 def _wrap_title_text(title: str, fullwidth_chars: int = _TITLE_WRAP_FULLWIDTH_CHARS) -> str:
     """Wrap title at roughly 13-15 full-width characters per line."""
     limit = fullwidth_chars * 2
@@ -157,15 +239,19 @@ def _wrap_title_text(title: str, fullwidth_chars: int = _TITLE_WRAP_FULLWIDTH_CH
     for raw_line in (title or "").strip().splitlines():
         current = ""
         current_width = 0
-        for ch in raw_line:
-            ch_width = _title_char_width(ch)
-            if current and current_width + ch_width > limit:
+        for cluster in _title_grapheme_clusters(raw_line):
+            cluster_width = _title_cluster_width(cluster)
+            if current and current_width + cluster_width > limit:
                 lines.append(current.rstrip())
-                current = ch.lstrip()
-                current_width = sum(_title_char_width(c) for c in current)
+                if cluster.lstrip() != cluster:
+                    current = ""
+                    current_width = 0
+                else:
+                    current = cluster
+                    current_width = cluster_width
             else:
-                current += ch
-                current_width += ch_width
+                current += cluster
+                current_width += cluster_width
         if current:
             lines.append(current.rstrip())
 

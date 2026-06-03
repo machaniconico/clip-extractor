@@ -63,10 +63,40 @@ def test_shorts_base_vf_blur():
     assert _shorts_base_vf("blur") == (
         "split=2[bg][fg];"
         "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,boxblur=20[bg];"
-        "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fg];"
-        "[bg][fg]overlay=(W-w)/2:(H-h)/2"
+        "crop=1080:1920,boxblur=20[bgblur];"
+        "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fgscaled];"
+        "[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2"
     )
+
+
+def _leading_filter_labels(chain: str) -> list[str]:
+    labels: list[str] = []
+    while chain.startswith("["):
+        end = chain.index("]")
+        labels.append(chain[1:end])
+        chain = chain[end + 1 :]
+    return labels
+
+
+def _trailing_filter_labels(chain: str) -> list[str]:
+    labels: list[str] = []
+    while chain.endswith("]"):
+        start = chain.rindex("[")
+        labels.append(chain[start + 1 : -1])
+        chain = chain[:start]
+    return labels
+
+
+def test_shorts_blur_filter_does_not_redefine_output_labels():
+    output_labels: list[str] = []
+    for chain in clipper._SHORTS_BLUR_FILTER.split(";"):
+        input_labels = _leading_filter_labels(chain)
+        chain_output_labels = _trailing_filter_labels(chain)
+        assert set(input_labels).isdisjoint(chain_output_labels)
+        output_labels.extend(chain_output_labels)
+
+    assert len(output_labels) == len(set(output_labels))
+    assert set(output_labels) == {"bg", "fg", "bgblur", "fgscaled"}
 
 
 def test_title_drawtext_escapes_specials(monkeypatch):
@@ -103,6 +133,34 @@ def test_title_wraps_long_japanese_with_real_newline(monkeypatch):
     # "\n" would render a stray "n" instead of wrapping, so it must NOT appear.
     assert "\n" in f
     assert r"\n" not in f
+
+
+def test_title_cluster_width_handles_zero_advance_components():
+    assert clipper._title_cluster_width("e\u0301") == 1
+    assert clipper._title_cluster_width("1\ufe0e") == 1
+    assert clipper._title_cluster_width("\U0001F44D\U0001F3FD") == 2
+    assert clipper._title_cluster_width("あ") == 2
+    assert clipper._title_cluster_width("\U0001F1EF\U0001F1F5") == 2
+    assert list(clipper._title_grapheme_clusters("\U0001F1EF\U0001F1F5")) == [
+        "\U0001F1EF\U0001F1F5"
+    ]
+
+
+@pytest.mark.parametrize(
+    "cluster",
+    [
+        "👨\u200d👩\u200d👧\u200d👦",
+        "🇯🇵",
+        "👍🏽",
+        "✌️",
+        "e\u0301",
+    ],
+)
+def test_title_wrap_preserves_grapheme_clusters(cluster):
+    wrapped = clipper._wrap_title_text(f"あ{cluster}い", fullwidth_chars=1)
+
+    assert cluster in wrapped
+    assert any(cluster in line for line in wrapped.splitlines())
 
 
 def test_title_drawtext_uses_fontfile_fallback(monkeypatch):
