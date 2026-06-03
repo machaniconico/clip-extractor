@@ -18,7 +18,7 @@ import gradio as gr
 class ProcessResult:
     """Structured result from the processing pipeline.
 
-    Fields line up with the Gradio outputs wired in generate_btn.click:
+    Fields line up with the Gradio outputs wired in render_btn.click:
     (log_output, highlights_output, download_output, drive_link_output,
     chapters_output). Building this dataclass instead of scattering raw
     5-tuples across every return statement keeps the field order in one
@@ -35,7 +35,7 @@ class ProcessResult:
     chapters_text: str = ""
 
     def as_gradio_outputs(self) -> tuple:
-        """Order matches generate_btn.click(outputs=[...])."""
+        """Order matches render_btn.click(outputs=[...])."""
         return (
             self.log,
             self.highlights,
@@ -197,7 +197,7 @@ def resolve_output_base(user_text: str) -> Path:
 
     Empty / whitespace input → <repo>/output. Otherwise honour the user
     input (absolute, relative, or ~-prefixed). Called from both the UI
-    event handlers and process_video so the "displayed path" in Settings
+    event handlers and detection/render phases so the "displayed path" in Settings
     matches the path that actually gets written to.
     """
     base_text = (user_text or "").strip()
@@ -292,6 +292,7 @@ from downloader import download_video
 from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
 from audio_energy import fuse_audio_energy
+import clipper
 from clipper import extract_clips, generate_thumbnails as generate_thumbnail_candidates, get_video_info
 from subtitles import generate_all_karaoke_ass, generate_all_srts
 from premiere_xml import generate_combined_xml, generate_individual_xmls
@@ -300,7 +301,593 @@ from modes import GenerationModes
 import youtube_api
 
 
-def process_video(
+_MIN_REVIEW_CLIP_DURATION_SEC = 0.1
+
+
+def _format_highlight_timestamp(seconds: float) -> str:
+    """Format seconds as HH:MM:SS.mmm for reviewed highlight metadata."""
+    total_ms = max(0, int(round(float(seconds) * 1000)))
+    hours = total_ms // 3_600_000
+    total_ms %= 3_600_000
+    minutes = total_ms // 60_000
+    total_ms %= 60_000
+    secs = total_ms // 1000
+    ms = total_ms % 1000
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{ms:03d}"
+
+
+def _coerce_float(value, fallback: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+
+
+def _session_video_duration(session: dict | None) -> float:
+    if not isinstance(session, dict):
+        return 0.0
+    video_info = session.get("video_info") or {}
+    return max(0.0, _coerce_float(video_info.get("duration"), 0.0))
+
+
+def _clamp_review_range(start_sec, end_sec, video_duration: float) -> tuple[float, float]:
+    """Clamp edited review bounds and correct inverted ranges."""
+    start = max(0.0, _coerce_float(start_sec, 0.0))
+    end = _coerce_float(end_sec, start + _MIN_REVIEW_CLIP_DURATION_SEC)
+    duration = max(0.0, float(video_duration))
+
+    if duration > 0:
+        start = min(start, duration)
+        end = min(max(0.0, end), duration)
+        if end <= start:
+            if start + _MIN_REVIEW_CLIP_DURATION_SEC <= duration:
+                end = start + _MIN_REVIEW_CLIP_DURATION_SEC
+            else:
+                end = duration
+                start = max(0.0, end - _MIN_REVIEW_CLIP_DURATION_SEC)
+        if end <= start:
+            start = 0.0
+            end = duration
+    else:
+        end = max(0.0, end)
+        if end <= start:
+            end = start + _MIN_REVIEW_CLIP_DURATION_SEC
+
+    return float(start), float(end)
+
+
+def _normalize_highlight_for_review(highlight: dict, video_duration: float) -> dict:
+    start, end = _clamp_review_range(
+        highlight.get("start_sec", highlight.get("start", 0.0)),
+        highlight.get("end_sec", highlight.get("end", 0.0)),
+        video_duration,
+    )
+    highlight["start_sec"] = start
+    highlight["end_sec"] = end
+    highlight["duration"] = float(end - start)
+    highlight["start"] = _format_highlight_timestamp(start)
+    highlight["end"] = _format_highlight_timestamp(end)
+    highlight["title"] = str(highlight.get("title") or "")
+    return highlight
+
+
+def _normalize_session_highlights(session: dict, *, sort: bool = False) -> dict:
+    video_duration = _session_video_duration(session)
+    highlights = session.get("highlights") or []
+    for highlight in highlights:
+        if isinstance(highlight, dict):
+            _normalize_highlight_for_review(highlight, video_duration)
+    if sort:
+        highlights.sort(key=lambda item: float(item.get("start_sec", 0.0)))
+    session["highlights"] = highlights
+    return session
+
+
+def _format_highlights_summary(highlights: list[dict]) -> str:
+    if not highlights:
+        return "No highlights detected. / ハイライトが見つかりませんでした。"
+
+    lines: list[str] = []
+    for i, h in enumerate(highlights, 1):
+        title = h.get("title") or f"Clip {i}"
+        start = h.get("start") or _format_highlight_timestamp(h.get("start_sec", 0.0))
+        end = h.get("end") or _format_highlight_timestamp(h.get("end_sec", 0.0))
+        duration = _coerce_float(h.get("duration"), 0.0)
+        reason = h.get("reason") or ""
+        lines.append(f"**{i}. {title}**")
+        lines.append(f"   {start} → {end} ({duration:.1f}s)")
+        if reason:
+            lines.append(f"   {reason}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def highlights_for_review(session: dict | None) -> list[dict]:
+    """Return highlight rows for @gr.render, including video duration metadata."""
+    if not isinstance(session, dict):
+        return []
+    _normalize_session_highlights(session)
+    video_duration = _session_video_duration(session)
+    rows: list[dict] = []
+    for highlight in session.get("highlights") or []:
+        item = dict(highlight)
+        item["_video_duration"] = video_duration
+        rows.append(item)
+    return rows
+
+
+def apply_edits_to_session(
+    session: dict | None,
+    idx: int,
+    start_sec,
+    end_sec,
+    title,
+) -> dict:
+    """Apply one reviewed clip edit to session State.
+
+    範囲外・逆転した値はここで補正し、後段は従来通り start_sec/end_sec/title
+    だけを読む形に保ちます。
+    """
+    if not isinstance(session, dict):
+        return {}
+    highlights = session.get("highlights") or []
+    if idx < 0 or idx >= len(highlights):
+        return session
+
+    highlight = highlights[idx]
+    if not isinstance(highlight, dict):
+        return session
+
+    video_duration = _session_video_duration(session)
+    start, end = _clamp_review_range(start_sec, end_sec, video_duration)
+    highlight["start_sec"] = start
+    highlight["end_sec"] = end
+    highlight["duration"] = float(end - start)
+    highlight["start"] = _format_highlight_timestamp(start)
+    highlight["end"] = _format_highlight_timestamp(end)
+    highlight["title"] = str(title or "")
+    session["highlights"] = highlights
+    return session
+
+
+def render_preview_clip(session: dict | None, idx: int, start_sec, end_sec) -> str:
+    """Render one reviewed clip preview and return its mp4 path."""
+    if not isinstance(session, dict):
+        return ""
+    highlights = session.get("highlights") or []
+    if idx < 0 or idx >= len(highlights):
+        return ""
+
+    title = highlights[idx].get("title", "") if isinstance(highlights[idx], dict) else ""
+    session = apply_edits_to_session(session, idx, start_sec, end_sec, title)
+    highlight = session["highlights"][idx]
+    output_dir = Path(session["output_dir"])
+    preview_dir = output_dir / "_preview"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    preview_path = preview_dir / f"clip_{idx}.mp4"
+    clipper.extract_clip(
+        Path(session["video_path"]),
+        preview_path,
+        highlight["start_sec"],
+        highlight["end_sec"],
+    )
+    return str(preview_path)
+
+
+def _apply_review_edit_event(session: dict | None, idx: int, start_sec, end_sec, title):
+    updated = apply_edits_to_session(session, idx, start_sec, end_sec, title)
+    return updated, highlights_for_review(updated)
+
+
+def detect_phase(
+    input_url: str,
+    input_file,
+    enable_clips: bool,
+    clip_prompt: str,
+    enable_chapters: bool,
+    chapter_prompt: str,
+    num_clips: int,
+    ai_provider: str,
+    ai_model: str,
+    api_key: str,
+    min_duration: int,
+    max_duration: int,
+    whisper_model: str,
+    language: str,
+    audio_fusion: bool,
+    audio_alpha: float,
+    output_base_dir: str,
+    progress=gr.Progress(),
+):
+    """Detection phase: validate, resolve input, transcribe, and find highlights."""
+    logs = []
+
+    def log(msg: str):
+        logger.info(msg)
+        logs.append(msg)
+
+    try:
+        modes = GenerationModes(
+            enable_clips=bool(enable_clips),
+            enable_chapters=bool(enable_chapters),
+            clip_prompt=clip_prompt or "",
+            chapter_prompt=chapter_prompt or "",
+        )
+        try:
+            modes.validate()
+        except ValueError as mode_err:
+            return {}, f"Error: {mode_err}", gr.update(visible=False)
+        log(f"Modes: clips={modes.enable_clips}, chapters={modes.enable_chapters}")
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_dir = resolve_output_base(output_base_dir)
+        output_dir = base_dir / f"output_{timestamp}"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        log(f"Output base: {base_dir}")
+
+        youtube_video_id: str | None = None
+        if input_url and input_url.strip():
+            youtube_video_id = youtube_api.extract_video_id(input_url.strip())
+            if youtube_video_id:
+                log(f"YouTube video id: {youtube_video_id}")
+
+        if input_file is not None:
+            original_path = Path(getattr(input_file, "name", input_file))
+            log(f"Local file: {original_path.name}")
+            try:
+                str(original_path).encode("ascii")
+                video_path = original_path
+            except UnicodeEncodeError:
+                safe_dir = output_dir / "_safe"
+                safe_dir.mkdir(parents=True, exist_ok=True)
+                safe_name = f"input{original_path.suffix}"
+                video_path = safe_dir / safe_name
+                shutil.copy2(original_path, video_path)
+                log(f"Copied to safe path: {video_path}")
+        elif input_url and input_url.strip():
+            progress(0.05, desc="Downloading video...")
+            video_path = download_video(input_url.strip(), output_dir / "source")
+            log(f"Downloaded: {video_path.name}")
+        else:
+            return (
+                {"logs": logs},
+                "Error: URLを入力するかファイルをアップロードしてください",
+                gr.update(visible=False),
+            )
+
+        progress(0.1, desc="[Step 1/3] Analyzing video...")
+        log(f"[Step 1/3] Analyzing video: {video_path}")
+        video_info = get_video_info(video_path)
+        log(
+            f"  Resolution: {video_info['width']}x{video_info['height']}, "
+            f"FPS: {video_info['fps']:.2f}, Duration: {video_info['duration']:.0f}s"
+        )
+
+        progress(0.15, desc="[Step 2/3] Transcribing audio...")
+        log("[Step 2/3] Transcribing... (this may take a while)")
+        segments = transcribe(video_path, whisper_model, language)
+        transcript_text = segments_to_text(segments)
+
+        transcript_path = output_dir / "transcript.txt"
+        transcript_path.write_text(transcript_text, encoding="utf-8")
+        log(f"  Transcription complete: {len(segments)} segments")
+
+        progress(0.5, desc="[Step 3/3] Detecting highlights...")
+        provider_name = {"claude": "Claude", "openai": "ChatGPT", "gemini": "Gemini"}.get(ai_provider, ai_provider)
+        log(f"[Step 3/3] Analyzing with {provider_name}...")
+        highlights = detect_highlights(
+            transcript_text,
+            num_clips=num_clips,
+            min_duration=min_duration,
+            max_duration=max_duration,
+            custom_prompt=modes.active_prompt,
+            ai_provider=ai_provider,
+            api_key=api_key,
+            ai_model=ai_model,
+        )
+
+        if audio_fusion:
+            alpha = float(audio_alpha if audio_alpha is not None else 0.35)
+            log(f"  Applying audio excitement fusion (alpha={alpha:.2f})")
+            highlights = fuse_audio_energy(
+                video_path,
+                highlights,
+                alpha=alpha,
+                min_duration=min_duration,
+                max_duration=max_duration,
+            )
+
+        session = {
+            "output_dir": output_dir,
+            "video_path": video_path,
+            "video_info": video_info,
+            "segments": segments,
+            "highlights": highlights,
+            "youtube_video_id": youtube_video_id,
+            "enable_clips": modes.enable_clips,
+            "enable_chapters": modes.enable_chapters,
+            "modes": {
+                "enable_clips": modes.enable_clips,
+                "enable_chapters": modes.enable_chapters,
+                "clip_prompt": modes.clip_prompt,
+                "chapter_prompt": modes.chapter_prompt,
+                "active_prompt": modes.active_prompt,
+            },
+            "logs": logs,
+        }
+        _normalize_session_highlights(session)
+        log(f"  Found {len(session['highlights'])} highlights")
+        log(f"\nDetection complete. Review clips, then Render. Output: {output_dir}")
+
+        status_md = (
+            "### 検出完了 / Detection Complete\n\n"
+            "開始・終了・タイトルを確認してから Render を押してください。"
+            " / Review start, end, and title before rendering.\n\n"
+            f"{_format_highlights_summary(session['highlights'])}"
+        )
+        return session, status_md, gr.update(visible=True)
+
+    except subprocess.CalledProcessError as e:
+        err_detail = f"Command failed: {e.cmd}\nReturn code: {e.returncode}"
+        if e.stdout:
+            err_detail += f"\nstdout: {e.stdout[:500]}"
+        if e.stderr:
+            err_detail += f"\nstderr: {e.stderr[:500]}"
+        logger.error(err_detail)
+        log(f"\nError (subprocess): {err_detail}")
+        return {"logs": logs}, "\n".join(logs), gr.update(visible=False)
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Error: {e}\n{tb}")
+        log(f"\nError: {e}")
+        log(tb)
+        return {"logs": logs}, "\n".join(logs), gr.update(visible=False)
+
+
+def render_phase(
+    session: dict,
+    output_mode: str,
+    generate_shorts: bool,
+    shorts_mode: str,
+    shorts_crop: str,
+    shorts_title: bool,
+    generate_zip: bool,
+    upload_to_drive: bool,
+    auto_append_youtube: bool,
+    font_name: str,
+    font_size: int,
+    font_color: str,
+    generate_thumbnails: bool,
+    karaoke: bool,
+    progress=gr.Progress(),
+):
+    """Render phase: replay downstream output generation with edited highlights."""
+    if not isinstance(session, dict) or not session.get("video_path"):
+        return ProcessResult(
+            log="Error: 先に Detect を実行してください / Run Detect before Render.",
+        ).as_gradio_outputs()
+
+    logs = list(session.get("logs") or [])
+
+    def log(msg: str):
+        logger.info(msg)
+        logs.append(msg)
+        session["logs"] = logs
+
+    try:
+        _normalize_session_highlights(session, sort=True)
+        output_dir = Path(session["output_dir"])
+        video_path = Path(session["video_path"])
+        video_info = session["video_info"]
+        segments = session["segments"]
+        highlights = session["highlights"]
+        youtube_video_id = session.get("youtube_video_id")
+        mode_data = session.get("modes") or {}
+        modes = GenerationModes(
+            enable_clips=bool(mode_data.get("enable_clips", session.get("enable_clips", True))),
+            enable_chapters=bool(mode_data.get("enable_chapters", session.get("enable_chapters", True))),
+            clip_prompt=mode_data.get("clip_prompt", ""),
+            chapter_prompt=mode_data.get("chapter_prompt", ""),
+        )
+        try:
+            modes.validate()
+        except ValueError as mode_err:
+            return ProcessResult(log=f"Error: {mode_err}").as_gradio_outputs()
+
+        log("[Render] Applying reviewed highlight edits")
+
+        if auto_append_youtube:
+            yt_status = youtube_api.check_auth_status()
+            if not yt_status["configured"]:
+                return ProcessResult(
+                    log="\n".join(logs + [
+                        "Error: 概要欄に自動追加が有効ですが credentials.json が未設定です。"
+                        "Settings タブの『YouTube API 認証』で配置手順を確認してください。"
+                    ]),
+                ).as_gradio_outputs()
+            if not yt_status["authenticated"]:
+                return ProcessResult(
+                    log="\n".join(logs + [
+                        "Error: YouTube 認証が切れています。Settings タブの"
+                        "『YouTube API 認証』で『認証する』を押して再認証してください。"
+                    ]),
+                ).as_gradio_outputs()
+            log(f"YouTube auth pre-check: {youtube_api.auth_status_summary()}")
+
+        font_config = FontConfig(
+            font_name=font_name,
+            font_size=font_size,
+            font_color=font_color,
+        )
+        highlights_summary = _format_highlights_summary(highlights)
+
+        clip_paths: list[Path] = []
+        srt_paths: list[Path] = []
+        shorts_paths: list[Path] = []
+        shorts_srt_paths: list[Path] = []
+        shorts_ass_paths: list[Path] = []
+        thumbnail_paths: list[Path] = []
+
+        if modes.enable_clips:
+            progress(0.6, desc="[Step 4/6] Extracting clips...")
+            log("[Step 4/6] Extracting clips...")
+            clips_dir = output_dir / "clips"
+            clip_paths = extract_clips(video_path, highlights, clips_dir)
+            log(f"  Extracted {len(clip_paths)} clips")
+
+            progress(0.7, desc="[Step 5/6] Generating subtitles...")
+            log("[Step 5/6] Generating subtitles...")
+            srt_paths = generate_all_srts(segments, highlights, clips_dir)
+            log(f"  Generated {len(srt_paths)} SRT files")
+
+            if generate_shorts:
+                progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
+                shorts_dir = output_dir / "shorts"
+                shorts_dir.mkdir(parents=True, exist_ok=True)
+                if karaoke:
+                    shorts_ass_paths = generate_all_karaoke_ass(
+                        segments, highlights, shorts_dir, font_config,
+                    )
+                else:
+                    shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
+                shorts_paths = extract_clips(
+                    video_path, highlights, shorts_dir,
+                    shorts=True,
+                    srt_paths=shorts_srt_paths,
+                    karaoke=bool(karaoke),
+                    ass_paths=shorts_ass_paths,
+                    font_config=font_config,
+                    crop_x=shorts_crop,
+                    shorts_mode=shorts_mode,
+                    shorts_title=shorts_title,
+                )
+                subtitle_kind = "ASS karaoke" if karaoke else "SRT"
+                log(f"  Generated {len(shorts_paths)} shorts with {subtitle_kind} subtitles ({font_config.font_name} @ {font_config.font_size}pt)")
+
+            if generate_thumbnails:
+                progress(0.8, desc="Generating thumbnail candidates...")
+                if generate_shorts:
+                    thumbnail_dir = output_dir / "shorts"
+                    thumbnail_paths = generate_thumbnail_candidates(
+                        video_path, highlights, thumbnail_dir,
+                        vertical=True,
+                        crop_x=shorts_crop,
+                        shorts_mode=shorts_mode,
+                        font_config=font_config,
+                    )
+                    log(f"  Generated {len(thumbnail_paths)} vertical thumbnail candidates")
+                else:
+                    thumbnail_paths = generate_thumbnail_candidates(
+                        video_path, highlights, clips_dir,
+                        font_config=font_config,
+                    )
+                    log(f"  Generated {len(thumbnail_paths)} thumbnail candidates")
+
+            progress(0.85, desc="[Step 6/6] Exporting XML...")
+            log("[Step 6/6] Exporting Premiere Pro XML...")
+            if output_mode == "combined":
+                xml_path = output_dir / "project.xml"
+                generate_combined_xml(
+                    clip_paths, highlights, video_info, xml_path,
+                    project_name=video_path.stem,
+                )
+                if generate_shorts and shorts_paths:
+                    shorts_video_info = {**video_info, "width": 1080, "height": 1920}
+                    generate_combined_xml(
+                        shorts_paths, highlights, shorts_video_info,
+                        output_dir / "project_shorts.xml",
+                        project_name=f"{video_path.stem}_shorts",
+                    )
+                log("  Premiere Pro XML (combined mode) exported")
+            else:
+                generate_individual_xmls(
+                    clip_paths, highlights, video_info, clips_dir,
+                )
+                if generate_shorts and shorts_paths:
+                    shorts_video_info = {**video_info, "width": 1080, "height": 1920}
+                    generate_individual_xmls(
+                        shorts_paths, highlights,
+                        shorts_video_info, output_dir / "shorts",
+                    )
+                log("  Premiere Pro XML (individual mode) exported")
+        else:
+            log("[Skip 4-6] Clip generation disabled — chapters-only run")
+
+        drive_link = ""
+        if upload_to_drive:
+            progress(0.9, desc="Uploading to Google Drive...")
+            if drive_is_configured():
+                log("Uploading to Google Drive...")
+                result = upload_output_directory(output_dir)
+                drive_link = result.get("folder_link", "")
+                log(f"  Google Drive: {drive_link}")
+            else:
+                log("Google Drive: credentials.json が未設定のためスキップ")
+
+        zip_path = None
+        if generate_zip:
+            progress(0.95, desc="Creating download archive...")
+            zip_path = shutil.make_archive(str(output_dir), "zip", str(output_dir))
+            log(f"  ZIP created: {zip_path}")
+
+        chapters_text = ""
+        if modes.enable_chapters:
+            try:
+                video_duration = float(video_info.get("duration", 0))
+                chapters_text = generate_chapter_text(highlights, video_duration=video_duration)
+                chapters_path = output_dir / "chapters.txt"
+                write_chapter_file(highlights, chapters_path, video_duration=video_duration)
+                log(f"Chapters saved: {chapters_path}")
+            except Exception as ch_err:
+                log(f"Chapter generation failed: {ch_err}")
+        else:
+            log("[Skip chapters] タイムスタンプ (概要欄) 生成を無効化")
+
+        if auto_append_youtube and modes.enable_chapters and chapters_text:
+            if not youtube_video_id:
+                log("[Skip auto-append] URL 入力ではないため YouTube 概要欄への自動追記はスキップ")
+            elif not youtube_api.is_configured():
+                log("[Skip auto-append] credentials.json 未設定のため YouTube 概要欄への自動追記はスキップ")
+            else:
+                progress(0.97, desc="YouTube 概要欄に自動追加中...")
+                try:
+                    yt_service = youtube_api.get_youtube_service()
+                    youtube_api.update_video_description(
+                        yt_service, youtube_video_id, chapters_text, position="prepend",
+                    )
+                    log(f"  YouTube 概要欄に自動追加: video_id={youtube_video_id}")
+                except Exception as yt_err:
+                    tb = traceback.format_exc()
+                    logger.error(f"YouTube 概要欄更新失敗: {yt_err}\n{tb}")
+                    log(f"  YouTube 概要欄更新失敗: {yt_err} (他の出力は維持)")
+
+        log(f"\nDone! Output: {output_dir}")
+        return ProcessResult(
+            log="\n".join(logs),
+            highlights=highlights_summary,
+            download_path=zip_path,
+            drive_link=drive_link,
+            chapters_text=chapters_text,
+        ).as_gradio_outputs()
+
+    except subprocess.CalledProcessError as e:
+        err_detail = f"Command failed: {e.cmd}\nReturn code: {e.returncode}"
+        if e.stdout:
+            err_detail += f"\nstdout: {e.stdout[:500]}"
+        if e.stderr:
+            err_detail += f"\nstderr: {e.stderr[:500]}"
+        logger.error(err_detail)
+        log(f"\nError (subprocess): {err_detail}")
+        return ProcessResult(log="\n".join(logs)).as_gradio_outputs()
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"Error: {e}\n{tb}")
+        log(f"\nError: {e}")
+        log(tb)
+        return ProcessResult(log="\n".join(logs)).as_gradio_outputs()
+
+
+def _legacy_one_shot_handler(
     input_url: str,
     input_file,
     enable_clips: bool,
@@ -1237,32 +1824,141 @@ def create_ui():
                         label="タイムスタンプ (概要欄)",
                         info="先頭が必ず 0:00 から始まるため、YouTube がアップロード時に自動でチャプターとして認識します。そのままコピーして動画の概要欄に貼り付けるか、『概要欄に自動追加』を有効にして API で直接反映させてください。",
                         lines=8,
-                        show_copy_button=True,
                         interactive=False,
                     )
 
-        # Generate button
-        generate_btn = gr.Button(
-            "Generate Clips / 生成開始",
-            variant="primary",
-            size="lg",
-        )
+        session_state = gr.State({})
+        highlights_state = gr.State([])
 
-        generate_btn.click(
-            fn=process_video,
+        with gr.Row():
+            detect_btn = gr.Button(
+                "Detect Highlights / ハイライト検出",
+                variant="primary",
+                size="lg",
+            )
+            render_btn = gr.Button(
+                "Render Outputs / 出力生成",
+                variant="secondary",
+                size="lg",
+            )
+
+        with gr.Group(visible=False) as review_panel:
+            gr.Markdown("## クリップレビュー / Clip Review")
+            status = gr.Markdown("")
+
+            @gr.render(inputs=highlights_state)
+            def render_review_rows(highlights):
+                for idx, highlight in enumerate(highlights or []):
+                    video_duration = float(highlight.get("_video_duration") or 0.0)
+                    start_value = float(highlight.get("start_sec", 0.0))
+                    end_value = float(highlight.get("end_sec", start_value))
+                    title_value = highlight.get("title", "")
+
+                    with gr.Row():
+                        with gr.Column(scale=2):
+                            preview_video = gr.Video(
+                                label=f"Preview {idx + 1} / プレビュー {idx + 1}",
+                                interactive=False,
+                            )
+                            preview_btn = gr.Button(
+                                "このクリップをプレビュー / Preview this clip",
+                                variant="secondary",
+                            )
+                        with gr.Column(scale=3):
+                            with gr.Row():
+                                start_input = gr.Number(
+                                    label="開始秒 / Start sec",
+                                    value=start_value,
+                                    precision=3,
+                                )
+                                end_input = gr.Number(
+                                    label="終了秒 / End sec",
+                                    value=end_value,
+                                    precision=3,
+                                )
+                            seek_slider = gr.Slider(
+                                0,
+                                video_duration,
+                                value=start_value,
+                                step=0.1,
+                                label="粗調整 / Coarse seek",
+                            )
+                            title_input = gr.Textbox(
+                                label="タイトル / Title",
+                                value=title_value,
+                                lines=1,
+                            )
+
+                    edit_inputs = [session_state, start_input, end_input, title_input]
+                    edit_outputs = [session_state, highlights_state]
+                    start_input.change(
+                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event(session, i, start, end, title),
+                        inputs=edit_inputs,
+                        outputs=edit_outputs,
+                    )
+                    end_input.change(
+                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event(session, i, start, end, title),
+                        inputs=edit_inputs,
+                        outputs=edit_outputs,
+                    )
+                    title_input.input(
+                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event(session, i, start, end, title),
+                        inputs=edit_inputs,
+                        outputs=edit_outputs,
+                    )
+                    title_input.change(
+                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event(session, i, start, end, title),
+                        inputs=edit_inputs,
+                        outputs=edit_outputs,
+                    )
+                    seek_slider.change(
+                        fn=lambda session, seek, end, title, i=idx: _apply_review_edit_event(session, i, seek, end, title),
+                        inputs=[session_state, seek_slider, end_input, title_input],
+                        outputs=edit_outputs,
+                    )
+                    preview_btn.click(
+                        fn=lambda session, start, end, i=idx: render_preview_clip(session, i, start, end),
+                        inputs=[session_state, start_input, end_input],
+                        outputs=preview_video,
+                        concurrency_limit=1,
+                    )
+
+        detect_event = detect_btn.click(
+            fn=detect_phase,
             inputs=[
                 input_url, input_file,
                 enable_clips, clip_prompt, enable_chapters, chapter_prompt,
-                auto_append_youtube,
-                num_clips, output_mode,
-                generate_shorts, shorts_mode, shorts_crop, shorts_title, generate_zip, ai_provider, ai_model, api_key,
+                num_clips, ai_provider, ai_model, api_key,
                 min_duration, max_duration,
-                whisper_model, language, font_name, font_size, font_color,
-                upload_to_drive,
+                whisper_model, language,
+                audio_fusion, audio_alpha,
                 output_base_dir,
+            ],
+            outputs=[session_state, status, review_panel],
+            concurrency_limit=1,
+        )
+        detect_event.then(
+            fn=highlights_for_review,
+            inputs=session_state,
+            outputs=highlights_state,
+        )
+
+        render_btn.click(
+            fn=render_phase,
+            inputs=[
+                session_state,
+                output_mode,
+                generate_shorts,
+                shorts_mode,
+                shorts_crop,
+                shorts_title,
+                generate_zip,
+                upload_to_drive,
+                auto_append_youtube,
+                font_name,
+                font_size,
+                font_color,
                 generate_thumbnails,
-                audio_fusion,
-                audio_alpha,
                 karaoke,
             ],
             outputs=[log_output, highlights_output, download_output, drive_link_output, chapters_output],

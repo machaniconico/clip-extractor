@@ -40,12 +40,23 @@ def _click_input_names(module: ast.Module, button_name: str) -> list[str]:
     raise AssertionError(f"{button_name}.click(inputs=[...]) not found")
 
 
-def test_process_video_signature_matches_generate_inputs():
+def test_detect_phase_signature_matches_detect_inputs():
     module = _module()
-    args = _function_args(module, "process_video")
+    args = _function_args(module, "detect_phase")
     args = [arg for arg in args if arg != "progress"]
-    assert args == _click_input_names(module, "generate_btn")
-    assert args[-4:] == ["generate_thumbnails", "audio_fusion", "audio_alpha", "karaoke"]
+    assert args == _click_input_names(module, "detect_btn")
+    assert args[-3:] == ["audio_fusion", "audio_alpha", "output_base_dir"]
+
+
+def test_render_phase_signature_matches_render_inputs():
+    module = _module()
+    args = _function_args(module, "render_phase")
+    args = [arg for arg in args if arg != "progress"]
+    click_inputs = _click_input_names(module, "render_btn")
+    assert args[0] == "session"
+    assert click_inputs[0] == "session_state"
+    assert args[1:] == click_inputs[1:]
+    assert args[-2:] == ["generate_thumbnails", "karaoke"]
 
 
 def test_save_defaults_signature_matches_save_button_inputs():
