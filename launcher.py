@@ -56,7 +56,7 @@ def main():
     print("終了するにはこのウィンドウを閉じてください")
     print()
 
-    from web_app import create_ui
+    from web_app import create_ui, APP_THEME, APP_CSS
 
     app = create_ui()
     app.queue()
@@ -65,6 +65,8 @@ def main():
         server_port=7860,
         ssr_mode=False,
         inbrowser=False,  # we handle browser open ourselves
+        theme=APP_THEME,
+        css=APP_CSS,
     )
 
 

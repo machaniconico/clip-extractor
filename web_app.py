@@ -1245,6 +1245,18 @@ def _legacy_one_shot_handler(
         return ProcessResult(log="\n".join(logs)).as_gradio_outputs()
 
 
+# Gradio 6.0 moved `theme` / `css` from the Blocks constructor to launch().
+# Keep them as module-level constants so every launch() call (web_app + launcher)
+# applies the same look without re-triggering the deprecation warning.
+APP_THEME = gr.themes.Soft()
+APP_CSS = """
+        .main-title { text-align: center; margin-bottom: 0.5em; }
+        .subtitle { text-align: center; color: #666; margin-bottom: 1.5em; }
+        footer { display: none !important; }
+        a[href*="gradio.app"] { display: none !important; }
+        """
+
+
 def create_ui():
     """Create the Gradio web interface."""
     defaults = load_defaults()
@@ -1270,13 +1282,6 @@ def create_ui():
     with gr.Blocks(
         title="Clip Extractor - 配信切り抜き自動生成",
         analytics_enabled=False,
-        theme=gr.themes.Soft(),
-        css="""
-        .main-title { text-align: center; margin-bottom: 0.5em; }
-        .subtitle { text-align: center; color: #666; margin-bottom: 1.5em; }
-        footer { display: none !important; }
-        a[href*="gradio.app"] { display: none !important; }
-        """,
     ) as app:
         gr.HTML("<h1 class='main-title'>Clip Extractor</h1>")
         gr.HTML("<p class='subtitle'>YouTube配信アーカイブから切り抜きショート動画を自動生成</p>")
@@ -2153,4 +2158,6 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=7860,
         ssr_mode=False,
+        theme=APP_THEME,
+        css=APP_CSS,
     )
