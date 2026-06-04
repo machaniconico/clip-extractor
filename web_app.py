@@ -475,8 +475,17 @@ def render_preview_clip(session: dict | None, idx: int, start_sec, end_sec) -> s
 
 
 def _apply_review_edit_event(session: dict | None, idx: int, start_sec, end_sec, title):
-    updated = apply_edits_to_session(session, idx, start_sec, end_sec, title)
-    return updated, highlights_for_review(updated)
+    return apply_edits_to_session(session, idx, start_sec, end_sec, title)
+
+
+def _apply_review_edit_event_session_only(
+    session: dict | None,
+    idx: int,
+    start_sec,
+    end_sec,
+    title,
+) -> dict:
+    return apply_edits_to_session(session, idx, start_sec, end_sec, title)
 
 
 def detect_phase(
@@ -1895,29 +1904,29 @@ def create_ui():
                             )
 
                     edit_inputs = [session_state, start_input, end_input, title_input]
-                    edit_outputs = [session_state, highlights_state]
+                    edit_outputs = [session_state]
                     start_input.change(
-                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event(session, i, start, end, title),
+                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event_session_only(session, i, start, end, title),
                         inputs=edit_inputs,
                         outputs=edit_outputs,
                     )
                     end_input.change(
-                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event(session, i, start, end, title),
+                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event_session_only(session, i, start, end, title),
                         inputs=edit_inputs,
                         outputs=edit_outputs,
                     )
                     title_input.input(
-                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event(session, i, start, end, title),
+                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event_session_only(session, i, start, end, title),
                         inputs=edit_inputs,
                         outputs=edit_outputs,
                     )
                     title_input.change(
-                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event(session, i, start, end, title),
+                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event_session_only(session, i, start, end, title),
                         inputs=edit_inputs,
                         outputs=edit_outputs,
                     )
                     seek_slider.change(
-                        fn=lambda session, seek, end, title, i=idx: _apply_review_edit_event(session, i, seek, end, title),
+                        fn=lambda session, seek, end, title, i=idx: _apply_review_edit_event_session_only(session, i, seek, end, title),
                         inputs=[session_state, seek_slider, end_input, title_input],
                         outputs=edit_outputs,
                     )

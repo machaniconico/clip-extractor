@@ -68,6 +68,37 @@ def test_apply_edits_to_session_clamps_and_corrects_ranges(tmp_path):
     assert edited["duration"] == pytest.approx(edited["end_sec"] - edited["start_sec"])
 
 
+def test_review_edit_session_only_round_trip_preserves_edits(tmp_path):
+    session = _session(tmp_path)
+
+    updated = web_app._apply_review_edit_event_session_only(
+        session, 0, 2.25, 6.75, "Typed title"
+    )
+
+    assert isinstance(updated, dict)
+    edited = updated["highlights"][0]
+    assert edited["start_sec"] == 2.25
+    assert edited["end_sec"] == 6.75
+    assert edited["duration"] == 4.5
+    assert edited["title"] == "Typed title"
+
+    review_rows = web_app.highlights_for_review(updated)
+    assert review_rows[0]["start_sec"] == 2.25
+    assert review_rows[0]["end_sec"] == 6.75
+    assert review_rows[0]["title"] == "Typed title"
+
+    round_tripped = web_app.apply_edits_to_session(
+        updated,
+        0,
+        review_rows[0]["start_sec"],
+        review_rows[0]["end_sec"],
+        review_rows[0]["title"],
+    )
+    assert round_tripped["highlights"][0]["start_sec"] == 2.25
+    assert round_tripped["highlights"][0]["end_sec"] == 6.75
+    assert round_tripped["highlights"][0]["title"] == "Typed title"
+
+
 def test_detect_phase_returns_session_state(monkeypatch, tmp_path):
     source = tmp_path / "downloaded.mp4"
 

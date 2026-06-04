@@ -5,6 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import highlighter
 from highlighter import _extract_json_object, _parse_timestamp
 
 
@@ -108,12 +109,57 @@ def test_parse_timestamp_float_only():
     assert _parse_timestamp("42.5") == 42.5
 
 
+def test_parse_timestamp_numeric_seconds():
+    assert _parse_timestamp(12) == 12.0
+    assert _parse_timestamp(12.5) == 12.5
+
+
 def test_parse_timestamp_zero():
     assert _parse_timestamp("0:00:00.000") == 0.0
 
 
 def test_parse_timestamp_whitespace_stripped():
     assert _parse_timestamp("  01:30  ") == 90.0
+
+
+def test_detect_highlights_accepts_numeric_timestamp_fields(monkeypatch):
+    monkeypatch.setattr(
+        highlighter,
+        "_call_claude",
+        lambda prompt: (
+            '{"highlights": ['
+            '{"start": 12, "end": 20, "title": "Numeric", "reason": "seconds"}'
+            "]}"
+        ),
+    )
+
+    result = highlighter.detect_highlights("transcript")
+
+    assert len(result) == 1
+    assert result[0]["start_sec"] == 12.0
+    assert result[0]["end_sec"] == 20.0
+    assert result[0]["duration"] == 8.0
+
+
+def test_detect_highlights_skips_bad_timestamp_types_without_crashing(monkeypatch):
+    monkeypatch.setattr(
+        highlighter,
+        "_call_claude",
+        lambda prompt: (
+            '{"highlights": ['
+            '{"start": null, "end": "0:00:10", "title": "Null", "reason": "bad"},'
+            '{"start": [1, 2], "end": "0:00:20", "title": "List", "reason": "bad"},'
+            '{"start": "0:00:30", "end": "0:00:40", "title": "Valid", "reason": "ok"}'
+            "]}"
+        ),
+    )
+
+    result = highlighter.detect_highlights("transcript")
+
+    assert len(result) == 1
+    assert result[0]["title"] == "Valid"
+    assert result[0]["start_sec"] == 30.0
+    assert result[0]["end_sec"] == 40.0
 
 
 def run_all():
@@ -134,6 +180,7 @@ def run_all():
     test_parse_timestamp_hhmmss_comma()
     test_parse_timestamp_mmss()
     test_parse_timestamp_float_only()
+    test_parse_timestamp_numeric_seconds()
     test_parse_timestamp_zero()
     test_parse_timestamp_whitespace_stripped()
     print("All tests passed")

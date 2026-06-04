@@ -11,9 +11,24 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+import pytest
+from google.auth.exceptions import RefreshError
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import _google_auth
+
+
+class _FakeCreds:
+    def __init__(self, *, valid: bool, expired: bool, refresh_token: str | None, payload: str):
+        self.valid = valid
+        self.expired = expired
+        self.refresh_token = refresh_token
+        self.payload = payload
+        self.refresh = mock.Mock()
+
+    def to_json(self) -> str:
+        return self.payload
 
 
 def test_user_config_dir_windows():
@@ -212,6 +227,100 @@ def test_check_auth_status_token_invalid_json():
         assert s["token_exists"] is True
         assert s["authenticated"] is False
         assert s["error"] is not None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits are not portable on Windows")
+def test_write_secret_creates_token_with_0600_permissions(tmp_path):
+    token_path = tmp_path / "auth" / "token.json"
+
+    _google_auth._write_secret(token_path, '{"refresh_token": "secret"}')
+
+    assert token_path.read_text(encoding="utf-8") == '{"refresh_token": "secret"}'
+    assert oct(token_path.stat().st_mode & 0o777) == "0o600"
+
+
+def test_build_authenticated_service_reauthenticates_after_refresh_error(tmp_path):
+    token_path = tmp_path / "token.json"
+    token_path.write_text("cached", encoding="utf-8")
+    credentials_path = tmp_path / "credentials.json"
+    credentials_path.write_text('{"installed": {"client_id": "id", "client_secret": "secret"}}', encoding="utf-8")
+    expired_creds = _FakeCreds(
+        valid=False,
+        expired=True,
+        refresh_token="old-refresh-token",
+        payload='{"old": true}',
+    )
+    expired_creds.refresh.side_effect = RefreshError("expired")
+    new_creds = _FakeCreds(
+        valid=True,
+        expired=False,
+        refresh_token="new-refresh-token",
+        payload='{"new": true}',
+    )
+    flow = mock.Mock()
+    flow.run_local_server.return_value = new_creds
+    service = object()
+
+    with mock.patch.object(
+        _google_auth.Credentials,
+        "from_authorized_user_file",
+        return_value=expired_creds,
+    ), mock.patch.object(
+        _google_auth.InstalledAppFlow,
+        "from_client_secrets_file",
+        return_value=flow,
+    ) as flow_factory, mock.patch.object(
+        _google_auth,
+        "build",
+        return_value=service,
+    ) as build:
+        result = _google_auth.build_authenticated_service(
+            "youtube",
+            "v3",
+            ["scope"],
+            token_path,
+            credentials_path,
+        )
+
+    assert result is service
+    expired_creds.refresh.assert_called_once()
+    flow_factory.assert_called_once_with(str(credentials_path), ["scope"])
+    flow.run_local_server.assert_called_once_with(port=0)
+    build.assert_called_once_with("youtube", "v3", credentials=new_creds)
+    assert token_path.read_text(encoding="utf-8") == '{"new": true}'
+
+
+def test_build_authenticated_service_refresh_error_missing_credentials_raises(tmp_path):
+    token_path = tmp_path / "token.json"
+    token_path.write_text("cached", encoding="utf-8")
+    credentials_path = tmp_path / "missing_credentials.json"
+    expired_creds = _FakeCreds(
+        valid=False,
+        expired=True,
+        refresh_token="old-refresh-token",
+        payload='{"old": true}',
+    )
+    expired_creds.refresh.side_effect = RefreshError("expired")
+
+    with mock.patch.object(
+        _google_auth.Credentials,
+        "from_authorized_user_file",
+        return_value=expired_creds,
+    ), mock.patch.object(
+        _google_auth.InstalledAppFlow,
+        "from_client_secrets_file",
+    ) as flow_factory, pytest.raises(FileNotFoundError) as exc_info:
+        _google_auth.build_authenticated_service(
+            "youtube",
+            "v3",
+            ["scope"],
+            token_path,
+            credentials_path,
+        )
+
+    expired_creds.refresh.assert_called_once()
+    flow_factory.assert_not_called()
+    assert "credentials.json が見つかりません" in str(exc_info.value)
 
 
 def test_ensure_user_config_dir_creates():

@@ -44,6 +44,8 @@ def generate_chapter_text(
     if not highlights:
         return ""
 
+    highlights = sorted(highlights, key=lambda h: float(h.get("start_sec", 0)))
+
     use_hours = float(video_duration) >= 3600 or any(
         float(h.get("start_sec", 0)) >= 3600 for h in highlights
     )

@@ -36,8 +36,10 @@ import logging
 import os
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -108,6 +110,43 @@ def migrate_legacy_file(filename: str) -> Path:
     return dest
 
 
+def _write_secret(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent))
+    fd_owned = True  # we must close fd ourselves until os.fdopen takes ownership
+    try:
+        fchmod = getattr(os, "fchmod", None)
+        if fchmod is not None:
+            try:
+                fchmod(fd, 0o600)
+            except OSError:
+                pass
+        fh = os.fdopen(fd, "w", encoding="utf-8")
+        fd_owned = False  # fh now owns the descriptor and will close it
+        with fh:
+            fh.write(text)
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    except BaseException:
+        if fd_owned:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def build_authenticated_service(
     service_name: str,
     version: str,
@@ -127,9 +166,14 @@ def build_authenticated_service(
         creds = Credentials.from_authorized_user_file(str(token_path), scopes)
 
     if not creds or not creds.valid:
+        refreshed = False
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+                refreshed = True
+            except RefreshError:
+                creds = None
+        if not refreshed:
             if not credentials_path.exists():
                 raise FileNotFoundError(
                     f"credentials.json が見つかりません: {credentials_path}\n"
@@ -139,8 +183,7 @@ def build_authenticated_service(
             flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), scopes)
             creds = flow.run_local_server(port=0)
 
-        token_path.parent.mkdir(parents=True, exist_ok=True)
-        token_path.write_text(creds.to_json(), encoding="utf-8")
+        _write_secret(token_path, creds.to_json())
 
     return build(service_name, version, credentials=creds)
 
@@ -178,8 +221,7 @@ def check_auth_status(
     if creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
-            token_path.parent.mkdir(parents=True, exist_ok=True)
-            token_path.write_text(creds.to_json(), encoding="utf-8")
+            _write_secret(token_path, creds.to_json())
             status["authenticated"] = True
             return status
         except Exception as e:

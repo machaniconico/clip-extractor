@@ -36,6 +36,10 @@ def _karaoke_centiseconds(line: str) -> list[int]:
     return [int(value) for value in re.findall(r"\{\\k(\d+)\}", line)]
 
 
+def _visible_text(value: str) -> str:
+    return re.sub(r"\{\\k\d+\}", "", value).replace(r"\N", "")
+
+
 def test_generate_karaoke_ass_writes_style_dialogue_and_k_tokens(tmp_path):
     segments = [
         Segment(
@@ -93,7 +97,7 @@ def test_clip_relative_rebasing_range_filtering_and_boundary_clamp(tmp_path):
 
     assert lines[0].startswith("Dialogue: 0,0:00:00.00,0:00:00.50,Default")
     assert r"{\k20}edge" in lines[0]
-    assert r"{\k30}next" in lines[0]
+    assert r"{\k30} next" in lines[0]
     assert "before" not in lines[0]
     assert "after" not in lines[0]
     assert lines[1].startswith("Dialogue: 0,0:00:00.50,0:00:00.80,Default")
@@ -139,8 +143,72 @@ def test_japanese_tokens_latin_leading_space_strip_and_wrap(tmp_path):
 
     assert r"{\k10}あ{\k10}い" in text
     assert r"\N" in text
-    assert " hello" not in text
-    assert r"{\k10}hello" in text
+    assert r"\N{\k10}そ" in text
+    assert r"{\k10} hello" in text
+
+
+def test_karaoke_inserts_silent_gap_runs_between_words(tmp_path):
+    segments = [
+        Segment(
+            start=0.0,
+            end=4.0,
+            text="one two",
+            words=[
+                Word(0.0, 1.0, "one"),
+                Word(3.0, 4.0, "two"),
+            ],
+        ),
+    ]
+
+    out = subtitles.generate_karaoke_ass(segments, 0.0, 4.0, tmp_path / "clip.ass", _font_config())
+    dialogue = _dialogue_lines(out.read_text(encoding="utf-8"))[0]
+    text = _dialogue_text(dialogue)
+
+    assert dialogue.startswith("Dialogue: 0,0:00:00.00,0:00:04.00,Default")
+    assert _karaoke_centiseconds(text) == [100, 200, 100]
+    assert r"{\k100}one{\k200}{\k100}two" in text
+
+
+def test_english_leading_space_tokens_preserve_word_separator(tmp_path):
+    segments = [
+        Segment(
+            start=0.0,
+            end=1.0,
+            text="hello world",
+            words=[
+                Word(0.0, 0.5, " hello"),
+                Word(0.5, 1.0, " world"),
+            ],
+        ),
+    ]
+
+    out = subtitles.generate_karaoke_ass(segments, 0.0, 1.0, tmp_path / "clip.ass", _font_config())
+    text = _dialogue_text(_dialogue_lines(out.read_text(encoding="utf-8"))[0])
+
+    assert r"{\k50}hello{\k50} world" in text
+    visible = _visible_text(text)
+    assert "hello world" in visible
+    assert "helloworld" not in visible
+
+
+def test_japanese_tokens_continue_without_inserted_spaces(tmp_path):
+    segments = [
+        Segment(
+            start=0.0,
+            end=1.0,
+            text="こんにちは",
+            words=[
+                Word(0.0, 0.4, "こん"),
+                Word(0.4, 1.0, "にちは"),
+            ],
+        ),
+    ]
+
+    out = subtitles.generate_karaoke_ass(segments, 0.0, 1.0, tmp_path / "clip.ass", _font_config())
+    text = _dialogue_text(_dialogue_lines(out.read_text(encoding="utf-8"))[0])
+
+    assert r"{\k40}こん{\k60}にちは" in text
+    assert _visible_text(text) == "こんにちは"
 
 
 def test_build_ass_subtitles_filter_uses_authored_ass_without_force_style():

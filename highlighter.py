@@ -232,7 +232,7 @@ def detect_highlights(
             h["start_sec"] = _parse_timestamp(h["start"])
             h["end_sec"] = _parse_timestamp(h["end"])
             h["duration"] = h["end_sec"] - h["start_sec"]
-        except (ValueError, TypeError) as e:
+        except (ValueError, TypeError, AttributeError) as e:
             print(f"[Warn] skipping highlight with bad timestamp ({e}): {h!r}")
             continue
         h.setdefault("title", "")
@@ -251,8 +251,10 @@ def detect_highlights(
     return valid_highlights
 
 
-def _parse_timestamp(ts: str) -> float:
+def _parse_timestamp(ts: str | int | float) -> float:
     """Parse HH:MM:SS.mmm, HH:MM:SS,mmm, or MM:SS.mmm to seconds."""
+    if isinstance(ts, (int, float)):
+        return float(ts)
     ts = ts.strip().replace(",", ".")
     parts = ts.split(":")
     if len(parts) == 3:

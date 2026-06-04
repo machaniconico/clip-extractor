@@ -78,6 +78,7 @@ def generate_karaoke_ass(
                     continue
                 start_abs = max(clip_start, word.start)
                 end_abs = min(clip_end, word.end)
+                had_leading_space = word.text[:1] == " "
                 text = _strip_leading_ascii_space(word.text)
                 if not text:
                     continue
@@ -86,6 +87,7 @@ def generate_karaoke_ass(
                     end_abs - clip_start,
                     max(1, round((end_abs - start_abs) * 100)),
                     text,
+                    had_leading_space,
                 ))
 
             if not word_items:
@@ -207,19 +209,28 @@ def _ass_display_width(value: str) -> int:
     )
 
 
-def _build_karaoke_text(word_items: list[tuple[float, float, int, str]]) -> str:
+def _build_karaoke_text(word_items: list[tuple[float, float, int, str, bool]]) -> str:
     limit = _TITLE_WRAP_FULLWIDTH_CHARS * 2
     current_width = 0
     parts: list[str] = []
 
-    for _start, _end, duration_cs, word_text in word_items:
-        escaped = _escape_ass_text(word_text)
-        word_width = _ass_display_width(word_text)
+    prev_end = word_items[0][0]
+    for w_start, w_end, duration_cs, word_text, had_leading_space in word_items:
+        gap_cs = round((w_start - prev_end) * 100)
+        if gap_cs > 0:
+            parts.append(r"{\k" + str(gap_cs) + "}")
+
+        visible_text = (" " if current_width and had_leading_space else "") + word_text
+        word_width = _ass_display_width(visible_text)
         if current_width and current_width + word_width > limit:
             parts.append(r"\N")
             current_width = 0
+            visible_text = word_text
+            word_width = _ass_display_width(visible_text)
+        escaped = _escape_ass_text(visible_text)
         parts.append(r"{\k" + str(duration_cs) + "}" + escaped)
         current_width += word_width
+        prev_end = w_end
 
     return "".join(parts)
 

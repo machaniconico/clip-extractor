@@ -62,6 +62,23 @@ def test_ascending_timestamps():
     assert lines[3] == "16:40 C"
 
 
+def test_score_ordered_highlights_are_sorted_by_start_time():
+    highlights = [
+        {"start_sec": 500, "title": "Highest score"},
+        {"start_sec": 200, "title": "Middle score"},
+        {"start_sec": 30, "title": "Lowest score"},
+    ]
+
+    text = generate_chapter_text(highlights)
+    lines = text.split("\n")
+
+    assert lines[0] == "0:00 イントロ"
+    assert lines[1] == "0:30 Lowest score"
+    assert lines[2] == "3:20 Middle score"
+    assert lines[3] == "8:20 Highest score"
+    assert highlights[0]["start_sec"] == 500
+
+
 def test_use_hours_threshold_triggered_by_video_duration():
     highlights = [{"start_sec": 30, "title": "X"}]
     text = generate_chapter_text(highlights, video_duration=4000)
