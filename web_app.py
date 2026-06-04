@@ -7,6 +7,7 @@ import sys
 import shutil
 import subprocess
 import traceback
+import inspect
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1266,6 +1267,81 @@ APP_CSS = """
         """
 
 
+def _named_params(func):
+    """Return the set of explicitly-named parameters of ``func``.
+
+    Returns ``None`` when the signature cannot be introspected, so callers can
+    treat that as "unknown — don't filter". Never raises: signature
+    introspection runs at import time and a failure here must not brick the app.
+    """
+    try:
+        return set(inspect.signature(func).parameters)
+    except (ValueError, TypeError):
+        return None
+
+
+def _split_theme_kwargs():
+    """Route theme/css to wherever the installed Gradio version accepts them.
+
+    Gradio moved ``theme``/``css`` between ``gr.Blocks()`` and ``launch()``
+    across major versions (older: Blocks constructor; some 6.x: launch()).
+    Mismatching the location raises ``TypeError: ... unexpected keyword
+    argument 'theme'`` at launch. We introspect both signatures and prefer
+    the Blocks constructor when it accepts the param, falling back to
+    launch(); if neither names it the param is dropped (default look, with a
+    warning) rather than crashing.
+    """
+    blocks_params = _named_params(gr.Blocks.__init__)
+    launch_params = _named_params(gr.Blocks.launch)
+    blocks_kwargs, launch_kwargs = {}, {}
+    for name, value in (("theme", APP_THEME), ("css", APP_CSS)):
+        if blocks_params is not None and name in blocks_params:
+            blocks_kwargs[name] = value
+        elif launch_params is not None and name in launch_params:
+            launch_kwargs[name] = value
+        else:
+            logger.warning(
+                f"gradio {gr.__version__}: '{name}' not accepted by Blocks() "
+                f"nor launch(); using default appearance."
+            )
+    return blocks_kwargs, launch_kwargs
+
+
+def safe_launch_kwargs(**kwargs):
+    """Drop ``launch()`` kwargs the installed Gradio version doesn't accept.
+
+    The reported crash was a version-skewed ``launch()`` kwarg (``theme``).
+    Other kwargs we pass (``ssr_mode``, ``inbrowser``) are equally version
+    -dependent, so filter every keyword against the live ``launch`` signature.
+    When the signature can't be introspected, or exposes ``**kwargs``, pass
+    everything through unchanged.
+    """
+    params = _named_params(gr.Blocks.launch)
+    if params is None:
+        return kwargs
+    try:
+        has_var_kw = any(
+            p.kind == p.VAR_KEYWORD
+            for p in inspect.signature(gr.Blocks.launch).parameters.values()
+        )
+    except (ValueError, TypeError):
+        has_var_kw = False
+    if has_var_kw:
+        return kwargs
+    accepted = {k: v for k, v in kwargs.items() if k in params}
+    dropped = sorted(set(kwargs) - set(accepted))
+    if dropped:
+        logger.warning(
+            f"gradio {gr.__version__}: launch() ignores unsupported kwargs {dropped}."
+        )
+    return accepted
+
+
+# Computed once at import time; consumed by create_ui() (Blocks) and every
+# launch() call site (web_app __main__ + launcher.py).
+BLOCKS_THEME_KWARGS, LAUNCH_THEME_KWARGS = _split_theme_kwargs()
+
+
 def create_ui():
     """Create the Gradio web interface."""
     defaults = load_defaults()
@@ -1291,6 +1367,7 @@ def create_ui():
     with gr.Blocks(
         title="Clip Extractor - 配信切り抜き自動生成",
         analytics_enabled=False,
+        **BLOCKS_THEME_KWARGS,
     ) as app:
         gr.HTML("<h1 class='main-title'>Clip Extractor</h1>")
         gr.HTML("<p class='subtitle'>YouTube配信アーカイブから切り抜きショート動画を自動生成</p>")
@@ -2163,10 +2240,9 @@ Settings タブの「📘 credentials.json の取得手順」アコーディオ�
 if __name__ == "__main__":
     app = create_ui()
     app.queue()
-    app.launch(
+    app.launch(**safe_launch_kwargs(
         server_name="0.0.0.0",
         server_port=7860,
         ssr_mode=False,
-        theme=APP_THEME,
-        css=APP_CSS,
-    )
+        **LAUNCH_THEME_KWARGS,
+    ))

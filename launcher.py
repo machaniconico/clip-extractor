@@ -56,18 +56,17 @@ def main():
     print("終了するにはこのウィンドウを閉じてください")
     print()
 
-    from web_app import create_ui, APP_THEME, APP_CSS
+    from web_app import create_ui, LAUNCH_THEME_KWARGS, safe_launch_kwargs
 
     app = create_ui()
     app.queue()
-    app.launch(
+    app.launch(**safe_launch_kwargs(
         server_name="0.0.0.0",
         server_port=7860,
         ssr_mode=False,
         inbrowser=False,  # we handle browser open ourselves
-        theme=APP_THEME,
-        css=APP_CSS,
-    )
+        **LAUNCH_THEME_KWARGS,
+    ))
 
 
 if __name__ == "__main__":
