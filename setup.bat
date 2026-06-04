@@ -86,7 +86,7 @@ if errorlevel 1 (
 )
 
 echo [INFO] Checking Claude Code CLI...
-claude --version >nul 2>&1
+call claude --version >nul 2>&1
 if errorlevel 1 (
     echo [INFO] Claude Code CLI not found. Installing...
     call npm install -g @anthropic-ai/claude-code
