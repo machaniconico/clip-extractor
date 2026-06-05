@@ -100,29 +100,20 @@ if errorlevel 1 (
 )
 
 :: ==========================================
-:: 4. Gemini API key setup
+:: 4. AI provider / API key (entered in the app GUI, not here)
 :: ==========================================
 echo.
-echo [4/7] Checking Gemini API key...
+echo [4/7] AI provider / API key...
 if exist "%~dp0.gemini_key" (
     echo [OK] Gemini API key file found
 ) else (
-    echo.
-    echo ============================================
-    echo   Gemini API key setup [free tier available]
-    echo ============================================
-    echo   1. Visit https://aistudio.google.com/apikey
-    echo      and create an API key
-    echo   2. Paste the key below and press Enter
-    echo      [You can also set it later in Settings tab]
-    echo ============================================
-    set /p GEMINI_KEY="Gemini API Key (skip=Enter): "
-    if defined GEMINI_KEY (
-        >"%~dp0.gemini_key" echo !GEMINI_KEY!
-        echo [OK] API key saved to .gemini_key
-    ) else (
-        echo [SKIP] You can enter the key later in Settings tab.
-    )
+    echo [INFO] API key is NOT entered during setup.
+    echo        Set it later inside the app:
+    echo          1. Launch Clip Extractor
+    echo          2. Open the Settings tab
+    echo          3. Paste your key and click Save
+    echo        Gemini free key: https://aistudio.google.com/apikey
+    echo        Claude mode needs no key.
 )
 
 :: ==========================================
