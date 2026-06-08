@@ -1529,12 +1529,12 @@ def create_ui():
 
                 with gr.Row():
                     detect_btn = gr.Button(
-                        "Detect Highlights / ハイライト検出",
+                        "STEP 1：AIがおすすめ箇所を抽出",
                         variant="primary",
                         size="lg",
                     )
                     render_btn = gr.Button(
-                        "Render Outputs / 出力生成",
+                        "STEP 2：クリップを書き出し",
                         variant="secondary",
                         size="lg",
                     )
