@@ -1524,6 +1524,102 @@ def create_ui():
                             info="要: credentials.json の設定",
                         )
 
+                session_state = gr.State({})
+                highlights_state = gr.State([])
+
+                with gr.Row():
+                    detect_btn = gr.Button(
+                        "Detect Highlights / ハイライト検出",
+                        variant="primary",
+                        size="lg",
+                    )
+                    render_btn = gr.Button(
+                        "Render Outputs / 出力生成",
+                        variant="secondary",
+                        size="lg",
+                    )
+
+                with gr.Group(visible=False) as review_panel:
+                    gr.Markdown("## クリップレビュー / Clip Review")
+                    status = gr.Markdown("")
+
+                    @gr.render(inputs=highlights_state)
+                    def render_review_rows(highlights):
+                        for idx, highlight in enumerate(highlights or []):
+                            video_duration = float(highlight.get("_video_duration") or 0.0)
+                            start_value = float(highlight.get("start_sec", 0.0))
+                            end_value = float(highlight.get("end_sec", start_value))
+                            title_value = highlight.get("title", "")
+
+                            with gr.Row():
+                                with gr.Column(scale=2):
+                                    preview_video = gr.Video(
+                                        label=f"Preview {idx + 1} / プレビュー {idx + 1}",
+                                        interactive=False,
+                                    )
+                                    preview_btn = gr.Button(
+                                        "このクリップをプレビュー / Preview this clip",
+                                        variant="secondary",
+                                    )
+                                with gr.Column(scale=3):
+                                    with gr.Row():
+                                        start_input = gr.Number(
+                                            label="開始秒 / Start sec",
+                                            value=start_value,
+                                            precision=3,
+                                        )
+                                        end_input = gr.Number(
+                                            label="終了秒 / End sec",
+                                            value=end_value,
+                                            precision=3,
+                                        )
+                                    seek_slider = gr.Slider(
+                                        0,
+                                        video_duration,
+                                        value=start_value,
+                                        step=0.1,
+                                        label="粗調整 / Coarse seek",
+                                    )
+                                    title_input = gr.Textbox(
+                                        label="タイトル / Title",
+                                        value=title_value,
+                                        lines=1,
+                                    )
+
+                            edit_inputs = [session_state, start_input, end_input, title_input]
+                            edit_outputs = [session_state]
+                            start_input.change(
+                                fn=lambda session, start, end, title, i=idx: _apply_review_edit_event_session_only(session, i, start, end, title),
+                                inputs=edit_inputs,
+                                outputs=edit_outputs,
+                            )
+                            end_input.change(
+                                fn=lambda session, start, end, title, i=idx: _apply_review_edit_event_session_only(session, i, start, end, title),
+                                inputs=edit_inputs,
+                                outputs=edit_outputs,
+                            )
+                            title_input.input(
+                                fn=lambda session, start, end, title, i=idx: _apply_review_edit_event_session_only(session, i, start, end, title),
+                                inputs=edit_inputs,
+                                outputs=edit_outputs,
+                            )
+                            title_input.change(
+                                fn=lambda session, start, end, title, i=idx: _apply_review_edit_event_session_only(session, i, start, end, title),
+                                inputs=edit_inputs,
+                                outputs=edit_outputs,
+                            )
+                            seek_slider.change(
+                                fn=lambda session, seek, end, title, i=idx: _apply_review_edit_event_session_only(session, i, seek, end, title),
+                                inputs=[session_state, seek_slider, end_input, title_input],
+                                outputs=edit_outputs,
+                            )
+                            preview_btn.click(
+                                fn=lambda session, start, end, i=idx: render_preview_clip(session, i, start, end),
+                                inputs=[session_state, start_input, end_input],
+                                outputs=preview_video,
+                                concurrency_limit=1,
+                            )
+
             # --- Settings Tab ---
             with gr.Tab("Settings / 設定"):
                 with gr.Row():
@@ -1665,6 +1761,10 @@ def create_ui():
                             value=youtube_api.auth_status_summary(),
                             interactive=False,
                         )
+                        with gr.Row():
+                            yt_refresh_btn = gr.Button(
+                                "ステータス更新", variant="secondary"
+                            )
 
                         # --- Step 1: credentials.json setup (developer-side OAuth client) ---
                         gr.HTML("<h4>① credentials.json を取得・配置</h4>")
@@ -1863,7 +1963,6 @@ def create_ui():
                         with gr.Row():
                             yt_auth_btn = gr.Button("認証する", variant="primary")
                             yt_revoke_btn = gr.Button("認証解除", variant="secondary")
-                            yt_refresh_btn = gr.Button("ステータス更新", variant="secondary")
 
                         def _yt_install_creds(src_path):
                             msg = youtube_api.install_credentials_from_file(src_path)
@@ -1964,102 +2063,6 @@ def create_ui():
                         info="先頭が必ず 0:00 から始まるため、YouTube がアップロード時に自動でチャプターとして認識します。そのままコピーして動画の概要欄に貼り付けるか、『概要欄に自動追加』を有効にして API で直接反映させてください。",
                         lines=8,
                         interactive=False,
-                    )
-
-        session_state = gr.State({})
-        highlights_state = gr.State([])
-
-        with gr.Row():
-            detect_btn = gr.Button(
-                "Detect Highlights / ハイライト検出",
-                variant="primary",
-                size="lg",
-            )
-            render_btn = gr.Button(
-                "Render Outputs / 出力生成",
-                variant="secondary",
-                size="lg",
-            )
-
-        with gr.Group(visible=False) as review_panel:
-            gr.Markdown("## クリップレビュー / Clip Review")
-            status = gr.Markdown("")
-
-            @gr.render(inputs=highlights_state)
-            def render_review_rows(highlights):
-                for idx, highlight in enumerate(highlights or []):
-                    video_duration = float(highlight.get("_video_duration") or 0.0)
-                    start_value = float(highlight.get("start_sec", 0.0))
-                    end_value = float(highlight.get("end_sec", start_value))
-                    title_value = highlight.get("title", "")
-
-                    with gr.Row():
-                        with gr.Column(scale=2):
-                            preview_video = gr.Video(
-                                label=f"Preview {idx + 1} / プレビュー {idx + 1}",
-                                interactive=False,
-                            )
-                            preview_btn = gr.Button(
-                                "このクリップをプレビュー / Preview this clip",
-                                variant="secondary",
-                            )
-                        with gr.Column(scale=3):
-                            with gr.Row():
-                                start_input = gr.Number(
-                                    label="開始秒 / Start sec",
-                                    value=start_value,
-                                    precision=3,
-                                )
-                                end_input = gr.Number(
-                                    label="終了秒 / End sec",
-                                    value=end_value,
-                                    precision=3,
-                                )
-                            seek_slider = gr.Slider(
-                                0,
-                                video_duration,
-                                value=start_value,
-                                step=0.1,
-                                label="粗調整 / Coarse seek",
-                            )
-                            title_input = gr.Textbox(
-                                label="タイトル / Title",
-                                value=title_value,
-                                lines=1,
-                            )
-
-                    edit_inputs = [session_state, start_input, end_input, title_input]
-                    edit_outputs = [session_state]
-                    start_input.change(
-                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event_session_only(session, i, start, end, title),
-                        inputs=edit_inputs,
-                        outputs=edit_outputs,
-                    )
-                    end_input.change(
-                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event_session_only(session, i, start, end, title),
-                        inputs=edit_inputs,
-                        outputs=edit_outputs,
-                    )
-                    title_input.input(
-                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event_session_only(session, i, start, end, title),
-                        inputs=edit_inputs,
-                        outputs=edit_outputs,
-                    )
-                    title_input.change(
-                        fn=lambda session, start, end, title, i=idx: _apply_review_edit_event_session_only(session, i, start, end, title),
-                        inputs=edit_inputs,
-                        outputs=edit_outputs,
-                    )
-                    seek_slider.change(
-                        fn=lambda session, seek, end, title, i=idx: _apply_review_edit_event_session_only(session, i, seek, end, title),
-                        inputs=[session_state, seek_slider, end_input, title_input],
-                        outputs=edit_outputs,
-                    )
-                    preview_btn.click(
-                        fn=lambda session, start, end, i=idx: render_preview_clip(session, i, start, end),
-                        inputs=[session_state, start_input, end_input],
-                        outputs=preview_video,
-                        concurrency_limit=1,
                     )
 
         detect_event = detect_btn.click(
