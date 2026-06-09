@@ -897,6 +897,51 @@ def render_phase(
         return ProcessResult(log="\n".join(logs)).as_gradio_outputs()
 
 
+def maybe_render_phase(
+    auto_run: bool,
+    session: dict,
+    output_mode: str,
+    generate_shorts: bool,
+    shorts_mode: str,
+    shorts_crop: str,
+    shorts_title: bool,
+    generate_zip: bool,
+    upload_to_drive: bool,
+    auto_append_youtube: bool,
+    font_name: str,
+    font_size: int,
+    font_color: str,
+    generate_thumbnails: bool,
+    karaoke: bool,
+    progress=gr.Progress(),
+):
+    """Chain STEP 2 right after STEP 1 when the 'run both' checkbox is on.
+
+    Returns no-op updates (leaving the STEP 2 output fields untouched) when the
+    checkbox is off or when detection produced nothing renderable, so manual
+    STEP 2 still behaves exactly as before.
+    """
+    if not auto_run or not isinstance(session, dict) or not session.get("video_path"):
+        return tuple(gr.update() for _ in range(5))
+    return render_phase(
+        session,
+        output_mode,
+        generate_shorts,
+        shorts_mode,
+        shorts_crop,
+        shorts_title,
+        generate_zip,
+        upload_to_drive,
+        auto_append_youtube,
+        font_name,
+        font_size,
+        font_color,
+        generate_thumbnails,
+        karaoke,
+        progress=progress,
+    )
+
+
 def _legacy_one_shot_handler(
     input_url: str,
     input_file,
@@ -1539,6 +1584,12 @@ def create_ui():
                         size="lg",
                     )
 
+                auto_run_both = gr.Checkbox(
+                    label="STEP 1 のあと STEP 2 まで自動で実行する",
+                    value=False,
+                    info="チェックすると、AI抽出 (STEP 1) が終わり次第そのままクリップ書き出し (STEP 2) まで一気に進めます。レビューで手直ししたい場合はオフのままにしてください。",
+                )
+
                 with gr.Group(visible=False) as review_panel:
                     gr.Markdown("## クリップレビュー / Clip Review")
                     status = gr.Markdown("")
@@ -2083,6 +2134,27 @@ def create_ui():
             fn=highlights_for_review,
             inputs=session_state,
             outputs=highlights_state,
+        ).then(
+            fn=maybe_render_phase,
+            inputs=[
+                auto_run_both,
+                session_state,
+                output_mode,
+                generate_shorts,
+                shorts_mode,
+                shorts_crop,
+                shorts_title,
+                generate_zip,
+                upload_to_drive,
+                auto_append_youtube,
+                font_name,
+                font_size,
+                font_color,
+                generate_thumbnails,
+                karaoke,
+            ],
+            outputs=[log_output, highlights_output, download_output, drive_link_output, chapters_output],
+            concurrency_limit=1,
         )
 
         render_btn.click(
