@@ -146,7 +146,7 @@ def load_defaults() -> dict:
         "audio_fusion": False, "audio_alpha": 0.35,
         "karaoke": False,
         "whisper_model": "large-v3", "language": "ja",
-        "font_name": "Noto Sans JP", "font_size": 96, "font_color": "#FFFFFF",
+        "font_name": "Noto Sans JP Black", "font_size": 96, "font_color": "#FFFFFF",
         "output_base_dir": "",
     }
     if SETTINGS_FILE.exists():
@@ -1782,14 +1782,19 @@ def create_ui():
                     with gr.Column():
                         gr.HTML("<h3>Font Settings / 字幕フォント</h3>")
                         system_fonts = get_system_fonts()
+                        # The bundled heavy gothic (fonts/NotoSansJP-Black.ttf) is
+                        # not installed system-wide, so surface it explicitly as the
+                        # first choice and the default.
+                        BUNDLED_FONT = "Noto Sans JP Black"
+                        font_choices = [BUNDLED_FONT] + [f for f in system_fonts if f != BUNDLED_FONT]
                         saved_font = defaults["font_name"]
-                        default_font = saved_font if saved_font in system_fonts else (system_fonts[0] if system_fonts else "Noto Sans JP")
+                        default_font = saved_font if saved_font in font_choices else BUNDLED_FONT
                         font_name = gr.Dropdown(
-                            choices=system_fonts,
+                            choices=font_choices,
                             value=default_font,
                             label="フォント名",
                             allow_custom_value=True,
-                            info="PCにインストール済みの全フォント + 直接入力可",
+                            info="先頭の「Noto Sans JP Black」は同梱の極太ゴシック（ショート字幕向けの既定）。その他はPCにインストール済みのフォント、直接入力も可。",
                         )
                         with gr.Row():
                             font_size = gr.Number(

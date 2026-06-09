@@ -7,3 +7,8 @@
 
 # Keep shell scripts LF regardless of platform.
 *.sh    text eol=lf
+
+# Bundled fonts are binary — never apply text/EOL normalization.
+*.ttf   binary
+*.otf   binary
+*.ttc   binary

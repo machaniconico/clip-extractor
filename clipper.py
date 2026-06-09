@@ -53,9 +53,29 @@ _JAPANESE_FONT_KEYWORDS = (
     "vl gothic",
 )
 
+# Bundled subtitle font shipped in fonts/ so Shorts captions render in a heavy
+# gothic (Noto Sans JP Black / 源ノ角ゴシック Heavy 相当) even on machines where
+# no Japanese font is installed. The internal family name is "Noto Sans JP Black"
+# (verified via fc-scan); libass needs that exact name plus a fontsdir pointing
+# at the bundle, while drawtext just loads the file by path.
+_BUNDLED_FONTS_DIR = Path(__file__).resolve().parent / "fonts"
+_BUNDLED_DEFAULT_FONT_FILE = _BUNDLED_FONTS_DIR / "NotoSansJP-Black.ttf"
+_BUNDLED_DEFAULT_FONT_FAMILY = "Noto Sans JP Black"
+# Requests that should resolve straight to the bundled heavy font file.
+_BUNDLED_FONT_ALIASES = frozenset({
+    "noto sans jp black",
+    "源ノ角ゴシック heavy",
+    "源ノ角ゴシック",
+})
+
+
+def _bundled_default_fontfile() -> str | None:
+    """Absolute path to the bundled heavy JP font, or None if it isn't present."""
+    return str(_BUNDLED_DEFAULT_FONT_FILE) if _BUNDLED_DEFAULT_FONT_FILE.is_file() else None
+
 
 class _DefaultTitleFontConfig:
-    font_name = "Noto Sans JP"
+    font_name = _BUNDLED_DEFAULT_FONT_FAMILY
 
 
 def get_video_info(video_path: Path) -> dict:
@@ -101,6 +121,13 @@ def _escape_subtitles_path(p: Path) -> str:
     return s
 
 
+def _bundled_fontsdir_option() -> str:
+    """`:fontsdir='...'` fragment so libass can load the bundled font, else ''."""
+    if _BUNDLED_FONTS_DIR.is_dir():
+        return f":fontsdir='{_escape_subtitles_path(_BUNDLED_FONTS_DIR)}'"
+    return ""
+
+
 def _build_force_style(font_config: "FontConfig") -> str:
     """font_config から ffmpeg subtitles filter の force_style 文字列を構築。"""
     alignment = 8 if getattr(font_config, "position", "bottom") == "top" else 2
@@ -120,12 +147,12 @@ def _build_force_style(font_config: "FontConfig") -> str:
 def _build_subtitles_filter(srt_path: Path, font_config: "FontConfig") -> str:
     escaped = _escape_subtitles_path(srt_path)
     style = _build_force_style(font_config)
-    return f"subtitles='{escaped}':force_style='{style}'"
+    return f"subtitles='{escaped}'{_bundled_fontsdir_option()}:force_style='{style}'"
 
 
 def _build_ass_subtitles_filter(ass_path: Path) -> str:
     escaped = _escape_subtitles_path(ass_path)
-    return f"subtitles='{escaped}'"
+    return f"subtitles='{escaped}'{_bundled_fontsdir_option()}"
 
 
 def _shorts_crop_filter(crop_x: str = "center") -> str:
@@ -322,15 +349,25 @@ def _fontconfig_fonts() -> tuple[tuple[str, str], ...]:
 def _resolve_title_fontfile(font_name: str) -> str | None:
     """Find a fontfile for the requested or fallback Japanese font, if possible."""
     requested = (font_name or "").strip()
+    requested_lower = requested.lower()
+    bundled = _bundled_default_fontfile()
+
+    # The bundled heavy font is requested by name (the new default) — use the
+    # file directly. This also makes drawtext titles work on Windows, where
+    # fc-list is absent and font-by-name resolution would otherwise fail.
+    if bundled and requested_lower in _BUNDLED_FONT_ALIASES:
+        return bundled
+
     fonts = _fontconfig_fonts()
     if not fonts:
+        if bundled:
+            return bundled
         logger.warning(
             "No fontconfig fonts found; drawtext will use font=%r and may render tofu",
             requested or "Sans",
         )
         return None
 
-    requested_lower = requested.lower()
     if requested_lower:
         for path_text, family in fonts:
             families = [item.strip().lower() for item in family.split(",")]
@@ -348,6 +385,15 @@ def _resolve_title_fontfile(font_name: str) -> str | None:
                 )
             return path_text
 
+    # Last resort: the bundled heavy font beats tofu when nothing else matches.
+    if bundled:
+        logger.warning(
+            "No matching Japanese font via fc-list for %r; using bundled heavy font: %s",
+            requested or "Sans",
+            bundled,
+        )
+        return bundled
+
     logger.warning(
         "No Japanese fontfile found via fc-list; drawtext will use font=%r and may render tofu",
         requested or "Sans",
@@ -361,7 +407,7 @@ def _title_drawtext_parts(title: str, font_config: "FontConfig") -> list[str]:
     if not wrapped_title:
         return []
 
-    font_name = getattr(font_config, "font_name", "Noto Sans JP") or "Noto Sans JP"
+    font_name = getattr(font_config, "font_name", _BUNDLED_DEFAULT_FONT_FAMILY) or _BUNDLED_DEFAULT_FONT_FAMILY
     fontfile = _resolve_title_fontfile(font_name)
     parts = [
         f"font='{_escape_drawtext_text(font_name)}'",
@@ -706,12 +752,16 @@ if __name__ == "__main__":
         assert expected in style, f"missing: {expected} in {style}"
 
     from pathlib import Path
+    # When the bundled font dir exists, a fontsdir hint is appended so libass can
+    # load it even on machines without the font installed.
+    dir_opt = _bundled_fontsdir_option()
     filt = _build_subtitles_filter(Path("C:/Users/x/clip.srt"), fc)
     assert filt.startswith("subtitles='C\\:/Users/x/clip.srt'"), f"bad escape: {filt}"
     assert "force_style='FontName=Noto Sans JP" in filt, f"style missing: {filt}"
+    assert filt == f"subtitles='C\\:/Users/x/clip.srt'{dir_opt}:force_style='{_build_force_style(fc)}'", f"srt filter mismatch: {filt}"
 
     ass_filt = _build_ass_subtitles_filter(Path("C:/Users/x/clip.ass"))
-    assert ass_filt == "subtitles='C\\:/Users/x/clip.ass'", f"bad ASS escape: {ass_filt}"
+    assert ass_filt == f"subtitles='C\\:/Users/x/clip.ass'{dir_opt}", f"bad ASS escape: {ass_filt}"
     assert "force_style" not in ass_filt, f"ASS filter must not force style: {ass_filt}"
 
     # _shorts_crop_filter: center (default) / left / right horizontal positions

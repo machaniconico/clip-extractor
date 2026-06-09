@@ -157,7 +157,7 @@ def _build_ass_header(font_config) -> str:
     if secondary == primary:
         secondary = _hex_to_ass_color("#555555")
     outline = _hex_to_ass_color(getattr(font_config, "outline_color", "#000000"))
-    font_name = getattr(font_config, "font_name", "Noto Sans JP")
+    font_name = getattr(font_config, "font_name", "Noto Sans JP Black")
     font_size = getattr(font_config, "font_size", 96)
     outline_width = getattr(font_config, "outline_width", 3)
     margin_v = getattr(font_config, "margin_bottom", 60)

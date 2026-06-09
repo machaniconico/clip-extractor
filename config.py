@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_FONT_CONFIG = {
-    "font_name": "Noto Sans JP",
+    # Heavy bundled gothic (fonts/NotoSansJP-Black.ttf) — the Shorts-caption look.
+    "font_name": "Noto Sans JP Black",
     "font_size": 96,
     "font_color": "#FFFFFF",
     "outline_color": "#000000",
@@ -17,7 +18,7 @@ DEFAULT_FONT_CONFIG = {
 
 @dataclass
 class FontConfig:
-    font_name: str = "Noto Sans JP"
+    font_name: str = "Noto Sans JP Black"
     # 96 is tuned for 1080×1920 Shorts; matches default_settings.json and
     # DEFAULT_FONT_CONFIG (the previous 48 default was a stale leftover).
     font_size: int = 96
