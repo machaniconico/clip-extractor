@@ -44,8 +44,27 @@ YouTube 配信アーカイブ（または手元の動画ファイル）から、
 - **ハイライト検出に使う AI**（いずれか1つ）
   - **Claude**（CLI 既定）: `claude` CLI が必要 — `npm install -g @anthropic-ai/claude-code`
   - **OpenAI**: `OPENAI_API_KEY`
-  - **Gemini**: `GEMINI_API_KEY`（または Web UI から保存。後述）
+  - **Gemini**: `GEMINI_API_KEY`（または Web UI から保存。取得方法は次節）
 - GPU があれば faster-whisper が高速化されます（CPU でも動作可）
+
+### Gemini API キーの取得（無料・約2分）
+
+Gemini は**無料枠あり・クレジットカード登録不要**で、3 つの中で一番手軽に始められます。
+
+1. [aistudio.google.com/apikey](https://aistudio.google.com/apikey)（Google AI Studio）を開いて Google アカウントでログイン
+   - 会社・学校の Workspace アカウントは組織設定でブロックされていることがあるため**個人 Gmail 推奨**
+2. 初回は利用規約に同意（デフォルトプロジェクトと初期キーが自動作成されることもあり、それを使って OK）
+3. **[+ APIキーを作成]**（Create API key）→ プロジェクトを聞かれたら新規作成で OK
+4. 生成されたキー（`AIza...`）をコピーし、環境変数 `GEMINI_API_KEY` に設定するか、Web UI の Settings タブに貼り付けて保存
+
+知っておくと安心:
+
+- **無料で使えるモデル**: `gemini-2.5-flash`（既定）/ `gemini-2.5-flash-lite`。**`gemini-2.5-pro` は 2026年4月から有料専用**（課金設定が必要）
+- **`429` エラー** = 無料枠のレート制限。数分待てば復活します
+- **昔作ったキーが弾かれる場合**: 2026年のセキュリティ移行で「制限なし」の古いキーは 2026/6/19 から順次拒否されます。AI Studio でキーを**新規作成し直す**のが最速（新キーは自動で適切に制限済み）
+- キーはパスワードと同じ扱いで（公開リポジトリに書かない・人に見せない）
+
+> ⚠️ この API キーと、YouTube/Drive 連携で使う `credentials.json`（`CREDENTIALS_SETUP.txt` 参照）は**別物**です。
 
 ---
 
@@ -77,7 +96,7 @@ python launcher.py
 Windows では `Clip Extractor.bat` をダブルクリックでも起動できます。起動後 `http://localhost:7860` を開きます。
 
 - AI プロバイダ（Claude / OpenAI / Gemini）とモデルを画面で選択
-- Gemini の API キーは画面から保存可能（`.gemini_key` に保存され、`GEMINI_API_KEY` 環境変数より優先）
+- Gemini の API キーは画面から保存可能（`.gemini_key` に保存され、`GEMINI_API_KEY` 環境変数より優先）。取得手順は Settings タブの「📘 Gemini APIキーの取得手順」アコーディオンにも掲載
 - 「検出」後に各クリップのイン/アウト点・タイトルを編集してから「レンダリング」（再文字起こしは走りません）
 
 ### コマンドライン（main.py）
