@@ -23,5 +23,13 @@
   "generate_thumbnails": false,
   "audio_fusion": false,
   "audio_alpha": 0.35,
-  "karaoke": false
+  "karaoke": false,
+  "obs_enabled": false,
+  "obs_trigger_method": "websocket",
+  "obs_host": "localhost",
+  "obs_port": 4455,
+  "obs_password": "",
+  "obs_stop_event": "stream",
+  "obs_watch_folder": "",
+  "obs_auto_process": true
 }

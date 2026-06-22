@@ -8,9 +8,11 @@ import shutil
 import subprocess
 import traceback
 import inspect
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 import gradio as gr
 
@@ -940,6 +942,251 @@ def maybe_render_phase(
         karaoke,
         progress=progress,
     )
+
+
+# ---------------------------------------------------------------------------
+# OBS integration — bridge from "recording finished" to the existing
+# detect→render pipeline. The watchers themselves live in obs_integration.py;
+# here we only manage the lifecycle, run the pipeline on a background thread,
+# and surface status to the UI via a polled shared buffer (never by touching
+# Gradio components from a worker thread).
+# ---------------------------------------------------------------------------
+
+class _DummyProgress:
+    """No-op callable standing in for ``gr.Progress()`` outside the UI thread.
+
+    detect_phase / render_phase call ``progress(frac, desc=...)``; this just
+    swallows those calls so the auto pipeline can run headless.
+    """
+
+    def __call__(self, *args, **kwargs):
+        return None
+
+
+# Module-level watcher singleton + shared status buffer. Worker threads only
+# ever append to _obs_status_lines (under _obs_status_lock); the UI polls via
+# _obs_status_poll() on a Timer / button — no component writes from threads.
+_obs_watcher = None
+_obs_watcher_lock = threading.Lock()
+_obs_status_lines: list[str] = []
+_obs_status_lock = threading.Lock()
+_OBS_STATUS_MAX = 80
+
+
+def _obs_append_status(msg: str) -> None:
+    """Append a status line (thread-safe, capped to the last N lines)."""
+    if not msg:
+        return
+    with _obs_status_lock:
+        _obs_status_lines.append(str(msg))
+        del _obs_status_lines[:-_OBS_STATUS_MAX]
+
+
+def _obs_status_text() -> str:
+    with _obs_status_lock:
+        return "\n".join(_obs_status_lines[-_OBS_STATUS_MAX:])
+
+
+def _obs_status_poll() -> str:
+    """Gradio Timer/btn target: return the current shared status text."""
+    return _obs_status_text()
+
+
+def run_obs_auto_pipeline(video_path: str, settings: dict) -> str:
+    """Run detect→render end-to-end on a local recording path.
+
+    Thin bridge over the existing ``detect_phase`` / ``render_phase``: builds
+    a fake file object whose ``.name`` is the recording path (detect_phase
+    reads ``getattr(input_file, "name", ...)``), feeds a dummy progress, then
+    drives render with the supplied ``settings`` dict. Returns an accumulated
+    log/status string — never raises (errors are captured into the log).
+    """
+    logs: list[str] = []
+
+    def log(msg: str):
+        logger.info(msg)
+        logs.append(msg)
+
+    try:
+        if not video_path:
+            return "OBS auto: 録画パスが空です"
+        if not Path(video_path).exists():
+            return f"OBS auto: ファイルが見つかりません: {video_path}"
+
+        s = dict(settings)  # shallow copy; we only read
+        fake_file = type("F", (), {"name": video_path})()
+        progress = _DummyProgress()
+
+        log(f"[OBS] Detect 開始: {video_path}")
+        detect_result = detect_phase(
+            "",  # input_url — local file, no URL
+            fake_file,
+            bool(s.get("enable_clips", True)),
+            s.get("clip_prompt", ""),
+            bool(s.get("enable_chapters", True)),
+            s.get("chapter_prompt", ""),
+            int(s.get("num_clips", 5)),
+            s.get("ai_provider", "gemini"),
+            s.get("ai_model", ""),
+            load_gemini_api_key(),
+            int(s.get("min_duration", 30)),
+            int(s.get("max_duration", 90)),
+            s.get("whisper_model", "large-v3"),
+            s.get("language", "ja"),
+            bool(s.get("audio_fusion", False)),
+            float(s.get("audio_alpha", 0.35)),
+            s.get("output_base_dir", ""),
+            progress=progress,
+        )
+        # detect_phase returns (session, status_md, review_panel_update)
+        session = detect_result[0] if isinstance(detect_result, tuple) and detect_result else None
+        detect_status = detect_result[1] if isinstance(detect_result, tuple) and len(detect_result) > 1 else ""
+        if not isinstance(session, dict) or not session.get("video_path"):
+            return "\n".join(logs + [str(detect_status)])
+
+        log("[OBS] Detect 完了 — Render 開始")
+        render_result = render_phase(
+            session,
+            s.get("output_mode", "combined"),
+            bool(s.get("generate_shorts", False)),
+            s.get("shorts_mode", "crop"),
+            s.get("shorts_crop", "center"),
+            bool(s.get("shorts_title", True)),
+            False,  # generate_zip — 自動処理では ZIP を作らない
+            False,  # upload_to_drive — 自動処理では Drive 投稿しない
+            bool(s.get("auto_append_youtube", False)),
+            s.get("font_name", "Noto Sans JP Black"),
+            int(s.get("font_size", 96)),
+            s.get("font_color", "#FFFFFF"),
+            bool(s.get("generate_thumbnails", False)),
+            bool(s.get("karaoke", False)),
+            progress=progress,
+        )
+        # render_phase returns ProcessResult.as_gradio_outputs() = (log, highlights, dl, drive, chapters)
+        render_log = render_result[0] if isinstance(render_result, tuple) and render_result else ""
+        log("[OBS] Render 完了")
+        return "\n".join(logs + [str(render_log)])
+    except Exception as e:
+        tb = traceback.format_exc()
+        logger.error(f"OBS auto pipeline error: {e}\n{tb}")
+        return "\n".join(logs + [f"Error: {e}", tb])
+
+
+def _obs_make_callback(auto_process: bool, settings: dict) -> Callable[[str], None]:
+    """Build the watcher callback: log the path, and (if auto) run the pipeline."""
+    def _callback(video_path: str) -> None:
+        _obs_append_status(f"録画終了を検知: {video_path}")
+        if not auto_process:
+            _obs_append_status("自動処理が無効のため検知のみ記録しました")
+            return
+
+        def _worker():
+            try:
+                _obs_append_status(f"自動パイプライン開始: {video_path}")
+                result_log = run_obs_auto_pipeline(video_path, settings)
+                _obs_append_status(result_log)
+                _obs_append_status(f"自動処理完了: {video_path}")
+            except Exception as e:
+                _obs_append_status(f"自動パイプラインエラー: {e}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    return _callback
+
+
+def stop_obs_watch() -> str:
+    """Stop the active OBS watcher (if any) and return its terminal status."""
+    global _obs_watcher
+    with _obs_watcher_lock:
+        watcher = _obs_watcher
+        _obs_watcher = None
+    if watcher is None:
+        msg = "OBS連携は停止中です"
+        _obs_append_status(msg)
+        return msg
+    try:
+        watcher.stop()
+        status = watcher.status
+    except Exception as e:
+        status = f"停止エラー: {e}"
+    _obs_append_status(f"OBS連携を停止しました: {status}")
+    return f"OBS連携を停止しました: {status}"
+
+
+def start_obs_watch(
+    method: str,
+    host: str,
+    port,
+    password: str,
+    stop_event: str,
+    watch_folder: str,
+    auto_process: bool,
+    num_clips,
+    output_mode: str,
+    generate_shorts: bool,
+    ai_provider: str,
+    whisper_model: str,
+    output_base_dir: str,
+) -> str:
+    """(Re)start the OBS watcher with the given settings; return status text.
+
+    Argument order MUST line up 1:1 with the ``obs_start_btn.click(inputs=[...])``
+    list in create_ui() — Gradio passes them positionally and any skew silently
+    corrupts every value. Settings the UI doesn't override are filled from
+    load_defaults() so prompts/durations/fonts still apply.
+    """
+    # Stop any existing watcher first so re-clicking Start reconfigures cleanly.
+    stop_obs_watch()
+
+    try:
+        import obs_integration
+    except Exception as e:
+        msg = f"obs_integration の import に失敗: {e}"
+        _obs_append_status(msg)
+        return msg
+
+    # Build the settings dict: saved defaults overlaid with the live UI values
+    # the user is most likely to tweak per-run.
+    settings = load_defaults()
+    try:
+        settings["num_clips"] = int(num_clips)
+    except (TypeError, ValueError):
+        pass
+    if output_mode:
+        settings["output_mode"] = output_mode
+    settings["generate_shorts"] = bool(generate_shorts)
+    if ai_provider:
+        settings["ai_provider"] = ai_provider
+    if whisper_model:
+        settings["whisper_model"] = whisper_model
+    if output_base_dir is not None:
+        settings["output_base_dir"] = output_base_dir
+
+    config = {
+        "host": host or "localhost",
+        "port": int(port) if port not in (None, "") else 4455,
+        "password": password or "",
+        "stop_event": stop_event or "stream",
+        "watch_folder": watch_folder or "",
+    }
+    callback = _obs_make_callback(bool(auto_process), settings)
+    try:
+        watcher = obs_integration.create_watcher(method, config, callback)
+    except Exception as e:
+        msg = f"ウォッチャー生成エラー: {e}"
+        _obs_append_status(msg)
+        return msg
+
+    with _obs_watcher_lock:
+        _obs_watcher = watcher
+    try:
+        watcher.start()
+    except Exception as e:
+        _obs_append_status(f"OBS連携開始エラー: {e}")
+        return f"OBS連携開始エラー: {e}"
+    status = watcher.status
+    _obs_append_status(f"OBS連携を開始: {status}")
+    return status
 
 
 def _legacy_one_shot_handler(
@@ -2167,6 +2414,79 @@ def create_ui():
                         interactive=False,
                     )
 
+            # --- OBS連携 Tab ---
+            with gr.Tab("OBS連携 / OBS"):
+                gr.Markdown(
+                    "### 配信終了で自動切り抜き\n"
+                    "OBS での配信/録画終了を検知して、既存の切り抜き・チャプター生成パイプラインを自動実行します。\n\n"
+                    "**WebSocket 方式(推奨)**: OBS 側で ツール → WebSocket サーバー設定 を有効化し、\n"
+                    "下記のポート(既定 4455)/パスワードを合わせてください。\n\n"
+                    "**フォルダ監視方式**: OBS の録画出力先フォルダを指定すると、新規動画ファイルの書き込み完了を検知します。\n"
+                    "（OBS WebSocket を使わずに動作するフォールバック）"
+                )
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        obs_trigger_radio = gr.Radio(
+                            ["websocket", "folder"],
+                            label="検知方式 / Trigger",
+                            value=defaults.get("obs_trigger_method", "websocket"),
+                            info="websocket=OBS WebSocket, folder=フォルダ監視",
+                        )
+                        obs_stop_event_radio = gr.Radio(
+                            ["stream", "record"],
+                            label="検知する停止イベント",
+                            value=defaults.get("obs_stop_event", "stream"),
+                            info="stream=配信停止で発火, record=録画停止で発火",
+                        )
+                        obs_auto_process = gr.Checkbox(
+                            label="検知後に自動で切り抜き/チャプター生成まで実行",
+                            value=bool(defaults.get("obs_auto_process", True)),
+                        )
+                    with gr.Column(scale=1):
+                        obs_host = gr.Textbox(
+                            label="WebSocket Host",
+                            value=defaults.get("obs_host", "localhost"),
+                        )
+                        obs_port = gr.Number(
+                            label="WebSocket Port",
+                            value=defaults.get("obs_port", 4455),
+                            precision=0,
+                        )
+                        obs_password = gr.Textbox(
+                            label="WebSocket Password",
+                            value=defaults.get("obs_password", ""),
+                            type="password",
+                        )
+                        obs_watch_folder = gr.Textbox(
+                            label="録画出力フォルダ (folder 方式 / またはパス補完用)",
+                            value=defaults.get("obs_watch_folder", ""),
+                            info="folder 方式で監視するフォルダの絶対パス",
+                        )
+
+                with gr.Row():
+                    obs_start_btn = gr.Button("OBS連携 開始", variant="primary")
+                    obs_stop_btn = gr.Button("OBS連携 停止")
+                    obs_refresh_btn = gr.Button("状態を更新")
+
+                obs_status_box = gr.Textbox(
+                    label="OBS連携ステータス",
+                    lines=12,
+                    interactive=False,
+                    value="",
+                )
+
+                # Live status updates. gr.Timer exists in Gradio 6.x; fall back
+                # to the manual refresh button on older versions (signature
+                # inspection pattern, same as safe_launch_kwargs / theme split).
+                _obs_timer = None
+                if hasattr(gr, "Timer"):
+                    try:
+                        _obs_timer = gr.Timer(value=3.0)
+                    except Exception:
+                        _obs_timer = None
+                if _obs_timer is not None:
+                    _obs_timer.tick(fn=_obs_status_poll, outputs=obs_status_box)
+
         detect_event = detect_btn.click(
             fn=detect_phase,
             inputs=[
@@ -2228,6 +2548,39 @@ def create_ui():
             ],
             outputs=[log_output, highlights_output, download_output, drive_link_output, chapters_output],
             concurrency_limit=1,
+        )
+
+        # --- OBS連携ボタン配線 ---
+        # inputs order MUST match start_obs_watch() signature 1:1 (Gradio
+        # passes them positionally; any skew silently corrupts every value).
+        obs_start_btn.click(
+            fn=start_obs_watch,
+            inputs=[
+                obs_trigger_radio,
+                obs_host,
+                obs_port,
+                obs_password,
+                obs_stop_event_radio,
+                obs_watch_folder,
+                obs_auto_process,
+                num_clips,
+                output_mode,
+                generate_shorts,
+                ai_provider,
+                whisper_model,
+                output_base_dir,
+            ],
+            outputs=obs_status_box,
+        )
+        obs_stop_btn.click(
+            fn=stop_obs_watch,
+            inputs=[],
+            outputs=obs_status_box,
+        )
+        obs_refresh_btn.click(
+            fn=_obs_status_poll,
+            inputs=[],
+            outputs=obs_status_box,
         )
 
         # Instructions

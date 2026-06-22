@@ -66,3 +66,12 @@ class AppConfig:
     font_config: FontConfig = field(default_factory=FontConfig)
     whisper_model: str = "large-v3"
     language: str = "ja"
+    # --- OBS integration ---
+    obs_enabled: bool = False
+    obs_trigger_method: str = "websocket"   # "websocket" | "folder"
+    obs_host: str = "localhost"
+    obs_port: int = 4455
+    obs_password: str = ""
+    obs_stop_event: str = "stream"          # "stream" | "record"
+    obs_watch_folder: str = ""
+    obs_auto_process: bool = True
