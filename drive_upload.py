@@ -1,42 +1,31 @@
-"""Google Drive upload module."""
+"""Google Drive upload module.
 
-import json
+OAuth plumbing lives in _google_auth; this module is a thin Drive-specific
+wrapper over it. Token + credentials live in the user's per-OS config
+directory (see _google_auth.get_user_config_dir).
+"""
+
 from pathlib import Path
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+import _google_auth
+
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-TOKEN_PATH = Path(__file__).parent / "token.json"
-CREDENTIALS_PATH = Path(__file__).parent / "credentials.json"
+
+# Migrate legacy files from the project root (one-shot, idempotent).
+_google_auth.migrate_legacy_file("token.json")
+_google_auth.migrate_legacy_file("credentials.json")
+
+TOKEN_PATH = _google_auth.get_user_config_dir() / "token.json"
+CREDENTIALS_PATH = _google_auth.get_user_config_dir() / "credentials.json"
 
 
 def get_drive_service():
     """Authenticate and return Google Drive service."""
-    creds = None
-
-    if TOKEN_PATH.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not CREDENTIALS_PATH.exists():
-                raise FileNotFoundError(
-                    "credentials.json が見つかりません。\n"
-                    "Google Cloud Console から OAuth 2.0 クライアントIDの認証情報をダウンロードし、\n"
-                    f"{CREDENTIALS_PATH} に配置してください。"
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
-            creds = flow.run_local_server(port=0)
-
-        TOKEN_PATH.write_text(creds.to_json())
-
-    return build("drive", "v3", credentials=creds)
+    return _google_auth.build_authenticated_service(
+        "drive", "v3", SCOPES, TOKEN_PATH, CREDENTIALS_PATH,
+    )
 
 
 def create_folder(service, folder_name: str, parent_id: str = None) -> str:
@@ -87,17 +76,23 @@ def upload_output_directory(output_dir: Path, drive_folder_name: str = None) -> 
     main_folder_id = create_folder(service, drive_folder_name)
     uploaded = {"folder_name": drive_folder_name, "files": []}
 
+    # Cache subfolder ids keyed by their relative tuple-path so we don't
+    # create the same folder (e.g. "clips") once per file inside it.
+    folder_cache: dict[tuple, str] = {(): main_folder_id}
+
     # Upload all files recursively
     for file_path in sorted(output_dir.rglob("*")):
         if file_path.is_file():
-            # Determine parent folder
             rel_path = file_path.relative_to(output_dir)
-            parent_id = main_folder_id
+            parts = rel_path.parts[:-1]  # directory parts only
 
-            # Create subfolders if needed
-            if len(rel_path.parts) > 1:
-                for part in rel_path.parts[:-1]:
-                    parent_id = create_folder(service, part, parent_id)
+            # Walk/create folders, caching each intermediate id
+            parent_id = main_folder_id
+            for depth in range(1, len(parts) + 1):
+                key = parts[:depth]
+                if key not in folder_cache:
+                    folder_cache[key] = create_folder(service, key[-1], parent_id)
+                parent_id = folder_cache[key]
 
             result = upload_file(service, file_path, parent_id)
             uploaded["files"].append({
@@ -118,3 +113,66 @@ def upload_output_directory(output_dir: Path, drive_folder_name: str = None) -> 
 def is_configured() -> bool:
     """Check if Google Drive credentials are configured."""
     return CREDENTIALS_PATH.exists()
+
+
+def check_auth_status(
+    token_path: Path | None = None,
+    credentials_path: Path | None = None,
+) -> dict:
+    """Inspect the on-disk auth state without prompting the user.
+
+    Thin wrapper over _google_auth.check_auth_status that defaults the paths
+    to this module's constants (so UIs / tests that monkey-patch
+    drive_upload.TOKEN_PATH / CREDENTIALS_PATH keep working).
+    """
+    token_path = token_path or TOKEN_PATH
+    credentials_path = credentials_path or CREDENTIALS_PATH
+    return _google_auth.check_auth_status(token_path, credentials_path, SCOPES)
+
+
+def ensure_authenticated(force_reauth: bool = False) -> bool:
+    """Guarantee a usable token exists; runs the OAuth browser flow if needed.
+
+    Returns False when credentials.json is missing (nothing we can do
+    without it). Raises on genuine auth failures so callers can surface
+    the error.
+    """
+    if force_reauth:
+        revoke_auth()
+    if not CREDENTIALS_PATH.exists():
+        return False
+    get_drive_service()
+    return True
+
+
+def revoke_auth() -> bool:
+    """Delete token.json if present. Returns whether a file was removed."""
+    return _google_auth.revoke_token(TOKEN_PATH)
+
+
+def auth_status_summary() -> str:
+    """One-line human-readable status string for the Settings UI / CLI."""
+    s = check_auth_status()
+    if not s["configured"]:
+        return (
+            "未設定: Settings タブの『credentials.json』欄にファイルをドロップしてください "
+            f"(保存先: {CREDENTIALS_PATH})"
+        )
+    if s["authenticated"]:
+        return "認証済み (token 有効)"
+    if s["expired"]:
+        err = s.get("error")
+        return f"期限切れ: 再認証が必要{(' (' + err + ')') if err else ''}"
+    if s["token_exists"]:
+        err = s.get("error") or "token 不正"
+        return f"要再認証: {err}"
+    return "未認証: Settings タブまたは --drive-setup で認証してください"
+
+
+def install_credentials_from_file(src_path) -> str:
+    """Validate and copy an uploaded credentials.json into CREDENTIALS_PATH.
+
+    Delegates to _google_auth; reads the module-level CREDENTIALS_PATH so
+    tests that monkey-patch it keep working.
+    """
+    return _google_auth.install_credentials_from_file(src_path, CREDENTIALS_PATH)

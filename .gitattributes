@@ -1,0 +1,14 @@
+# Windows batch files MUST keep CRLF line endings, or cmd.exe misparses
+# multi-line `if (...)` blocks and goto labels and the window closes instantly.
+# eol=crlf forces CRLF in the working tree on every platform (incl. WSL),
+# so a future `git add --renormalize` can never silently convert them to LF.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# Keep shell scripts LF regardless of platform.
+*.sh    text eol=lf
+
+# Bundled fonts are binary — never apply text/EOL normalization.
+*.ttf   binary
+*.otf   binary
+*.ttc   binary

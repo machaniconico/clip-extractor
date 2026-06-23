@@ -16,25 +16,35 @@ def open_browser():
     """Open browser after a short delay."""
     import time
     time.sleep(2)
-    webbrowser.open("http://localhost:8080")
+    webbrowser.open("http://localhost:7860")
 
 
 def main():
     # Check external dependencies
     import shutil
 
-    missing = []
+    missing_required = []
+    missing_optional = []
     if not shutil.which("ffmpeg"):
-        missing.append("FFmpeg (https://ffmpeg.org/download.html)")
+        missing_required.append("FFmpeg (https://ffmpeg.org/download.html)")
     if not shutil.which("claude"):
-        missing.append("Claude Code CLI (npm install -g @anthropic-ai/claude-code)")
+        # Claude CLI is optional — only needed when ai_provider = "claude".
+        # OpenAI / Gemini users can proceed without it.
+        missing_optional.append("Claude Code CLI (npm install -g @anthropic-ai/claude-code) — Claudeモード使用時のみ必要")
 
-    if missing:
+    if missing_required:
         print("=" * 50)
-        print("WARNING: 以下の外部ツールが見つかりません:")
-        for m in missing:
+        print("ERROR: 以下の必須ツールが見つかりません:")
+        for m in missing_required:
             print(f"  - {m}")
         print("PATHに追加してから再起動してください。")
+        print("=" * 50)
+        print()
+    if missing_optional:
+        print("=" * 50)
+        print("INFO: 以下の任意ツールが見つかりません (OpenAI/Gemini 使用時は不要):")
+        for m in missing_optional:
+            print(f"  - {m}")
         print("=" * 50)
         print()
 
@@ -42,20 +52,21 @@ def main():
     threading.Thread(target=open_browser, daemon=True).start()
 
     print("Clip Extractor を起動しています...")
-    print("ブラウザで http://localhost:8080 が開きます")
+    print("ブラウザで http://localhost:7860 が開きます")
     print("終了するにはこのウィンドウを閉じてください")
     print()
 
-    from web_app import create_ui
+    from web_app import create_ui, LAUNCH_THEME_KWARGS, safe_launch_kwargs
 
     app = create_ui()
     app.queue()
-    app.launch(
+    app.launch(**safe_launch_kwargs(
         server_name="0.0.0.0",
-        server_port=8080,
+        server_port=7860,
         ssr_mode=False,
         inbrowser=False,  # we handle browser open ourselves
-    )
+        **LAUNCH_THEME_KWARGS,
+    ))
 
 
 if __name__ == "__main__":

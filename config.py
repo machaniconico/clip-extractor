@@ -5,7 +5,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 DEFAULT_FONT_CONFIG = {
-    "font_name": "Noto Sans JP",
+    # Heavy bundled gothic (fonts/NotoSansJP-Black.ttf) — the Shorts-caption look.
+    "font_name": "Noto Sans JP Black",
     "font_size": 96,
     "font_color": "#FFFFFF",
     "outline_color": "#000000",
@@ -17,8 +18,10 @@ DEFAULT_FONT_CONFIG = {
 
 @dataclass
 class FontConfig:
-    font_name: str = "Noto Sans JP"
-    font_size: int = 48
+    font_name: str = "Noto Sans JP Black"
+    # 96 is tuned for 1080×1920 Shorts; matches default_settings.json and
+    # DEFAULT_FONT_CONFIG (the previous 48 default was a stale leftover).
+    font_size: int = 96
     font_color: str = "#FFFFFF"
     outline_color: str = "#000000"
     outline_width: int = 3
@@ -27,7 +30,7 @@ class FontConfig:
 
     @classmethod
     def from_file(cls, path: Path) -> "FontConfig":
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
@@ -52,7 +55,23 @@ class AppConfig:
     clip_max_duration: int = 90
     output_mode: str = "combined"  # "combined" or "individual"
     shorts: bool = False
+    shorts_crop: str = "center"  # "center" | "left" | "right"
+    shorts_mode: str = "crop"  # "crop" | "blur" | "pad"
+    shorts_title: bool = True
+    generate_thumbnails: bool = False
+    audio_fusion: bool = False
+    audio_alpha: float = 0.35
+    karaoke: bool = False
     highlight_prompt: str = ""
     font_config: FontConfig = field(default_factory=FontConfig)
     whisper_model: str = "large-v3"
     language: str = "ja"
+    # --- OBS integration ---
+    obs_enabled: bool = False
+    obs_trigger_method: str = "websocket"   # "websocket" | "folder"
+    obs_host: str = "localhost"
+    obs_port: int = 4455
+    obs_password: str = ""
+    obs_stop_event: str = "stream"          # "stream" | "record"
+    obs_watch_folder: str = ""
+    obs_auto_process: bool = True

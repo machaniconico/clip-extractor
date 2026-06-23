@@ -9,13 +9,19 @@ from clipper import format_time_range
 
 def generate_combined_xml(
     clip_paths: list[Path],
-    srt_paths: list[Path],
     highlights: list[dict],
     video_info: dict,
     output_path: Path,
     project_name: str = "ClipExtractor Project",
 ) -> Path:
-    """Generate a single FCP XML with multiple sequences (one per clip)."""
+    """Generate a single FCP XML with multiple sequences (one per clip).
+
+    SRT captions are NOT embedded in this XML — users import them
+    separately via Premiere Pro's `File > Import > *.srt` flow. The
+    `srt_paths` parameter was removed from this function's signature
+    because it was never referenced in the body; keeping a dead
+    parameter obscured the intentional "XML + separate SRT" workflow.
+    """
     xmeml = _create_xmeml()
     project = ET.SubElement(xmeml, "project")
     ET.SubElement(project, "name").text = project_name
@@ -26,9 +32,7 @@ def generate_combined_xml(
     ET.SubElement(media_bin, "name").text = "Media"
     bin_children = ET.SubElement(media_bin, "children")
 
-    for i, (clip_path, srt_path, highlight) in enumerate(
-        zip(clip_paths, srt_paths, highlights), 1
-    ):
+    for i, (clip_path, highlight) in enumerate(zip(clip_paths, highlights), 1):
         duration = highlight["end_sec"] - highlight["start_sec"]
         fps = video_info["fps"]
         frame_duration = int(duration * fps)
@@ -48,7 +52,6 @@ def generate_combined_xml(
             parent=children,
             name=highlight["title"],
             clip_path=clip_path,
-            srt_path=srt_path,
             file_id=file_id,
             width=width,
             height=height,
@@ -63,17 +66,19 @@ def generate_combined_xml(
 
 def generate_individual_xmls(
     clip_paths: list[Path],
-    srt_paths: list[Path],
     highlights: list[dict],
     video_info: dict,
     output_dir: Path,
 ) -> list[Path]:
-    """Generate individual FCP XML files, one per clip."""
+    """Generate individual FCP XML files, one per clip.
+
+    SRT captions are imported separately in Premiere (see
+    generate_combined_xml docstring for rationale on the dropped
+    srt_paths parameter).
+    """
     xml_paths = []
 
-    for i, (clip_path, srt_path, highlight) in enumerate(
-        zip(clip_paths, srt_paths, highlights), 1
-    ):
+    for i, (clip_path, highlight) in enumerate(zip(clip_paths, highlights), 1):
         duration = highlight["end_sec"] - highlight["start_sec"]
         fps = video_info["fps"]
         frame_duration = int(duration * fps)
@@ -85,12 +90,11 @@ def generate_individual_xmls(
         ET.SubElement(project, "name").text = highlight["title"]
         children = ET.SubElement(project, "children")
 
-        file_id = f"file-1"
+        file_id = "file-1"
         _create_sequence(
             parent=children,
             name=highlight["title"],
             clip_path=clip_path,
-            srt_path=srt_path,
             file_id=file_id,
             width=width,
             height=height,
@@ -116,7 +120,6 @@ def _create_sequence(
     parent: ET.Element,
     name: str,
     clip_path: Path,
-    srt_path: Path,
     file_id: str,
     width: int,
     height: int,
