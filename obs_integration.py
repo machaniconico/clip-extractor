@@ -121,6 +121,7 @@ class ObsWebsocketWatcher(_WorkerMixin):
         stop_event: str = "stream",
     ) -> None:
         super().__init__()
+        self._stopped = False
         self._host = host
         self._port = int(port)
         self._password = password
@@ -168,6 +169,7 @@ class ObsWebsocketWatcher(_WorkerMixin):
 
     def stop(self) -> None:
         """Disconnect from OBS. Safe to call multiple times / before start."""
+        self._stopped = True
         cl = self._client
         self._client = None
         if cl is not None:
@@ -278,6 +280,8 @@ class ObsWebsocketWatcher(_WorkerMixin):
                     logger.warning(self._status)
                     return
                 self._status = f"処理中: {path}"
+                if self._stopped:
+                    return
                 self._callback(str(path))
             except Exception:
                 logger.exception("ObsWebsocketWatcher dispatch failed")
@@ -301,6 +305,7 @@ class FolderWatcher(_WorkerMixin):
         extensions: Sequence[str] = RECORDING_EXTENSIONS,
     ) -> None:
         super().__init__()
+        self._stopped = False
         self._dir = str(watch_dir)
         self._callback = on_recording_finished
         self._extensions = tuple(e.lower() for e in extensions)
@@ -351,6 +356,7 @@ class FolderWatcher(_WorkerMixin):
 
     def stop(self) -> None:
         """Stop the observer and join worker threads."""
+        self._stopped = True
         obs = self._observer
         self._observer = None
         if obs is not None:
@@ -384,6 +390,8 @@ class FolderWatcher(_WorkerMixin):
                     logger.warning(self._status)
                     return
                 self._status = f"処理中: {abs_path}"
+                if self._stopped:
+                    return
                 self._callback(abs_path)
             except Exception:
                 logger.exception("FolderWatcher dispatch failed")

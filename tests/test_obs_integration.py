@@ -312,3 +312,43 @@ def test_create_watcher_unknown_raises():
 def test_create_watcher_folder_reads_watch_dir_alias():
     w = oi.create_watcher("folder", {"watch_dir": "/tmp"}, lambda p: None)
     assert isinstance(w, oi.FolderWatcher)
+
+
+# --------------------------------------------------------------------------
+# Stopped watcher must not fire the callback (stop-flag guard)
+# --------------------------------------------------------------------------
+
+def test_obs_websocket_stopped_does_not_fire_callback(tmp_path, monkeypatch):
+    monkeypatch.setattr(oi.time, "sleep", lambda *a, **k: None)
+    rec = tmp_path / "obs_stopped.mp4"
+    rec.write_bytes(b"video")
+
+    received: list[str] = []
+    w = oi.ObsWebsocketWatcher("localhost", 4455, "pw", received.append, stop_event="record")
+    w.stop()  # marks _stopped = True before any event arrives
+    w.on_record_state_changed(_stopped_event(rec))
+
+    # Join the dispatched worker so the assertion is deterministic.
+    with w._workers_lock:
+        workers = list(w._workers)
+    for wt in workers:
+        wt.join(timeout=5)
+    assert received == [], "stopped watcher must not fire the callback"
+
+
+def test_folder_watcher_stopped_does_not_fire_callback(tmp_path, monkeypatch):
+    monkeypatch.setattr(oi.time, "sleep", lambda *a, **k: None)
+    mp4 = tmp_path / "rec.mp4"
+    mp4.write_bytes(b"video")
+
+    received: list[str] = []
+    w = oi.FolderWatcher(tmp_path, received.append)
+    w.stop()  # marks _stopped = True before any event arrives
+    w._handle_event(str(mp4))
+
+    # Join the dispatched worker so the assertion is deterministic.
+    with w._workers_lock:
+        workers = list(w._workers)
+    for wt in workers:
+        wt.join(timeout=5)
+    assert received == [], "stopped watcher must not fire the callback"

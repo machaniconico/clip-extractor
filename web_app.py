@@ -103,7 +103,10 @@ def load_gemini_api_key(env_var: str = "GEMINI_API_KEY") -> str:
     still work.
     """
     if GEMINI_KEY_FILE.exists():
-        saved = GEMINI_KEY_FILE.read_text(encoding="utf-8").strip()
+        try:
+            saved = GEMINI_KEY_FILE.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            saved = ""
         if saved:
             return saved
     val = os.environ.get(env_var, "").strip()
@@ -968,6 +971,12 @@ class _DummyProgress:
 # _obs_status_poll() on a Timer / button — no component writes from threads.
 _obs_watcher = None
 _obs_watcher_lock = threading.Lock()
+# Generation token: bumped on every start/stop so a callback created for a
+# superseded watcher refuses to run the pipeline with stale settings.
+_obs_generation = 0
+# Auto-pipeline worker threads, tracked so stop can join finished ones and the
+# lifecycle is observable (the watcher's own _spawn_worker does not see these).
+_obs_pipeline_threads: list[threading.Thread] = []
 _obs_status_lines: list[str] = []
 _obs_status_lock = threading.Lock()
 _OBS_STATUS_MAX = 80
@@ -990,6 +999,45 @@ def _obs_status_text() -> str:
 def _obs_status_poll() -> str:
     """Gradio Timer/btn target: return the current shared status text."""
     return _obs_status_text()
+
+
+def _register_obs_worker(t: threading.Thread) -> None:
+    with _obs_watcher_lock:
+        # prune dead threads to avoid unbounded growth
+        _obs_pipeline_threads[:] = [w for w in _obs_pipeline_threads if w.is_alive()]
+        _obs_pipeline_threads.append(t)
+
+
+def _unregister_obs_worker(t: threading.Thread) -> None:
+    with _obs_watcher_lock:
+        try:
+            _obs_pipeline_threads.remove(t)
+        except ValueError:
+            pass
+
+
+def _join_obs_workers(timeout: float = 0.1) -> None:
+    """Best-effort join of tracked auto-pipeline workers.
+
+    Uses a short timeout because this runs on the UI thread (Stop button); an
+    in-flight pipeline (ffmpeg/transcribe) is a daemon thread that finishes on
+    its own. The generation gate already prevents *new* stale runs.
+    """
+    with _obs_watcher_lock:
+        workers = list(_obs_pipeline_threads)
+    for w in workers:
+        if w is not threading.current_thread():
+            try:
+                w.join(timeout=timeout)
+            except Exception:
+                pass
+
+
+def _coerce_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def run_obs_auto_pipeline(video_path: str, settings: dict) -> str:
@@ -1025,16 +1073,16 @@ def run_obs_auto_pipeline(video_path: str, settings: dict) -> str:
             s.get("clip_prompt", ""),
             bool(s.get("enable_chapters", True)),
             s.get("chapter_prompt", ""),
-            int(s.get("num_clips", 5)),
+            _coerce_int(s.get("num_clips", 5), 5),
             s.get("ai_provider", "gemini"),
             s.get("ai_model", ""),
             load_gemini_api_key(),
-            int(s.get("min_duration", 30)),
-            int(s.get("max_duration", 90)),
+            _coerce_int(s.get("min_duration", 30), 30),
+            _coerce_int(s.get("max_duration", 90), 90),
             s.get("whisper_model", "large-v3"),
             s.get("language", "ja"),
             bool(s.get("audio_fusion", False)),
-            float(s.get("audio_alpha", 0.35)),
+            _coerce_float(s.get("audio_alpha", 0.35), 0.35),
             s.get("output_base_dir", ""),
             progress=progress,
         )
@@ -1056,7 +1104,7 @@ def run_obs_auto_pipeline(video_path: str, settings: dict) -> str:
             False,  # upload_to_drive — 自動処理では Drive 投稿しない
             bool(s.get("auto_append_youtube", False)),
             s.get("font_name", "Noto Sans JP Black"),
-            int(s.get("font_size", 96)),
+            _coerce_int(s.get("font_size", 96), 96),
             s.get("font_color", "#FFFFFF"),
             bool(s.get("generate_thumbnails", False)),
             bool(s.get("karaoke", False)),
@@ -1072,9 +1120,22 @@ def run_obs_auto_pipeline(video_path: str, settings: dict) -> str:
         return "\n".join(logs + [f"Error: {e}", tb])
 
 
-def _obs_make_callback(auto_process: bool, settings: dict) -> Callable[[str], None]:
-    """Build the watcher callback: log the path, and (if auto) run the pipeline."""
+def _obs_make_callback(
+    auto_process: bool, settings: dict, generation: int | None = None
+) -> Callable[[str], None]:
+    """Build the watcher callback: log the path, and (if auto) run the pipeline.
+
+    ``generation`` is the watcher generation this callback belongs to. When set,
+    the callback (and its worker) abort if a later start/stop has superseded that
+    generation, so a stale callback never runs the pipeline with old settings.
+    Callbacks built directly (generation=None, e.g. in tests) skip that gate.
+    """
+    def _is_current() -> bool:
+        return generation is None or generation == _obs_generation
+
     def _callback(video_path: str) -> None:
+        if not _is_current():
+            return
         _obs_append_status(f"録画終了を検知: {video_path}")
         if not auto_process:
             _obs_append_status("自動処理が無効のため検知のみ記録しました")
@@ -1082,24 +1143,35 @@ def _obs_make_callback(auto_process: bool, settings: dict) -> Callable[[str], No
 
         def _worker():
             try:
+                if not _is_current():
+                    return
                 _obs_append_status(f"自動パイプライン開始: {video_path}")
                 result_log = run_obs_auto_pipeline(video_path, settings)
                 _obs_append_status(result_log)
                 _obs_append_status(f"自動処理完了: {video_path}")
             except Exception as e:
-                _obs_append_status(f"自動パイプラインエラー: {e}")
+                logger.exception("OBS auto pipeline worker crashed")
+                try:
+                    _obs_append_status(f"自動パイプラインエラー: {e}")
+                except Exception:
+                    pass
+            finally:
+                _unregister_obs_worker(threading.current_thread())
 
-        threading.Thread(target=_worker, daemon=True).start()
+        t = threading.Thread(target=_worker, daemon=True)
+        _register_obs_worker(t)
+        t.start()
 
     return _callback
 
 
 def stop_obs_watch() -> str:
     """Stop the active OBS watcher (if any) and return its terminal status."""
-    global _obs_watcher
+    global _obs_watcher, _obs_generation
     with _obs_watcher_lock:
         watcher = _obs_watcher
         _obs_watcher = None
+        _obs_generation += 1
     if watcher is None:
         msg = "OBS連携は停止中です"
         _obs_append_status(msg)
@@ -1109,6 +1181,7 @@ def stop_obs_watch() -> str:
         status = watcher.status
     except Exception as e:
         status = f"停止エラー: {e}"
+    _join_obs_workers()
     _obs_append_status(f"OBS連携を停止しました: {status}")
     return f"OBS連携を停止しました: {status}"
 
@@ -1135,6 +1208,7 @@ def start_obs_watch(
     corrupts every value. Settings the UI doesn't override are filled from
     load_defaults() so prompts/durations/fonts still apply.
     """
+    global _obs_watcher, _obs_generation
     # Stop any existing watcher first so re-clicking Start reconfigures cleanly.
     stop_obs_watch()
 
@@ -1169,7 +1243,10 @@ def start_obs_watch(
         "stop_event": stop_event or "stream",
         "watch_folder": watch_folder or "",
     }
-    callback = _obs_make_callback(bool(auto_process), settings)
+    with _obs_watcher_lock:
+        _obs_generation += 1
+        gen = _obs_generation
+    callback = _obs_make_callback(bool(auto_process), settings, gen)
     try:
         watcher = obs_integration.create_watcher(method, config, callback)
     except Exception as e:
