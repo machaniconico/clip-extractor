@@ -1,0 +1,49 @@
+# Auto-installed by setup-auto-merge.sh — CI gate for auto-merge.
+# The job name "test" is the required status check that gates merging.
+name: CI
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        if: ${{ hashFiles('package.json') != '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        if: ${{ hashFiles('package.json') != '' }}
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            corepack enable && pnpm install --frozen-lockfile
+          elif [ -f yarn.lock ]; then
+            corepack enable && yarn install --frozen-lockfile
+          elif [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Run tests
+        run: |
+          if [ -f package.json ] && node -e "process.exit((require('./package.json').scripts||{}).test?0:1)"; then
+            if   [ -f pnpm-lock.yaml ]; then pnpm test;
+            elif [ -f yarn.lock ];      then yarn test;
+            else npm test --if-present; fi
+          elif [ -f .auto-merge-no-test-ok ]; then
+            # Explicit opt-in: repo owner has acknowledged this gate verifies nothing.
+            echo "No test script detected, but .auto-merge-no-test-ok opt-in is present — passing."
+          else
+            echo "::error::No test script detected — refusing to certify this PR as tested."
+            echo "This 'test' status gates auto-merge but nothing was actually verified."
+            echo "Add a 'test' script to package.json, or create a '.auto-merge-no-test-ok'"
+            echo "file in the repo root to explicitly opt out (NOT a real safety gate)."
+            exit 1
+          fi
