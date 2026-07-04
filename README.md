@@ -49,6 +49,8 @@ YouTube 配信アーカイブ（または手元の動画ファイル）から、
 
 ### Gemini API キーの取得（無料・約2分）
 
+> 🔰 **PC 操作に慣れていない方へ**: 同梱の **`SETUP_GUIDE.html`** をダブルクリックしてブラウザで開いてください。Gemini API キーと credentials.json の両方の取得手順を、図解つき・専門用語の解説つきで説明しています。
+
 Gemini は**無料枠あり・クレジットカード登録不要**で、3 つの中で一番手軽に始められます。
 
 1. [aistudio.google.com/apikey](https://aistudio.google.com/apikey)（Google AI Studio）を開いて Google アカウントでログイン
@@ -155,7 +157,7 @@ python main.py ./archive.mp4 --shorts --karaoke --thumbnails --audio-fusion
 | `--youtube-setup` / `--youtube-status` / `--youtube-revoke` | YouTube OAuth の認証 / 状態確認 / 解除 |
 | `--drive-setup` / `--drive-status` / `--drive-revoke` | Google Drive OAuth の認証 / 状態確認 / 解除 |
 
-YouTube / Drive 連携のセットアップ手順は `CREDENTIALS_SETUP.txt` を参照してください。
+YouTube / Drive 連携のセットアップ手順は `CREDENTIALS_SETUP.txt` を参照してください（初心者向けの図解版は `SETUP_GUIDE.html`）。
 
 ---
 
