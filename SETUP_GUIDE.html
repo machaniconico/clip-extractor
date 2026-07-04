@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>clip-extractor はじめてのセットアップガイド（図解つき）</title>
+<style>
+  :root {
+    --blue: #1a73e8;
+    --blue-dark: #1557b0;
+    --green: #188038;
+    --red: #d93025;
+    --orange: #e37400;
+    --gray: #5f6368;
+    --bg: #f8f9fa;
+    --card: #ffffff;
+    --border: #dadce0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: "Hiragino Sans", "Yu Gothic UI", "Meiryo", sans-serif;
+    font-size: 16px;
+    line-height: 1.9;
+    color: #202124;
+    background: var(--bg);
+    margin: 0;
+    padding: 0;
+  }
+  .container { max-width: 860px; margin: 0 auto; padding: 24px 16px 80px; }
+  header.hero {
+    background: linear-gradient(135deg, #1a73e8 0%, #6c5ce7 100%);
+    color: #fff;
+    border-radius: 16px;
+    padding: 36px 28px;
+    margin-bottom: 28px;
+  }
+  header.hero h1 { margin: 0 0 8px; font-size: 26px; line-height: 1.5; }
+  header.hero p { margin: 0; opacity: .95; }
+  h2 {
+    font-size: 22px;
+    border-left: 6px solid var(--blue);
+    padding-left: 12px;
+    margin: 48px 0 16px;
+  }
+  h3 { font-size: 18px; margin: 32px 0 8px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin: 16px 0;
+  }
+  .step {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    margin: 20px 0;
+    position: relative;
+  }
+  .step-no {
+    display: inline-block;
+    background: var(--blue);
+    color: #fff;
+    font-weight: bold;
+    border-radius: 999px;
+    min-width: 34px;
+    height: 34px;
+    line-height: 34px;
+    text-align: center;
+    margin-right: 10px;
+    font-size: 16px;
+  }
+  .step h3 { display: inline; font-size: 18px; }
+  .step .body { margin-top: 12px; }
+  .note {
+    background: #e8f0fe;
+    border-left: 5px solid var(--blue);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 12px 0;
+  }
+  .warn {
+    background: #fef7e0;
+    border-left: 5px solid var(--orange);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 12px 0;
+  }
+  .danger {
+    background: #fce8e6;
+    border-left: 5px solid var(--red);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 12px 0;
+  }
+  .ok {
+    background: #e6f4ea;
+    border-left: 5px solid var(--green);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 12px 0;
+  }
+  code {
+    background: #f1f3f4;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 14px;
+    word-break: break-all;
+  }
+  .url-box {
+    display: block;
+    background: #202124;
+    color: #8ab4f8;
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-family: Consolas, monospace;
+    font-size: 15px;
+    margin: 10px 0;
+    word-break: break-all;
+  }
+  .url-box a { color: #8ab4f8; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; background: #fff; }
+  th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+  th { background: #f1f3f4; }
+  figure { margin: 16px 0; text-align: center; }
+  figure svg { max-width: 100%; height: auto; }
+  figcaption { font-size: 13px; color: var(--gray); margin-top: 6px; }
+  .toc { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 24px; }
+  .toc ol { margin: 8px 0; padding-left: 24px; }
+  .toc a { color: var(--blue); text-decoration: none; }
+  .toc a:hover { text-decoration: underline; }
+  .checklist { list-style: none; padding-left: 0; }
+  .checklist li { padding-left: 30px; position: relative; margin: 6px 0; }
+  .checklist li::before {
+    content: "☐";
+    position: absolute;
+    left: 0;
+    color: var(--blue);
+    font-size: 20px;
+    line-height: 1.4;
+  }
+  .badge-free {
+    display: inline-block;
+    background: var(--green);
+    color: #fff;
+    border-radius: 4px;
+    padding: 0 8px;
+    font-size: 13px;
+    font-weight: bold;
+  }
+  .badge-time {
+    display: inline-block;
+    background: var(--gray);
+    color: #fff;
+    border-radius: 4px;
+    padding: 0 8px;
+    font-size: 13px;
+  }
+  footer { margin-top: 60px; color: var(--gray); font-size: 14px; text-align: center; }
+  @media print {
+    body { background: #fff; }
+    .step, .card { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header class="hero">
+  <h1>🔑 clip-extractor はじめてのセットアップガイド</h1>
+  <p>「Gemini APIキー」と「credentials.json」——2つの<strong>“鍵”</strong>のもらい方を、パソコンが苦手な方にもわかるように図解つきで説明します。<br>
+  どちらも <strong>無料</strong> で、<strong>クレジットカードの登録は不要</strong> です。</p>
+</header>
+
+<!-- ================================================================ -->
+<h2 id="intro">0. さいしょに読んでください — 「鍵」は2種類あります</h2>
+
+<div class="card">
+<p>clip-extractor が Google のサービスを使うためには、Google から「鍵」をもらってくる必要があります。
+鍵は <strong>2種類</strong> あって、<strong>用途がまったく違います</strong>。名前が似ていて混同しやすいので、まずここだけ押さえてください。</p>
+
+<figure>
+<svg viewBox="0 0 760 300" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="2つの鍵の違いを示す図">
+  <!-- 左: Gemini API キー -->
+  <rect x="10" y="20" width="360" height="260" rx="14" fill="#e8f0fe" stroke="#1a73e8" stroke-width="2"/>
+  <text x="190" y="58" text-anchor="middle" font-size="20" font-weight="bold" fill="#1557b0">鍵A：Gemini APIキー</text>
+  <text x="190" y="92" text-anchor="middle" font-size="30">🗝️</text>
+  <text x="190" y="130" text-anchor="middle" font-size="15" fill="#202124">見た目：AIza… で始まる長い文字列</text>
+  <text x="190" y="160" text-anchor="middle" font-size="15" fill="#202124">使いみち：AI がハイライトを探す</text>
+  <text x="190" y="190" text-anchor="middle" font-size="15" fill="#202124">もらう場所：Google AI Studio</text>
+  <text x="190" y="222" text-anchor="middle" font-size="15" font-weight="bold" fill="#188038">所要 約2分・無料</text>
+  <text x="190" y="254" text-anchor="middle" font-size="14" fill="#5f6368">→ このガイドの Part 1</text>
+  <!-- 右: credentials.json -->
+  <rect x="390" y="20" width="360" height="260" rx="14" fill="#fef7e0" stroke="#e37400" stroke-width="2"/>
+  <text x="570" y="58" text-anchor="middle" font-size="20" font-weight="bold" fill="#b05a00">鍵B：credentials.json</text>
+  <text x="570" y="92" text-anchor="middle" font-size="30">📄</text>
+  <text x="570" y="130" text-anchor="middle" font-size="15" fill="#202124">見た目：JSON という形式のファイル</text>
+  <text x="570" y="160" text-anchor="middle" font-size="15" fill="#202124">使いみち：YouTube 概要欄・Drive 連携</text>
+  <text x="570" y="190" text-anchor="middle" font-size="15" fill="#202124">もらう場所：Google Cloud Console</text>
+  <text x="570" y="222" text-anchor="middle" font-size="15" font-weight="bold" fill="#188038">所要 約10分・無料</text>
+  <text x="570" y="254" text-anchor="middle" font-size="14" fill="#5f6368">→ このガイドの Part 2</text>
+</svg>
+<figcaption>図1：2つの鍵はもらう場所も使いみちも別物です</figcaption>
+</figure>
+
+<h3>あなたに必要なのはどっち？</h3>
+<table>
+  <tr><th>やりたいこと</th><th>鍵A（Gemini APIキー）</th><th>鍵B（credentials.json）</th></tr>
+  <tr><td>動画から切り抜きを自動で作りたい（基本機能）</td><td>✅ 必要 ※</td><td>不要</td></tr>
+  <tr><td>切り抜きのタイムスタンプを YouTube の概要欄に自動で書き込みたい</td><td>✅ 必要 ※</td><td>✅ 必要</td></tr>
+  <tr><td>できた動画を Google Drive に自動アップロードしたい</td><td>✅ 必要 ※</td><td>✅ 必要</td></tr>
+</table>
+<p style="font-size:14px; color:var(--gray);">※ AI に Claude（CLI）や OpenAI を使う設定にしている場合、鍵Aの代わりにそちらの準備が必要です。とくにこだわりがなければ「無料枠があってクレカ登録不要」の Gemini がおすすめです。</p>
+
+<div class="ok">💰 <strong>安心してください：</strong>このガイドに出てくる作業は、個人で使う範囲なら <strong>全部無料</strong> です。クレジットカードの登録画面は一度も出てきません。</div>
+</div>
+
+<div class="toc">
+<strong>📖 もくじ</strong>
+<ol>
+  <li><a href="#part1">Part 1：Gemini APIキーをもらう（約2分）</a></li>
+  <li><a href="#part2">Part 2：credentials.json をもらう（約10分）</a></li>
+  <li><a href="#trouble">こまったときは（トラブルシューティング）</a></li>
+  <li><a href="#glossary">ことばのミニ辞典</a></li>
+</ol>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="part1">Part 1：Gemini APIキーをもらう <span class="badge-time">⏱ 約2分</span> <span class="badge-free">無料・クレカ不要</span></h2>
+
+<p>AI（Gemini）に「動画のどこが面白いか」を分析してもらうための鍵です。<strong>Google アカウント（Gmail のアカウント）があれば 2分でもらえます。</strong></p>
+
+<div class="step">
+  <span class="step-no">1</span><h3>Google AI Studio のページを開く</h3>
+  <div class="body">
+    <p>ブラウザ（Edge や Chrome）の一番上にある「アドレスバー」に、次の文字をそのまま打ち込んで Enter キーを押します（この文書をパソコンで見ているなら、クリックするだけで開きます）。</p>
+    <span class="url-box"><a href="https://aistudio.google.com/apikey" target="_blank">https://aistudio.google.com/apikey</a></span>
+    <figure>
+    <svg viewBox="0 0 700 130" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ブラウザのアドレスバーにURLを入力する図">
+      <rect x="10" y="10" width="680" height="110" rx="10" fill="#fff" stroke="#dadce0" stroke-width="2"/>
+      <circle cx="40" cy="35" r="7" fill="#f28b82"/>
+      <circle cx="64" cy="35" r="7" fill="#fdd663"/>
+      <circle cx="88" cy="35" r="7" fill="#81c995"/>
+      <rect x="30" y="60" width="640" height="40" rx="20" fill="#f1f3f4" stroke="#dadce0"/>
+      <text x="55" y="86" font-size="17" font-family="Consolas, monospace" fill="#202124">https://aistudio.google.com/apikey</text>
+      <text x="640" y="86" font-size="17" fill="#5f6368" text-anchor="end">⏎</text>
+    </svg>
+    <figcaption>図2：この「アドレスバー」に入力します（検索欄ではなく画面最上部の欄です）</figcaption>
+    </figure>
+  </div>
+</div>
+
+<div class="step">
+  <span class="step-no">2</span><h3>Google アカウントでログインする</h3>
+  <div class="body">
+    <p>ログイン画面が出たら、ふだん使っている Google アカウント（Gmail のアドレス）でログインします。</p>
+    <div class="warn">⚠️ <strong>会社や学校の Google アカウントは避けてください。</strong>組織の設定でこのページがブロックされていることがあります。<strong>個人の Gmail アカウント</strong>を使うのが確実です。</div>
+  </div>
+</div>
+
+<div class="step">
+  <span class="step-no">3</span><h3>利用規約に同意する（初回だけ）</h3>
+  <div class="body">
+    <p>初めて開いたときは、利用規約への同意を求める画面が出ます。内容を確認してチェックを入れ、進んでください。</p>
+    <div class="note">💡 このとき「デフォルトプロジェクト」と一緒に<strong>最初のキーが自動で作られる</strong>ことがあります。画面にすでに <code>AIza…</code> で始まる文字列が表示されていたら、それをそのまま使って OK です（その場合はステップ 6 へ）。</div>
+  </div>
+</div>
+
+<div class="step">
+  <span class="step-no">4</span><h3>「＋ APIキーを作成」ボタンを押す</h3>
+  <div class="body">
+    <figure>
+    <svg viewBox="0 0 700 190" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="APIキーを作成ボタンの位置を示す模式図">
+      <rect x="10" y="10" width="680" height="170" rx="10" fill="#fff" stroke="#dadce0" stroke-width="2"/>
+      <text x="35" y="48" font-size="18" font-weight="bold" fill="#202124">API キー</text>
+      <rect x="480" y="28" width="185" height="42" rx="21" fill="#1a73e8"/>
+      <text x="572" y="55" text-anchor="middle" font-size="15" font-weight="bold" fill="#fff">＋ APIキーを作成</text>
+      <line x1="35" y1="80" x2="665" y2="80" stroke="#dadce0"/>
+      <text x="35" y="115" font-size="14" fill="#5f6368">プロジェクト</text>
+      <text x="35" y="145" font-size="14" fill="#5f6368">（まだ何もありません）</text>
+      <!-- 矢印 -->
+      <path d="M 572 120 L 572 82" stroke="#d93025" stroke-width="3" fill="none" marker-end="url(#arrow1)"/>
+      <defs><marker id="arrow1" markerWidth="10" markerHeight="10" refX="5" refY="8" orient="0"><path d="M0,10 L5,0 L10,10 Z" fill="#d93025"/></marker></defs>
+      <text x="572" y="150" text-anchor="middle" font-size="15" font-weight="bold" fill="#d93025">この青いボタンを押す</text>
+    </svg>
+    <figcaption>図3：画面右上あたりの青いボタンです（英語表示なら「Create API key」）</figcaption>
+    </figure>
+  </div>
+</div>
+
+<div class="step">
+  <span class="step-no">5</span><h3>プロジェクトを聞かれたら「新規作成」でOK</h3>
+  <div class="body">
+    <p>「どのプロジェクトで作りますか？」という選択が出ることがあります。よく分からなければ<strong>新規作成</strong>を選んでください。名前を付けるだけで、難しい知識は一切いりません。</p>
+  </div>
+</div>
+
+<div class="step">
+  <span class="step-no">6</span><h3>できあがったキーをコピーする</h3>
+  <div class="body">
+    <p><code>AIza</code> から始まる長い文字列が表示されます。横にある<strong>コピーボタン（📋 のようなアイコン）</strong>を押してコピーします。</p>
+    <div class="danger">🔒 <strong>このキーはパスワードと同じです。</strong>人に見せたり、SNS やインターネットに書き込んだりしないでください。</div>
+  </div>
+</div>
+
+<div class="step">
+  <span class="step-no">7</span><h3>clip-extractor に貼り付けて保存する</h3>
+  <div class="body">
+    <ol>
+      <li>clip-extractor を起動します（Windows なら <code>Clip Extractor.bat</code> をダブルクリック）</li>
+      <li>ブラウザに表示された画面で <strong>「Settings / 設定」タブ</strong> を開きます</li>
+      <li><strong>「APIキー」</strong>という入力欄に、コピーしたキーを貼り付け（右クリック →「貼り付け」）</li>
+      <li>すぐ下の <strong>「💾 このキーを保存」</strong>ボタンを押します</li>
+    </ol>
+    <figure>
+    <svg viewBox="0 0 700 210" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="clip-extractorのSettingsタブにキーを貼る図">
+      <rect x="10" y="10" width="680" height="190" rx="10" fill="#fff" stroke="#dadce0" stroke-width="2"/>
+      <rect x="10" y="10" width="680" height="44" rx="10" fill="#f1f3f4"/>
+      <text x="45" y="38" font-size="14" fill="#5f6368">入力</text>
+      <text x="110" y="38" font-size="14" fill="#5f6368">結果</text>
+      <rect x="170" y="18" width="100" height="30" rx="6" fill="#1a73e8"/>
+      <text x="220" y="39" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">Settings</text>
+      <text x="35" y="90" font-size="14" fill="#202124">APIキー</text>
+      <rect x="35" y="100" width="440" height="38" rx="6" fill="#f8f9fa" stroke="#dadce0"/>
+      <text x="50" y="125" font-size="14" font-family="Consolas, monospace" fill="#202124">AIzaSyD…（ここに貼り付け）</text>
+      <rect x="35" y="150" width="230" height="38" rx="6" fill="#e8f0fe" stroke="#1a73e8"/>
+      <text x="150" y="175" text-anchor="middle" font-size="14" font-weight="bold" fill="#1557b0">💾 このキーを保存</text>
+      <path d="M 300 170 L 275 170" stroke="#d93025" stroke-width="3" marker-end="url(#arrow2)"/>
+      <defs><marker id="arrow2" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M10,0 L0,5 L10,10 Z" fill="#d93025"/></marker></defs>
+      <text x="315" y="176" font-size="14" font-weight="bold" fill="#d93025">貼ったらここを押す</text>
+    </svg>
+    <figcaption>図4：Settings タブの「APIキー」欄。保存すると次回からは自動で読み込まれます</figcaption>
+    </figure>
+    <div class="ok">✅ これで Part 1 は完了です！ 切り抜きの自動生成だけが目的なら、もう使い始められます。</div>
+  </div>
+</div>
+
+<h3>Part 1 のよくある質問</h3>
+<div class="card">
+<table>
+  <tr><th>質問</th><th>答え</th></tr>
+  <tr><td>お金はかかりますか？</td><td><strong>かかりません。</strong>無料枠の範囲で使えて、クレジットカードの登録も不要です。</td></tr>
+  <tr><td>「429」というエラーが出ました</td><td>無料枠の「回数制限」に一時的に達しただけです。<strong>数分〜しばらく待ってもう一度実行</strong>すれば直ります。</td></tr>
+  <tr><td>どのモデルを選べばいい？</td><td>最初から選ばれている <code>gemini-2.5-flash</code> のままで OK です。</td></tr>
+  <tr><td>前に作ったキーが急に使えなくなりました</td><td>2026年のセキュリティ強化で古いキーが順次無効化されています。<strong>同じページでキーを作り直す</strong>のが最速です。</td></tr>
+</table>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="part2">Part 2：credentials.json をもらう <span class="badge-time">⏱ 約10分</span> <span class="badge-free">無料・クレカ不要</span></h2>
+
+<div class="note">💡 <strong>この Part が必要なのは</strong>「YouTube 概要欄への自動書き込み」や「Google Drive への自動アップロード」を使いたい人だけです。切り抜き生成だけなら飛ばして構いません。あとから必要になったときに戻ってくれば OK です。</div>
+
+<p>Part 1 より手順は多いですが、1つずつ進めば必ずできます。<strong>最初の1回だけ</strong>の作業で、次からは何もしなくて大丈夫です。全体の流れはこうです：</p>
+
+<figure>
+<svg viewBox="0 0 760 110" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Part2の全体フロー図">
+  <rect x="5" y="25" width="130" height="60" rx="10" fill="#e8f0fe" stroke="#1a73e8"/>
+  <text x="70" y="50" text-anchor="middle" font-size="13" fill="#1557b0">① 作業場所</text>
+  <text x="70" y="70" text-anchor="middle" font-size="13" fill="#1557b0">を作る</text>
+  <path d="M 140 55 L 158 55" stroke="#5f6368" stroke-width="2" marker-end="url(#arrowF)"/>
+  <rect x="163" y="25" width="130" height="60" rx="10" fill="#e8f0fe" stroke="#1a73e8"/>
+  <text x="228" y="50" text-anchor="middle" font-size="13" fill="#1557b0">② 使う機能の</text>
+  <text x="228" y="70" text-anchor="middle" font-size="13" fill="#1557b0">スイッチON</text>
+  <path d="M 298 55 L 316 55" stroke="#5f6368" stroke-width="2" marker-end="url(#arrowF)"/>
+  <rect x="321" y="25" width="130" height="60" rx="10" fill="#e8f0fe" stroke="#1a73e8"/>
+  <text x="386" y="50" text-anchor="middle" font-size="13" fill="#1557b0">③ アプリ情報</text>
+  <text x="386" y="70" text-anchor="middle" font-size="13" fill="#1557b0">を登録</text>
+  <path d="M 456 55 L 474 55" stroke="#5f6368" stroke-width="2" marker-end="url(#arrowF)"/>
+  <rect x="479" y="25" width="130" height="60" rx="10" fill="#e8f0fe" stroke="#1a73e8"/>
+  <text x="544" y="50" text-anchor="middle" font-size="13" fill="#1557b0">④ 鍵ファイル</text>
+  <text x="544" y="70" text-anchor="middle" font-size="13" fill="#1557b0">をもらう</text>
+  <path d="M 614 55 L 632 55" stroke="#5f6368" stroke-width="2" marker-end="url(#arrowF)"/>
+  <rect x="637" y="25" width="118" height="60" rx="10" fill="#e6f4ea" stroke="#188038"/>
+  <text x="696" y="50" text-anchor="middle" font-size="13" fill="#188038">⑤ アプリに</text>
+  <text x="696" y="70" text-anchor="middle" font-size="13" fill="#188038">渡して認証</text>
+  <defs><marker id="arrowF" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#5f6368"/></marker></defs>
+</svg>
+<figcaption>図5：Part 2 の全体像。「Google に自分専用アプリを登録して、その鍵をもらう」作業です</figcaption>
+</figure>
+
+<div class="warn">⚠️ Google の画面は時々デザインが変わります。この先の図は「だいたいこういう配置」という<strong>模式図</strong>です。ボタンの文言を頼りに探してください。この手順は 2026 年時点の新画面（Google Auth Platform）に対応しています。</div>
+
+<div class="step">
+  <span class="step-no">1</span><h3>Google Cloud Console を開く</h3>
+  <div class="body">
+    <span class="url-box"><a href="https://console.cloud.google.com/" target="_blank">https://console.cloud.google.com/</a></span>
+    <p>Part 1 と同じ Google アカウントでログインしてください。</p>
+    <div class="warn">⚠️ トップ画面に「<strong>Create Gemini API key</strong>」などのボタンが見えても<strong>押さないでください</strong>。それは Part 1 でもう済んでいる別の作業です。これから作るのは「OAuth クライアント」という別の種類の鍵です。</div>
+  </div>
+</div>
+
+<div class="step">
+  <span class="step-no">2</span><h3>「プロジェクト」（作業場所）を作る</h3>
+  <div class="body">
+    <p>Google Cloud では、何をするにもまず「プロジェクト」という入れ物（作業場所）を作ります。</p>
+    <ol>
+      <li>画面<strong>最上部の青いバー</strong>にある「Google Cloud」ロゴの<strong>すぐ右のプルダウン</strong>（「プロジェクトを選択」などと表示されている部分）をクリック</li>
+      <li>開いたウィンドウの右上 <strong>「＋ 新しいプロジェクト」</strong> をクリック</li>
+      <li>プロジェクト名に <code>clip-extractor</code> と入力（好きな名前でOK）。「組織」は「組織なし」のままで OK</li>
+      <li>青い <strong>「作成」</strong> ボタンを押す → 数秒で完了します</li>
+    </ol>
+    <figure>
+    <svg viewBox="0 0 700 150" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="プロジェクトセレクタの位置を示す図">
+      <rect x="10" y="10" width="680" height="50" rx="6" fill="#1a73e8"/>
+      <text x="40" y="42" font-size="16" font-weight="bold" fill="#fff">≡  Google Cloud</text>
+      <rect x="215" y="20" width="230" height="30" rx="6" fill="#fff" opacity="0.95"/>
+      <text x="230" y="41" font-size="14" fill="#202124">プロジェクトを選択 ▼</text>
+      <path d="M 330 105 L 330 55" stroke="#d93025" stroke-width="3" marker-end="url(#arrow3)"/>
+      <defs><marker id="arrow3" markerWidth="10" markerHeight="10" refX="5" refY="2" orient="0"><path d="M0,10 L5,0 L10,10 Z" fill="#d93025"/></marker></defs>
+      <text x="330" y="132" text-anchor="middle" font-size="15" font-weight="bold" fill="#d93025">画面いちばん上のここをクリック</text>
+    </svg>
+    <figcaption>図6：プロジェクトの切り替え口は、いつも画面最上部にあります</figcaption>
+    </figure>
+    <div class="danger">🚨 <strong>いちばん多いミス：</strong>作ったあと、<strong>そのプロジェクトに切り替わっていない</strong>ことがあります。上の図の場所が <strong>「clip-extractor」という表示になっているか必ず確認</strong>してください。なっていなければ、同じ場所をクリックして一覧から clip-extractor を選びます。ここがズレていると、この先の作業がすべて別の場所で行われてしまいます。</div>
+  </div>
+</div>
+
+<div class="step">
+  <span class="step-no">3</span><h3>使う機能のスイッチを入れる（API の有効化）</h3>
+  <div class="body">
+    <p>「うちのプロジェクトは YouTube の機能を使います」というスイッチを入れます。次の URL を開いてください：</p>
+    <span class="url-box"><a href="https://console.cloud.google.com/apis/library" target="_blank">https://console.cloud.google.com/apis/library</a></span>
+    <ol>
+      <li>検索欄に <code>YouTube Data API v3</code> と入力</li>
+      <li>出てきたカードをクリック</li>
+      <li>青い <strong>「有効にする」</strong>（英語なら ENABLE）ボタンを押す</li>
+      <li>5〜30 秒待つと、緑のチェック「✓ API が有効です」が表示されます</li>
+    </ol>
+    <div class="warn">⚠️ <strong>そっくりさんに注意！</strong> 検索すると似た名前が3つ出てきます：<br>
+      ✅ <strong>YouTube Data API v3</strong> ← これが正解<br>
+      ❌ YouTube Analytics API（視聴分析用・別物）<br>
+      ❌ YouTube Reporting API（レポート用・別物）</div>
+    <div class="note">💡 有効化したあとの画面に「<strong>管理</strong>」「<strong>この API を試す</strong>」というボタンが出ますが、<strong>どちらも押さなくて大丈夫</strong>です。押すと関係ない画面に飛んで迷子になります。そのまま次のステップへ進みましょう。</div>
+    <p><strong>Google Drive への自動アップロードも使いたい場合</strong>は、同じ手順で <code>Google Drive API</code> も検索して有効にしてください（概要欄の自動書き込みだけなら不要です）。</p>
+  </div>
+</div>
+
+<div class="step">
+  <span class="step-no">4</span><h3>アプリ情報を登録する（初回だけのかんたんな質問）</h3>
+  <div class="body">
+    <p>次の URL を開きます：</p>
+    <span class="url-box"><a href="https://console.cloud.google.com/auth/overview" target="_blank">https://console.cloud.google.com/auth/overview</a></span>
+    <p>「Google Auth Platform はまだ構成されていません」と表示されるので、<strong>「使ってみる」</strong>（英語なら Get started）を押します。4つの質問に答えるだけの画面（ウィザード）が始まります：</p>
+    <table>
+      <tr><th>画面</th><th>入力すること</th></tr>
+      <tr><td>1. アプリ情報</td><td>アプリ名：<code>clip-extractor</code>／サポートメール：自分の Gmail を選択 → 次へ</td></tr>
+      <tr><td>2. 対象</td><td><strong>「外部」</strong>を選ぶ（個人アカウントではこれしか選べません）→ 次へ</td></tr>
+      <tr><td>3. 連絡先情報</td><td>自分のメールアドレスを入力 → 次へ</td></tr>
+      <tr><td>4. 完了</td><td>ポリシー同意にチェック → <strong>「作成」</strong></td></tr>
+    </table>
+  </div>
+</div>
+
+<div class="step">
+  <span class="step-no">5</span><h3>★最重要★ 自分を「テストユーザー」に登録する</h3>
+  <div class="body">
+    <div class="danger">🚨 <strong>ここが Part 2 全体でいちばん忘れやすく、忘れると後で必ずエラーになる場所です。</strong>前のステップのウィザードには含まれていないので、自分で登録する必要があります。</div>
+    <ol>
+      <li>次の URL を開く（または画面左側のメニューで「対象」をクリック）：<br>
+      <span class="url-box"><a href="https://console.cloud.google.com/auth/audience" target="_blank">https://console.cloud.google.com/auth/audience</a></span></li>
+      <li>画面の中ほどにある <strong>「テストユーザー」</strong> セクションを探す</li>
+      <li><strong>「＋ ユーザーを追加」</strong>（+ Add users）をクリック</li>
+      <li><strong>自分の Gmail アドレスを入力</strong>して「保存」</li>
+    </ol>
+    <figure>
+    <svg viewBox="0 0 700 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="テストユーザー追加画面の模式図">
+      <rect x="10" y="10" width="680" height="180" rx="10" fill="#fff" stroke="#dadce0" stroke-width="2"/>
+      <text x="35" y="45" font-size="17" font-weight="bold" fill="#202124">対象（Audience）</text>
+      <line x1="35" y1="60" x2="665" y2="60" stroke="#dadce0"/>
+      <text x="35" y="95" font-size="15" font-weight="bold" fill="#202124">テストユーザー</text>
+      <rect x="35" y="110" width="215" height="38" rx="6" fill="#fff" stroke="#1a73e8" stroke-width="2"/>
+      <text x="142" y="135" text-anchor="middle" font-size="14" font-weight="bold" fill="#1a73e8">＋ ユーザーを追加</text>
+      <path d="M 320 129 L 258 129" stroke="#d93025" stroke-width="3" marker-end="url(#arrow4)"/>
+      <defs><marker id="arrow4" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M10,0 L0,5 L10,10 Z" fill="#d93025"/></marker></defs>
+      <text x="335" y="135" font-size="15" font-weight="bold" fill="#d93025">ここに自分の Gmail を登録！</text>
+      <text x="35" y="175" font-size="13" fill="#5f6368">※ 登録を忘れると、あとで「エラー 403: access_denied」になります（→ トラブルシューティング参照）</text>
+    </svg>
+    <figcaption>図7：「テストユーザー」に自分の Gmail を入れておくのがポイント</figcaption>
+    </figure>
+  </div>
+</div>
+
+<div class="step">
+  <span class="step-no">6</span><h3>鍵を作る（OAuth クライアントの作成）</h3>
+  <div class="body">
+    <p>次の URL を開きます（または左メニューの「クライアント」）：</p>
+    <span class="url-box"><a href="https://console.cloud.google.com/auth/clients" target="_blank">https://console.cloud.google.com/auth/clients</a></span>
+    <ol>
+      <li>ページ上部の <strong>「＋ クライアントを作成」</strong> をクリック</li>
+      <li>「アプリケーションの種類」で <strong>★「デスクトップ アプリ」★</strong> を選ぶ</li>
+      <li>名前は <code>clip-extractor desktop</code> など好きな名前で OK</li>
+      <li><strong>「作成」</strong> ボタンを押す</li>
+    </ol>
+    <div class="danger">🚨 <strong>種類はかならず「デスクトップ アプリ」を選んでください。</strong>「ウェブ アプリケーション」を選ぶと、あとで <code>redirect_uri_mismatch</code> というエラーになります。</div>
+  </div>
+</div>
+
+<div class="step">
+  <span class="step-no">7</span><h3>JSON ファイルをダウンロードする（★このタイミングだけ！）</h3>
+  <div class="body">
+    <p>作成すると「OAuth クライアントを作成しました」というウィンドウが出ます。</p>
+    <div class="danger">🚨 <strong>このウィンドウを閉じる前に、必ず「JSON をダウンロード」を押してください。</strong><br>
+    2025年6月の仕様変更で、完全な鍵ファイルを保存できるのは<strong>この直後の1回だけ</strong>になりました。閉じてしまうと、同じファイルは二度とダウンロードできません（その場合の対処は<a href="#trouble">トラブルシューティング</a>へ。作り直せば OK なので焦らなくて大丈夫です）。</div>
+    <figure>
+    <svg viewBox="0 0 700 220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="JSONダウンロードダイアログの模式図">
+      <rect x="0" y="0" width="700" height="220" fill="#202124" opacity="0.25" rx="10"/>
+      <rect x="90" y="25" width="520" height="170" rx="12" fill="#fff" stroke="#dadce0" stroke-width="2"/>
+      <text x="120" y="65" font-size="16" font-weight="bold" fill="#202124">OAuth クライアントを作成しました</text>
+      <text x="120" y="95" font-size="13" fill="#5f6368">クライアント ID: 1234…apps.googleusercontent.com</text>
+      <rect x="120" y="115" width="220" height="40" rx="20" fill="#1a73e8"/>
+      <text x="230" y="141" text-anchor="middle" font-size="14" font-weight="bold" fill="#fff">⬇ JSON をダウンロード</text>
+      <rect x="480" y="115" width="100" height="40" rx="20" fill="#fff" stroke="#dadce0"/>
+      <text x="530" y="141" text-anchor="middle" font-size="14" fill="#5f6368">OK</text>
+      <path d="M 230 185 L 230 160" stroke="#d93025" stroke-width="3" marker-end="url(#arrow5)"/>
+      <defs><marker id="arrow5" markerWidth="10" markerHeight="10" refX="5" refY="2" orient="0"><path d="M0,10 L5,0 L10,10 Z" fill="#d93025"/></marker></defs>
+      <text x="240" y="210" text-anchor="middle" font-size="15" font-weight="bold" fill="#d93025">「OK」を押す前に、必ずこっちを先に押す！</text>
+    </svg>
+    <figcaption>図8：ダウンロードは今だけ。<code>client_secret_〜.json</code> という名前で保存されます</figcaption>
+    </figure>
+    <div class="danger">🔒 このファイルもパスワードと同じです。人に渡したり、インターネットにアップロードしたりしないでください。</div>
+  </div>
+</div>
+
+<div class="step">
+  <span class="step-no">8</span><h3>clip-extractor にファイルを渡して、認証する</h3>
+  <div class="body">
+    <p><strong>いちばん簡単な方法（ドラッグ＆ドロップ）：</strong></p>
+    <ol>
+      <li>clip-extractor を起動して <strong>「Settings / 設定」タブ</strong> を開く</li>
+      <li>「YouTube API 認証」セクションにある <strong>「credentials.json（ドラッグ＆ドロップ可）」</strong>という枠に、さっきダウンロードした JSON ファイル（通常は「ダウンロード」フォルダにあります）を<strong>マウスでつかんで放り込む</strong></li>
+      <li>緑の成功メッセージが出たら配置完了</li>
+      <li>同じセクションの <strong>「認証する」</strong> ボタンを押す</li>
+      <li>ブラウザに Google の確認画面が開くので、<strong>ステップ 5 で登録した Gmail アカウント</strong>を選んで許可する</li>
+    </ol>
+    <div class="note">💡 途中で「このアプリは Google で確認されていません」という警告が出ますが、<strong>自分で作ったアプリなので問題ありません</strong>。「続行」を押して進んでください。</div>
+    <div class="ok">✅ 画面が「認証済み」になったら全部完了です！おつかれさまでした 🎉<br>
+    以降は鍵が自動で更新されるので、この作業を繰り返す必要はありません。</div>
+  </div>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="trouble">3. こまったときは（トラブルシューティング）</h2>
+
+<div class="card">
+<h3>❌「アクセスをブロック」「エラー 403: access_denied」と出る</h3>
+<p><strong>原因の第1位：テストユーザーの登録忘れ</strong>（Part 2 のステップ 5）です。</p>
+<ol>
+  <li><a href="https://console.cloud.google.com/auth/audience" target="_blank">console.cloud.google.com/auth/audience</a> を開く</li>
+  <li>「テストユーザー」セクションで「＋ ユーザーを追加」→ 自分の Gmail を入力して保存</li>
+  <li>1〜2分待ってから、clip-extractor の「認証する」をもう一度押す</li>
+</ol>
+</div>
+
+<div class="card">
+<h3>❌「redirect_uri_mismatch」というエラーが出る</h3>
+<p>鍵を作るとき（ステップ 6）に「ウェブ アプリケーション」を選んでしまったのが原因です。<a href="https://console.cloud.google.com/auth/clients" target="_blank">クライアント一覧</a>でそのクライアントを削除し、<strong>「デスクトップ アプリ」</strong>を選び直して JSON を再ダウンロードしてください。</p>
+</div>
+
+<div class="card">
+<h3>❌ JSON をダウンロードし忘れた／ファイルをなくした</h3>
+<p>作り直せば大丈夫です（無料・何度でも可）。方法は2つ：</p>
+<ul>
+  <li><strong>方法1：</strong>クライアント一覧で該当の名前をクリック →「クライアント シークレット」欄でシークレットを追加（リセット）→ 新しい JSON をその場でダウンロード</li>
+  <li><strong>方法2：</strong>該当クライアントを削除して、ステップ 6 からやり直し</li>
+</ul>
+</div>
+
+<div class="card">
+<h3>❌ 数日たったら「再認証してください」と言われる</h3>
+<p>アプリが「テスト」モードのままだと、認証は <strong>7日で期限切れ</strong>になる仕様です。</p>
+<ul>
+  <li><strong>手軽な対処：</strong>Settings タブで「認証する」をもう一度押すだけ</li>
+  <li><strong>恒久対処：</strong><a href="https://console.cloud.google.com/auth/audience" target="_blank">「対象」ページ</a>の公開ステータスで「アプリを公開」を押して本番モードにする（自分用アプリなら審査は通常不要です）</li>
+</ul>
+</div>
+
+<div class="card">
+<h3>❌ Gemini で「429」エラーが出る</h3>
+<p>無料枠の回数制限に一時的に達しただけです。数分〜しばらく待って再実行してください。壊れたわけではありません。</p>
+</div>
+
+<!-- ================================================================ -->
+<h2 id="glossary">4. ことばのミニ辞典</h2>
+
+<div class="card">
+<table>
+  <tr><th style="width:180px">ことば</th><th>ざっくりした意味</th></tr>
+  <tr><td><strong>API（エーピーアイ）</strong></td><td>アプリ同士が会話するための「窓口」。clip-extractor はこの窓口を通じて Google のサービスにお願いごとをします。</td></tr>
+  <tr><td><strong>APIキー</strong></td><td>窓口で見せる「会員証」。<code>AIza…</code> のような長い文字列で、これを見せると Google が「この人は登録済みだな」と分かってくれます。</td></tr>
+  <tr><td><strong>OAuth（オーオース）</strong></td><td>「私の YouTube アカウントを、このアプリに操作させていいですよ」と Google に伝える許可のしくみ。パスワードそのものをアプリに渡さずに済む、安全な方法です。</td></tr>
+  <tr><td><strong>credentials.json</strong></td><td>OAuth を使うための「アプリの身分証明ファイル」。Part 2 で作ってダウンロードするファイルです。</td></tr>
+  <tr><td><strong>JSON（ジェイソン）</strong></td><td>コンピュータ用のデータの書き方の名前。「.json」で終わるファイルは、設定や情報がこの書き方で入っています。中身を編集する必要はありません。</td></tr>
+  <tr><td><strong>プロジェクト</strong></td><td>Google Cloud の中の「作業フォルダ」のようなもの。この中に設定や鍵がまとまります。</td></tr>
+  <tr><td><strong>クォータ</strong></td><td>「1日に使える回数の上限」。YouTube の窓口は1日 10,000 ポイントぶん無料で使えて、概要欄の書き込み1回で 50 ポイント使います（＝1日約200本ぶん。ふつうの使い方でなくなることはまずありません）。</td></tr>
+</table>
+</div>
+
+<footer>
+  <p>もっと詳しい情報（コマンドラインでの操作・保存先のパスなど）は、同じフォルダの <code>CREDENTIALS_SETUP.txt</code> と <code>README.md</code> にあります。<br>
+  このガイドは 2026 年 7 月時点の Google の画面に基づいています。</p>
+</footer>
+
+</div>
+</body>
+</html>
