@@ -7,8 +7,6 @@ directory (see _google_auth.get_user_config_dir).
 
 from pathlib import Path
 
-from googleapiclient.http import MediaFileUpload
-
 import _google_auth
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
@@ -43,6 +41,8 @@ def create_folder(service, folder_name: str, parent_id: str = None) -> str:
 
 def upload_file(service, file_path: Path, folder_id: str) -> dict:
     """Upload a single file to Google Drive."""
+    from googleapiclient.http import MediaFileUpload
+
     mime_types = {
         ".mp4": "video/mp4",
         ".srt": "application/x-subrip",

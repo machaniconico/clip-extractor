@@ -13,9 +13,23 @@ if getattr(sys, "frozen", False):
 
 
 def open_browser():
-    """Open browser after a short delay."""
+    """Open the browser as soon as the server is accepting connections.
+
+    Polls the port instead of a fixed sleep so we open immediately on a
+    fast machine and still wait out a slow model/dependency load on a
+    slower one. Falls back to opening anyway after 30s so a firewall or
+    other probe failure never leaves the user without a browser tab.
+    """
+    import socket
     import time
-    time.sleep(2)
+
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", 7860), timeout=0.25):
+                break
+        except OSError:
+            time.sleep(0.25)
     webbrowser.open("http://localhost:7860")
 
 

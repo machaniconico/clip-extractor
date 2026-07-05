@@ -39,13 +39,48 @@ import sys
 import tempfile
 from pathlib import Path
 
-from google.auth.exceptions import RefreshError
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-
 logger = logging.getLogger(__name__)
+
+# The google-auth / google-api-python-client stack is the heaviest import in
+# this project's startup path but is only needed once an OAuth flow actually
+# runs. Resolve the five names lazily via PEP 562 module __getattr__ instead
+# of importing them at module load time.
+#
+# This must stay __getattr__-based rather than moving the imports inside each
+# function: tests/test_google_auth.py does
+# `mock.patch.object(_google_auth.Credentials, "from_authorized_user_file", ...)`
+# and `mock.patch.object(_google_auth, "build", ...)`, i.e. it patches these
+# as module attributes. __getattr__ resolves the real object into globals()
+# on first touch (including the attribute access patch.object itself does),
+# so the patch lands on the same object the functions below use.
+_LAZY_GOOGLE = {
+    "RefreshError": ("google.auth.exceptions", "RefreshError"),
+    "Request": ("google.auth.transport.requests", "Request"),
+    "Credentials": ("google.oauth2.credentials", "Credentials"),
+    "InstalledAppFlow": ("google_auth_oauthlib.flow", "InstalledAppFlow"),
+    "build": ("googleapiclient.discovery", "build"),
+}
+
+
+def __getattr__(name):
+    if name in _LAZY_GOOGLE:
+        import importlib
+        module_name, attr = _LAZY_GOOGLE[name]
+        value = getattr(importlib.import_module(module_name), attr)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _ensure_google_imports():
+    """Force-resolve all lazy names before a function that uses them runs.
+
+    Never overwrites a name already in globals() — that would clobber a
+    test's mock.patch.object() replacement with the real import.
+    """
+    for name in _LAZY_GOOGLE:
+        if name not in globals():
+            __getattr__(name)
 
 APP_DIR_NAME = "clip-extractor"
 
@@ -161,6 +196,7 @@ def build_authenticated_service(
     FileNotFoundError when credentials.json is missing and a fresh flow is
     required.
     """
+    _ensure_google_imports()
     creds: Credentials | None = None
     if token_path.exists():
         creds = Credentials.from_authorized_user_file(str(token_path), scopes)
@@ -198,6 +234,7 @@ def check_auth_status(
     Never prompts, never opens a browser. Performs a silent token refresh
     when possible. Returns a status dict UIs can render as-is.
     """
+    _ensure_google_imports()
     status = {
         "configured": credentials_path.exists(),
         "token_exists": token_path.exists(),

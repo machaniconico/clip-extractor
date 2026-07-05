@@ -84,7 +84,56 @@ def get_system_fonts():
         "Meiryo", "Noto Sans JP", "Noto Serif JP", "Yu Gothic UI",
     ]
 
+
 import json
+
+FONT_CACHE_FILE = LOG_DIR / "font_cache.json"
+
+
+def _write_font_cache(fonts: list) -> None:
+    """Write FONT_CACHE_FILE atomically (tmp file in the same dir + os.replace)
+    so a reader never sees a partially-written cache from a crash or a
+    concurrent launch."""
+    tmp = FONT_CACHE_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(fonts, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, FONT_CACHE_FILE)
+
+
+def get_system_fonts_cached():
+    """Return the system font list fast, refreshing the on-disk cache
+    in the background.
+
+    get_system_fonts() shells out to PowerShell + .NET and takes 1-3s on
+    every call. On a cache hit we return the cached list immediately and
+    kick off a fresh get_system_fonts() in a daemon thread to update the
+    cache file for next launch (this session's UI is unaffected). On a
+    cache miss/corruption we fall back to the synchronous call, same as
+    before this cache existed.
+    """
+    try:
+        cached = json.loads(FONT_CACHE_FILE.read_text(encoding="utf-8"))
+        if isinstance(cached, list) and cached and all(isinstance(f, str) for f in cached):
+            def _refresh_cache():
+                try:
+                    fonts = get_system_fonts()
+                    if fonts:
+                        _write_font_cache(fonts)
+                except Exception:
+                    pass
+
+            threading.Thread(target=_refresh_cache, daemon=True).start()
+            return cached
+    except Exception:
+        pass
+
+    fonts = get_system_fonts()
+    if fonts:
+        try:
+            _write_font_cache(fonts)
+        except Exception:
+            pass
+    return fonts
+
 
 from config import FontConfig
 
@@ -1711,27 +1760,29 @@ def safe_launch_kwargs(**kwargs):
 BLOCKS_THEME_KWARGS, LAUNCH_THEME_KWARGS = _split_theme_kwargs()
 
 
+def _startup_auth_status_for_ui() -> str:
+    """Full auth probe, run per page load off the server-startup path.
+
+    check_auth_status() may perform a silent network token refresh and
+    imports the heavy google stack on first use, so it must not run
+    synchronously while create_ui() builds the Blocks graph (that would
+    block every client's first paint on network I/O). Wiring this as an
+    app.load() handler instead runs it once per page load, after the UI
+    is already visible. Also feeds the console log (replacing the old
+    startup-thread probe) so both surfaces come from one check.
+    """
+    try:
+        summary = youtube_api.auth_status_summary()
+    except Exception as e:
+        logger.warning(f"YouTube auth startup probe failed: {e}")
+        return f"確認失敗: {e}"
+    logger.info(f"YouTube auth: {summary}")
+    return summary
+
+
 def create_ui():
     """Create the Gradio web interface."""
     defaults = load_defaults()
-
-    # Startup auth probe — silent (no browser). Just log the current state
-    # so the user sees in the console whether their YouTube token is ready.
-    try:
-        _yt_status = youtube_api.check_auth_status()
-        if _yt_status["authenticated"]:
-            logger.info("YouTube auth: 認証済み (token 有効)")
-        elif _yt_status["expired"]:
-            logger.warning(
-                f"YouTube auth: 期限切れ — Settings タブで再認証してください "
-                f"({_yt_status.get('error') or ''})"
-            )
-        elif _yt_status["configured"]:
-            logger.info("YouTube auth: 未認証 (credentials.json は配置済、初回認証が必要)")
-        else:
-            logger.info("YouTube auth: 未設定 (credentials.json なし — auto-append 無効)")
-    except Exception as _yt_err:
-        logger.warning(f"YouTube auth startup probe failed: {_yt_err}")
 
     with gr.Blocks(
         title="Clip Extractor - 配信切り抜き自動生成",
@@ -2148,7 +2199,7 @@ def create_ui():
                 with gr.Row():
                     with gr.Column():
                         gr.HTML("<h3>Font Settings / 字幕フォント</h3>")
-                        system_fonts = get_system_fonts()
+                        system_fonts = get_system_fonts_cached()
                         # The bundled heavy gothic (fonts/NotoSansJP-Black.ttf) is
                         # not installed system-wide, so surface it explicitly as the
                         # first choice and the default.
@@ -2181,7 +2232,7 @@ def create_ui():
                         )
                         yt_auth_status_box = gr.Textbox(
                             label="認証ステータス",
-                            value=youtube_api.auth_status_summary(),
+                            value=youtube_api.auth_status_placeholder(),
                             interactive=False,
                         )
                         with gr.Row():
@@ -2866,6 +2917,8 @@ Settings タブの「📘 credentials.json の取得手順」アコーディオ�
 - 期限切れなら Settings タブから「認証する」を押すだけで再認証可能
 - CLI で状態確認: `python main.py --youtube-status` / `python main.py --drive-status`
             """)
+
+        app.load(fn=_startup_auth_status_for_ui, inputs=None, outputs=[yt_auth_status_box])
 
     return app
 

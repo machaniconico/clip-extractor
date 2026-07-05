@@ -3,8 +3,6 @@
 import re
 from pathlib import Path
 
-import yt_dlp
-
 
 TITLE_BYTE_LIMIT = 100
 
@@ -30,6 +28,8 @@ def build_output_template(output_dir: Path) -> str:
 
 def download_video(url: str, output_dir: Path) -> Path:
     """Download YouTube video and return the local file path."""
+    import yt_dlp
+
     output_dir.mkdir(parents=True, exist_ok=True)
     output_template = build_output_template(output_dir)
 
