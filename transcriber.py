@@ -27,7 +27,6 @@ if _nvidia_spec and _nvidia_spec.submodule_search_locations:
             if str(_nvidia_dir) not in os.environ.get("PATH", ""):
                 os.environ["PATH"] = str(_nvidia_dir) + os.pathsep + os.environ.get("PATH", "")
 
-from faster_whisper import WhisperModel
 from tqdm import tqdm
 
 logger = logging.getLogger("clip-extractor")
@@ -81,6 +80,7 @@ def transcribe(video_path: Path, model_size: str = "large-v3", language: str = "
         logger.info(f"[Transcribe] Reusing cached Whisper model ({model_size})")
     else:
         logger.info(f"[Transcribe] Loading Whisper model ({model_size})...")
+        from faster_whisper import WhisperModel
         try:
             model = WhisperModel(model_size, device="auto", compute_type="auto")
         except RuntimeError as e:

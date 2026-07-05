@@ -7,12 +7,12 @@ cd /d "%~dp0"
 
 :: Find Python that has gradio installed
 set PYTHON_CMD=
-py -V:3.12 -c "import gradio" >nul 2>&1
+py -V:3.12 -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('gradio') else 1)" >nul 2>&1
 if not errorlevel 1 (
     set PYTHON_CMD=py -V:3.12
     goto :found_python
 )
-python -c "import gradio" >nul 2>&1
+python -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('gradio') else 1)" >nul 2>&1
 if not errorlevel 1 (
     set PYTHON_CMD=python
     goto :found_python
@@ -27,7 +27,8 @@ echo Clip Extractor を起動しています...
 echo ブラウザが自動で開きます。閉じるにはこのウィンドウを閉じてください。
 echo.
 
-:: launcher.py starts the server and waits ~2s before opening the browser,
+:: launcher.py starts the server and polls the port, opening the browser as
+:: soon as it accepts connections (falling back to opening anyway after 30s),
 :: which avoids the "connection refused" flash that happened when we fired
 :: `start http://localhost:8080` before the Gradio server bound the port.
 %PYTHON_CMD% launcher.py

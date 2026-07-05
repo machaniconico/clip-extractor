@@ -171,6 +171,22 @@ def revoke_auth() -> bool:
     return _google_auth.revoke_token(TOKEN_PATH)
 
 
+def auth_status_placeholder() -> str:
+    """Cheap file-existence-only status for initial UI render.
+
+    Never imports the google stack — the real check runs after page load
+    (see web_app create_ui's app.load wiring).
+    """
+    if not CREDENTIALS_PATH.exists():
+        return (
+            "未設定: Settings タブの『credentials.json』欄にファイルをドロップしてください "
+            f"(保存先: {CREDENTIALS_PATH})"
+        )
+    if not TOKEN_PATH.exists():
+        return "未認証: Settings タブで『認証する』を押してください"
+    return "確認中… (token の有効性を検証しています)"
+
+
 def auth_status_summary() -> str:
     """One-line human-readable status string for the Settings UI / CLI."""
     s = check_auth_status()
