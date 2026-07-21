@@ -14,6 +14,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+# Gradio temporarily switches Matplotlib backends around every event.  On
+# Windows, Matplotlib's automatic choice can be QtAgg, which loads PyQt5's
+# bundled MSVCP140.dll into the same process as CTranslate2/CUDA and can cause
+# a native access violation while Whisper is loading.  This browser-based UI
+# never needs a desktop plotting backend, so keep the process headless.
+os.environ["MPLBACKEND"] = "Agg"
+
 import gradio as gr
 
 
