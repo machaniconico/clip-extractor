@@ -26,6 +26,7 @@ _SHORTS_BLUR_FILTER = (
 )
 _TITLE_FONT_SIZE = 80
 _TITLE_WRAP_FULLWIDTH_CHARS = 14
+_WINDOWS_FILENAME_MAX_UTF16_UNITS = 255
 _ZERO_WIDTH_JOINER = "\u200d"
 _EMOJI_VARIATION_SELECTOR = "\ufe0f"
 _JAPANESE_FONT_KEYWORDS = (
@@ -638,6 +639,46 @@ def format_time_range(start_sec: float, end_sec: float) -> str:
     return f"{fmt(start_sec)}-{fmt(end_sec)}"
 
 
+def _sanitize_filename_title(title: str) -> str:
+    """Return a readable title safe to use in Windows clip filenames."""
+    cleaned = re.sub(r"\s+", " ", str(title or "")).strip()
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", cleaned)
+    cleaned = re.sub(r"\s*_\s*", "_", cleaned)
+    cleaned = re.sub(r"_+", "_", cleaned)
+    return cleaned.strip(" ._")
+
+
+def _utf16_units(value: str) -> int:
+    return len(value.encode("utf-16-le")) // 2
+
+
+def _truncate_title_utf16(title: str, max_units: int) -> str:
+    """Trim a title without splitting emoji/grapheme clusters."""
+    kept: list[str] = []
+    used_units = 0
+    for cluster in _title_grapheme_clusters(title):
+        cluster_units = _utf16_units(cluster)
+        if used_units + cluster_units > max_units:
+            break
+        kept.append(cluster)
+        used_units += cluster_units
+    return "".join(kept).rstrip(" ._")
+
+
+def _build_clip_filename(range_str: str, title: str, shorts: bool) -> str:
+    suffix = "_short" if shorts else ""
+    safe_title = _sanitize_filename_title(title)
+    if safe_title:
+        fixed_parts = f"{range_str}_{suffix}.mp4"
+        available_units = max(
+            0,
+            _WINDOWS_FILENAME_MAX_UTF16_UNITS - _utf16_units(fixed_parts),
+        )
+        safe_title = _truncate_title_utf16(safe_title, available_units)
+    title_suffix = f"_{safe_title}" if safe_title else ""
+    return f"{range_str}{title_suffix}{suffix}.mp4"
+
+
 def generate_thumbnails(
     video_path: Path,
     highlights: list[dict],
@@ -696,9 +737,8 @@ def extract_clips(
     clip_paths = []
 
     for i, h in enumerate(highlights, 1):
-        suffix = "_short" if shorts else ""
         range_str = format_time_range(h["start_sec"], h["end_sec"])
-        clip_name = f"{range_str}{suffix}.mp4"
+        clip_name = _build_clip_filename(range_str, h.get("title", ""), shorts)
         clip_path = output_dir / clip_name
 
         srt_path = srt_paths[i - 1] if srt_paths and i - 1 < len(srt_paths) else None
