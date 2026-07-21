@@ -40,6 +40,17 @@ def _click_input_names(module: ast.Module, button_name: str) -> list[str]:
     raise AssertionError(f"{button_name}.click(inputs=[...]) not found")
 
 
+def _string_constant(module: ast.Module, name: str) -> str:
+    for node in module.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            assert isinstance(node.value, ast.Constant), ast.dump(node.value)
+            assert isinstance(node.value.value, str)
+            return node.value.value
+    raise AssertionError(f"String constant not found: {name}")
+
+
 def test_detect_phase_signature_matches_detect_inputs():
     module = _module()
     args = _function_args(module, "detect_phase")
@@ -64,3 +75,83 @@ def test_save_defaults_signature_matches_save_button_inputs():
     args = _function_args(module, "save_defaults")
     assert args == _click_input_names(module, "save_defaults_btn")
     assert args[-4:] == ["generate_thumbnails", "audio_fusion", "audio_alpha", "karaoke"]
+
+
+def test_google_unverified_app_guide_is_actionable_and_rendered():
+    module = _module()
+    guide_name = "GOOGLE_OAUTH_UNVERIFIED_GUIDE_MD"
+    guide = _string_constant(module, guide_name)
+
+    assert "このアプリは Google で確認されていません" in guide
+    assert "https://console.cloud.google.com/auth/audience" in guide
+    assert "正しいプロジェクト" in guide
+    assert "テストユーザー" in guide
+    assert "ユーザーを追加" in guide
+    assert "保存" in guide
+    assert "詳細" in guide
+    assert "認証する" in guide
+
+    rendered = any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "gr"
+        and node.func.attr == "Markdown"
+        and node.args
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == guide_name
+        for node in ast.walk(module)
+    )
+    assert rendered, "Google OAuth warning guide must be rendered in the Gradio UI"
+
+
+def test_api_key_and_credentials_guides_are_short_and_actionable():
+    module = _module()
+    source = WEB_APP.read_text(encoding="utf-8")
+    expected = {
+        "GEMINI_API_KEY_GUIDE_MD": (
+            18,
+            [
+                "https://aistudio.google.com/apikey",
+                "APIキーを作成",
+                "コピー",
+                "APIキー",
+                "このキーを保存",
+                "credentials.json",
+            ],
+        ),
+        "GOOGLE_CREDENTIALS_SETUP_GUIDE_MD": (
+            36,
+            [
+                "https://console.cloud.google.com/",
+                "YouTube Data API v3",
+                "Google Drive API",
+                "https://console.cloud.google.com/auth/audience",
+                "テストユーザー",
+                "デスクトップ アプリ",
+                "JSON をダウンロード",
+                "認証する",
+            ],
+        ),
+    }
+
+    for name, (max_lines, required_phrases) in expected.items():
+        guide = _string_constant(module, name)
+        assert len(guide.strip().splitlines()) <= max_lines
+        for phrase in required_phrases:
+            assert phrase in guide
+
+        rendered = any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "gr"
+            and node.func.attr == "Markdown"
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == name
+            for node in ast.walk(module)
+        )
+        assert rendered, f"{name} must be rendered in the Gradio UI"
+
+    assert "細かく分けた 19 step" not in source
