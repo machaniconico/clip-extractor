@@ -9,8 +9,10 @@ import subprocess
 import traceback
 import inspect
 import threading
+import time
+import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -53,6 +55,20 @@ class ProcessResult:
             self.drive_link,
             self.chapters_text,
         )
+
+
+@dataclass(frozen=True)
+class ObsPipelineOutcome:
+    """Machine-readable result for unattended OBS processing."""
+
+    log: str
+    success: bool
+    error: str = ""
+    output_dir: str = ""
+    clip_paths: tuple[str, ...] = ()
+    chapters_path: str = ""
+    chapters_text: str = ""
+    youtube_appended: bool | None = None
 
 # --- File logging setup ---
 # Use TEMP dir to avoid Japanese path issues with OneDrive/Desktop
@@ -266,6 +282,19 @@ def resolve_output_base(user_text: str) -> Path:
     if base_text:
         return Path(base_text).expanduser()
     return Path(__file__).resolve().parent / "output"
+
+
+def _create_output_dir(base_dir: Path) -> Path:
+    """Create a collision-free directory for one processing run."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    for _ in range(10):
+        candidate = base_dir / f"output_{timestamp}_{uuid.uuid4().hex[:8]}"
+        try:
+            candidate.mkdir(parents=True, exist_ok=False)
+            return candidate
+        except FileExistsError:
+            continue
+    raise RuntimeError("一意な出力フォルダを作成できませんでした")
 
 
 def pick_folder_dialog(current_value: str) -> str:
@@ -590,10 +619,8 @@ def detect_phase(
             return {}, f"Error: {mode_err}", gr.update(visible=False)
         log(f"Modes: clips={modes.enable_clips}, chapters={modes.enable_chapters}")
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base_dir = resolve_output_base(output_base_dir)
-        output_dir = base_dir / f"output_{timestamp}"
-        output_dir.mkdir(parents=True, exist_ok=True)
+        output_dir = _create_output_dir(base_dir)
         log(f"Output base: {base_dir}")
 
         youtube_video_id: str | None = None
@@ -765,6 +792,15 @@ def render_phase(
         except ValueError as mode_err:
             return ProcessResult(log=f"Error: {mode_err}").as_gradio_outputs()
 
+        obs_render_outcome = {
+            "clip_paths": [],
+            "chapters_path": "",
+            "chapters_text": "",
+            "youtube_append_requested": bool(auto_append_youtube),
+            "youtube_append_succeeded": None if not auto_append_youtube else False,
+        }
+        session["_obs_render_outcome"] = obs_render_outcome
+
         log("[Render] Applying reviewed highlight edits")
 
         if auto_append_youtube:
@@ -804,6 +840,7 @@ def render_phase(
             log("[Step 4/6] Extracting clips...")
             clips_dir = output_dir / "clips"
             clip_paths = extract_clips(video_path, highlights, clips_dir)
+            obs_render_outcome["clip_paths"] = [str(path) for path in clip_paths]
             log(f"  Extracted {len(clip_paths)} clips")
 
             progress(0.7, desc="[Step 5/6] Generating subtitles...")
@@ -908,6 +945,8 @@ def render_phase(
                 chapters_text = generate_chapter_text(highlights, video_duration=video_duration)
                 chapters_path = output_dir / "chapters.txt"
                 write_chapter_file(highlights, chapters_path, video_duration=video_duration)
+                obs_render_outcome["chapters_path"] = str(chapters_path)
+                obs_render_outcome["chapters_text"] = chapters_text
                 log(f"Chapters saved: {chapters_path}")
             except Exception as ch_err:
                 log(f"Chapter generation failed: {ch_err}")
@@ -926,6 +965,7 @@ def render_phase(
                     youtube_api.update_video_description(
                         yt_service, youtube_video_id, chapters_text, position="prepend",
                     )
+                    obs_render_outcome["youtube_append_succeeded"] = True
                     log(f"  YouTube 概要欄に自動追加: video_id={youtube_video_id}")
                 except Exception as yt_err:
                     tb = traceback.format_exc()
@@ -1004,8 +1044,8 @@ def maybe_render_phase(
 
 
 # ---------------------------------------------------------------------------
-# OBS integration — bridge from "recording finished" to the existing
-# detect→render pipeline. The watchers themselves live in obs_integration.py;
+# OBS integration — bridge from local recording / stream lifecycle events to
+# the existing detect→render pipeline. The watchers live in obs_integration.py;
 # here we only manage the lifecycle, run the pipeline on a background thread,
 # and surface status to the UI via a polled shared buffer (never by touching
 # Gradio components from a worker thread).
@@ -1036,6 +1076,101 @@ _obs_pipeline_threads: list[threading.Thread] = []
 _obs_status_lines: list[str] = []
 _obs_status_lock = threading.Lock()
 _OBS_STATUS_MAX = 80
+_OBS_ARCHIVE_DISCOVERY_TIMEOUT = 15 * 60
+_OBS_ARCHIVE_READY_TIMEOUT = 6 * 60 * 60
+_OBS_ARCHIVE_POLL_INITIAL = 15
+_OBS_ARCHIVE_POLL_MAX = 5 * 60
+_OBS_ARCHIVE_END_LOOKBACK = timedelta(minutes=2)
+
+
+def _obs_wait_for_poll(seconds: float, is_current: Callable[[], bool]) -> None:
+    """Wait in short chunks so stopping OBS integration cancels promptly."""
+    deadline = time.monotonic() + max(0.0, float(seconds))
+    while True:
+        if not is_current():
+            raise RuntimeError("OBS連携が停止されたためアーカイブ待機を中止しました")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(1.0, remaining))
+
+
+def _obs_wait_for_event(
+    event: threading.Event,
+    timeout: float,
+    is_current: Callable[[], bool],
+) -> bool:
+    """Wait for an event while keeping watcher cancellation responsive."""
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    while True:
+        if not is_current():
+            raise RuntimeError("OBS連携が停止されたためアーカイブ待機を中止しました")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return event.is_set()
+        if event.wait(timeout=min(0.25, remaining)):
+            return True
+
+
+def _is_retriable_youtube_api_error(exc: Exception) -> bool:
+    """Return True for temporary transport, rate-limit, and server failures."""
+    response = getattr(exc, "resp", None)
+    status = getattr(response, "status", None)
+    if status is None:
+        status = getattr(exc, "status_code", None)
+    if status is not None:
+        try:
+            status_code = int(status)
+        except (TypeError, ValueError):
+            return False
+        if status_code in {429, 500, 502, 503, 504}:
+            return True
+        if status_code == 403:
+            reasons = {
+                str(detail.get("reason", ""))
+                for detail in (getattr(exc, "error_details", None) or [])
+                if isinstance(detail, dict)
+            }
+            content = getattr(exc, "content", b"")
+            if content:
+                try:
+                    payload = json.loads(
+                        content.decode("utf-8")
+                        if isinstance(content, bytes)
+                        else str(content)
+                    )
+                    reasons.update(
+                        str(detail.get("reason", ""))
+                        for detail in payload.get("error", {}).get("errors", [])
+                        if isinstance(detail, dict)
+                    )
+                except (AttributeError, TypeError, ValueError, UnicodeDecodeError):
+                    pass
+            return bool(reasons & {"rateLimitExceeded", "userRateLimitExceeded"})
+        return False
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        return True
+    return exc.__class__.__name__ in {"TransportError", "ServerNotFoundError"}
+
+
+def _obs_retry_after_api_error(
+    stage: str,
+    exc: Exception,
+    deadline: float,
+    poll_delay: float,
+    is_current: Callable[[], bool],
+    timeout_message: str,
+) -> float:
+    """Back off after a temporary API failure or re-raise a permanent one."""
+    if not _is_retriable_youtube_api_error(exc):
+        raise exc
+    if time.monotonic() >= deadline:
+        raise TimeoutError(timeout_message) from exc
+    _obs_append_status(
+        f"YouTube API一時エラー ({stage}): {exc} — {poll_delay}秒後に再試行"
+    )
+    _obs_wait_for_poll(poll_delay, is_current)
+    return min(poll_delay * 2, _OBS_ARCHIVE_POLL_MAX)
 
 
 def _obs_append_status(msg: str) -> None:
@@ -1096,15 +1231,13 @@ def _coerce_int(value, default: int) -> int:
         return int(default)
 
 
-def run_obs_auto_pipeline(video_path: str, settings: dict) -> str:
-    """Run detect→render end-to-end on a local recording path.
-
-    Thin bridge over the existing ``detect_phase`` / ``render_phase``: builds
-    a fake file object whose ``.name`` is the recording path (detect_phase
-    reads ``getattr(input_file, "name", ...)``), feeds a dummy progress, then
-    drives render with the supplied ``settings`` dict. Returns an accumulated
-    log/status string — never raises (errors are captured into the log).
-    """
+def _run_obs_detect_render(
+    input_url: str,
+    input_file,
+    source_label: str,
+    settings: dict,
+) -> ObsPipelineOutcome:
+    """Shared headless detect→render bridge for local and YouTube sources."""
     logs: list[str] = []
 
     def log(msg: str):
@@ -1112,19 +1245,13 @@ def run_obs_auto_pipeline(video_path: str, settings: dict) -> str:
         logs.append(msg)
 
     try:
-        if not video_path:
-            return "OBS auto: 録画パスが空です"
-        if not Path(video_path).exists():
-            return f"OBS auto: ファイルが見つかりません: {video_path}"
-
         s = dict(settings)  # shallow copy; we only read
-        fake_file = type("F", (), {"name": video_path})()
         progress = _DummyProgress()
 
-        log(f"[OBS] Detect 開始: {video_path}")
+        log(f"[OBS] Detect 開始: {source_label}")
         detect_result = detect_phase(
-            "",  # input_url — local file, no URL
-            fake_file,
+            input_url,
+            input_file,
             bool(s.get("enable_clips", True)),
             s.get("clip_prompt", ""),
             bool(s.get("enable_chapters", True)),
@@ -1146,7 +1273,14 @@ def run_obs_auto_pipeline(video_path: str, settings: dict) -> str:
         session = detect_result[0] if isinstance(detect_result, tuple) and detect_result else None
         detect_status = detect_result[1] if isinstance(detect_result, tuple) and len(detect_result) > 1 else ""
         if not isinstance(session, dict) or not session.get("video_path"):
-            return "\n".join(logs + [str(detect_status)])
+            error = str(detect_status) or "Detect処理に失敗しました"
+            if "Error:" not in error:
+                error = f"Error: {error}"
+            return ObsPipelineOutcome(
+                log="\n".join(logs + [error]),
+                success=False,
+                error=error,
+            )
 
         log("[OBS] Detect 完了 — Render 開始")
         render_result = render_phase(
@@ -1168,12 +1302,606 @@ def run_obs_auto_pipeline(video_path: str, settings: dict) -> str:
         )
         # render_phase returns ProcessResult.as_gradio_outputs() = (log, highlights, dl, drive, chapters)
         render_log = render_result[0] if isinstance(render_result, tuple) and render_result else ""
+        render_log = str(render_log)
+        combined_logs = logs + [render_log]
+        if "Error:" in render_log:
+            return ObsPipelineOutcome(
+                log="\n".join(combined_logs),
+                success=False,
+                error=render_log,
+            )
+
+        render_outcome = session.get("_obs_render_outcome") or {}
+        clip_paths = tuple(str(path) for path in render_outcome.get("clip_paths", []))
+        chapters_path = str(render_outcome.get("chapters_path", ""))
+        chapters_text = str(
+            render_outcome.get("chapters_text", "")
+            or (
+                render_result[4]
+                if isinstance(render_result, tuple) and len(render_result) > 4
+                else ""
+            )
+        )
+        output_errors: list[str] = []
+
+        if bool(s.get("enable_clips", True)):
+            clip_files = [Path(path) for path in clip_paths]
+            if not clip_files or any(
+                not path.is_file() or path.stat().st_size <= 0
+                for path in clip_files
+            ):
+                output_errors.append("切り抜きファイルを確認できませんでした")
+
+        if bool(s.get("enable_chapters", True)):
+            chapter_file = Path(chapters_path) if chapters_path else None
+            if (
+                not chapters_text.strip()
+                or chapter_file is None
+                or not chapter_file.is_file()
+                or chapter_file.stat().st_size <= 0
+            ):
+                output_errors.append("タイムスタンプファイルの生成を確認できませんでした")
+
+        youtube_appended = render_outcome.get("youtube_append_succeeded")
+        if bool(s.get("auto_append_youtube", False)) and youtube_appended is not True:
+            output_errors.append("YouTube概要欄へのタイムスタンプ反映を確認できませんでした")
+
+        if output_errors:
+            error = "Error: " + " / ".join(output_errors)
+            return ObsPipelineOutcome(
+                log="\n".join(combined_logs + [error]),
+                success=False,
+                error=error,
+                output_dir=str(session.get("output_dir", "")),
+                clip_paths=clip_paths,
+                chapters_path=chapters_path,
+                chapters_text=chapters_text,
+                youtube_appended=youtube_appended,
+            )
+
         log("[OBS] Render 完了")
-        return "\n".join(logs + [str(render_log)])
+        return ObsPipelineOutcome(
+            log="\n".join(logs + [render_log]),
+            success=True,
+            output_dir=str(session.get("output_dir", "")),
+            clip_paths=clip_paths,
+            chapters_path=chapters_path,
+            chapters_text=chapters_text,
+            youtube_appended=youtube_appended,
+        )
     except Exception as e:
         tb = traceback.format_exc()
         logger.error(f"OBS auto pipeline error: {e}\n{tb}")
-        return "\n".join(logs + [f"Error: {e}", tb])
+        error = f"Error: {e}"
+        return ObsPipelineOutcome(
+            log="\n".join(logs + [error, tb]),
+            success=False,
+            error=error,
+        )
+
+
+def _run_obs_auto_pipeline_outcome(
+    video_path: str,
+    settings: dict,
+) -> ObsPipelineOutcome:
+    """Run detect→render end-to-end on a finished local recording."""
+    if not video_path:
+        return ObsPipelineOutcome(
+            log="Error: OBS auto: 録画パスが空です",
+            success=False,
+            error="録画パスが空です",
+        )
+    if not Path(video_path).exists():
+        error = f"OBS auto: ファイルが見つかりません: {video_path}"
+        return ObsPipelineOutcome(
+            log=f"Error: {error}",
+            success=False,
+            error=error,
+        )
+    fake_file = type("F", (), {"name": video_path})()
+    return _run_obs_detect_render("", fake_file, video_path, settings)
+
+
+def run_obs_auto_pipeline(video_path: str, settings: dict) -> str:
+    """Compatibility wrapper returning the unattended pipeline log."""
+    return _run_obs_auto_pipeline_outcome(video_path, settings).log
+
+
+def _run_obs_youtube_pipeline_outcome(
+    video_url: str,
+    settings: dict,
+) -> ObsPipelineOutcome:
+    """Download a completed stream archive, then create clips and timestamps."""
+    if not youtube_api.extract_video_id(video_url):
+        error = f"OBS auto: YouTubeアーカイブURLが不正です: {video_url}"
+        return ObsPipelineOutcome(
+            log=f"Error: {error}",
+            success=False,
+            error=error,
+        )
+    archive_settings = dict(settings)
+    archive_settings["enable_clips"] = True
+    archive_settings["enable_chapters"] = True
+    return _run_obs_detect_render(video_url, None, video_url, archive_settings)
+
+
+def run_obs_youtube_pipeline(video_url: str, settings: dict) -> str:
+    """Compatibility wrapper returning the unattended pipeline log."""
+    return _run_obs_youtube_pipeline_outcome(video_url, settings).log
+
+
+def _resolve_obs_youtube_archive(
+    cached_broadcast: dict | None,
+    stopped_at: datetime,
+    is_current: Callable[[], bool],
+    exclude_video_ids: set[str] | None = None,
+    started_after: datetime | None = None,
+    completed_after: datetime | None = None,
+) -> dict:
+    """Wait for the just-finished YouTube broadcast to become downloadable."""
+    excluded_ids = set(exclude_video_ids or ())
+    broadcast = dict(cached_broadcast) if cached_broadcast else None
+    if broadcast and broadcast.get("video_id") in excluded_ids:
+        broadcast = None
+    poll_delay = _OBS_ARCHIVE_POLL_INITIAL
+    discovery_deadline = time.monotonic() + _OBS_ARCHIVE_DISCOVERY_TIMEOUT
+
+    while True:
+        if not is_current():
+            raise RuntimeError("OBS連携が停止されたためアーカイブ待機を中止しました")
+        try:
+            service = youtube_api.get_youtube_service()
+            break
+        except Exception as exc:
+            poll_delay = _obs_retry_after_api_error(
+                "YouTube接続",
+                exc,
+                discovery_deadline,
+                poll_delay,
+                is_current,
+                "YouTube APIへ15分以内に接続できませんでした",
+            )
+
+    if broadcast is None:
+        ended_after = stopped_at - _OBS_ARCHIVE_END_LOOKBACK
+        if completed_after is not None:
+            if completed_after.tzinfo is None:
+                completed_after = completed_after.replace(tzinfo=timezone.utc)
+            else:
+                completed_after = completed_after.astimezone(timezone.utc)
+            ended_after = max(ended_after, completed_after)
+        while broadcast is None:
+            if not is_current():
+                raise RuntimeError("OBS連携が停止されたためアーカイブ待機を中止しました")
+            try:
+                broadcast = youtube_api.find_active_broadcast(
+                    service,
+                    started_before=stopped_at,
+                    started_after=started_after,
+                )
+                if broadcast and broadcast.get("video_id") in excluded_ids:
+                    broadcast = None
+                if broadcast is None:
+                    broadcast = youtube_api.find_recent_completed_broadcast(
+                        service,
+                        ended_after=ended_after,
+                        exclude_video_ids=excluded_ids,
+                        started_before=stopped_at,
+                        started_after=started_after,
+                    )
+            except Exception as exc:
+                poll_delay = _obs_retry_after_api_error(
+                    "配信ID確認",
+                    exc,
+                    discovery_deadline,
+                    poll_delay,
+                    is_current,
+                    "終了したYouTube配信を15分以内に特定できませんでした",
+                )
+                continue
+            if broadcast is not None:
+                break
+            if time.monotonic() >= discovery_deadline:
+                raise TimeoutError("終了したYouTube配信を15分以内に特定できませんでした")
+            wait_reason = (
+                "YouTube側の配信終了反映を待機中"
+                if exclude_video_ids is not None
+                else "開始時の終了済み配信一覧を取得できなかったため配信IDを安全に確認中"
+            )
+            _obs_append_status(f"{wait_reason}… 次回確認は{poll_delay}秒後")
+            _obs_wait_for_poll(poll_delay, is_current)
+            poll_delay = min(poll_delay * 2, _OBS_ARCHIVE_POLL_MAX)
+
+    video_id = broadcast.get("video_id", "")
+    if not video_id:
+        raise RuntimeError("YouTube配信IDを取得できませんでした")
+
+    completion_deadline = time.monotonic() + _OBS_ARCHIVE_DISCOVERY_TIMEOUT
+    poll_delay = _OBS_ARCHIVE_POLL_INITIAL
+    while True:
+        if not is_current():
+            raise RuntimeError("OBS連携が停止されたためアーカイブ待機を中止しました")
+        try:
+            lifecycle_status = youtube_api.get_broadcast_lifecycle_status(
+                service,
+                video_id,
+            )
+        except Exception as exc:
+            poll_delay = _obs_retry_after_api_error(
+                "配信終了確認",
+                exc,
+                completion_deadline,
+                poll_delay,
+                is_current,
+                "YouTube側の配信終了が15分以内に確定しませんでした",
+            )
+            continue
+        if not is_current():
+            raise RuntimeError("OBS連携が停止されたためアーカイブ待機を中止しました")
+        if lifecycle_status == "complete":
+            break
+        if lifecycle_status == "revoked":
+            raise RuntimeError("YouTube配信が取り消されたためアーカイブを取得できません")
+        if time.monotonic() >= completion_deadline:
+            raise TimeoutError("YouTube側の配信終了が15分以内に確定しませんでした")
+        _obs_append_status(
+            "YouTube側の配信終了確定待ち: "
+            f"status={lifecycle_status or '不明'} — 次回確認は{poll_delay}秒後"
+        )
+        _obs_wait_for_poll(poll_delay, is_current)
+        poll_delay = min(poll_delay * 2, _OBS_ARCHIVE_POLL_MAX)
+
+    ready_deadline = time.monotonic() + _OBS_ARCHIVE_READY_TIMEOUT
+    poll_delay = _OBS_ARCHIVE_POLL_INITIAL
+    while True:
+        if not is_current():
+            raise RuntimeError("OBS連携が停止されたためアーカイブ待機を中止しました")
+        try:
+            state = youtube_api.get_archive_processing_state(service, video_id)
+        except Exception as exc:
+            poll_delay = _obs_retry_after_api_error(
+                "アーカイブ処理確認",
+                exc,
+                ready_deadline,
+                poll_delay,
+                is_current,
+                "YouTubeアーカイブが6時間以内にダウンロード可能になりませんでした",
+            )
+            continue
+        if not is_current():
+            raise RuntimeError("OBS連携が停止されたためアーカイブ待機を中止しました")
+        if state["failed"]:
+            raise RuntimeError(
+                "YouTubeアーカイブの処理に失敗しました "
+                f"(processing={state['processing_status']}, upload={state['upload_status']})"
+            )
+        if state["ready"]:
+            return {
+                **broadcast,
+                "url": f"https://www.youtube.com/watch?v={video_id}",
+            }
+        if time.monotonic() >= ready_deadline:
+            raise TimeoutError(
+                "YouTubeアーカイブが6時間以内にダウンロード可能になりませんでした"
+            )
+        detail = (
+            f"processing={state['processing_status'] or '待機中'}, "
+            f"privacy={state['privacy_status'] or '不明'}"
+        )
+        if state["privacy_status"] == "private":
+            detail += "（公開または限定公開への変更待ち）"
+        _obs_append_status(
+            f"YouTubeアーカイブ処理待ち: {detail} — 次回確認は{poll_delay}秒後"
+        )
+        _obs_wait_for_poll(poll_delay, is_current)
+        poll_delay = min(poll_delay * 2, _OBS_ARCHIVE_POLL_MAX)
+
+
+def _obs_make_archive_callbacks(
+    auto_process: bool,
+    settings: dict,
+    generation: int | None = None,
+) -> tuple[Callable[..., None], Callable[[str | None], None]]:
+    """Build stream start/finish callbacks for YouTube archive automation."""
+    state_lock = threading.Lock()
+    archive_pipeline_lock = threading.Lock()
+    state = {
+        "epoch": 0,
+        "streams": {},
+        "finishing_epochs": set(),
+        "completed_epochs": set(),
+        "inflight_ids": set(),
+        "claimed_ids": set(),
+        "processed_ids": set(),
+    }
+
+    def _is_current() -> bool:
+        return generation is None or generation == _obs_generation
+
+    def _spawn(target: Callable[[], None]) -> None:
+        t = threading.Thread(target=target, daemon=True)
+        _register_obs_worker(t)
+        t.start()
+
+    def _on_stream_started(proactive: bool = False) -> None:
+        if not auto_process or not _is_current():
+            return
+        with state_lock:
+            state["epoch"] += 1
+            epoch = state["epoch"]
+            stream_state = {
+                "broadcast": None,
+                "baseline_ids": None,
+                "resolved_archive": None,
+                "started_at": datetime.now(timezone.utc),
+                "observed_start": not proactive,
+                "capture_done": threading.Event(),
+            }
+            state["streams"][epoch] = stream_state
+            for old_epoch in list(state["streams"]):
+                if (
+                    old_epoch != epoch
+                    and old_epoch not in state["finishing_epochs"]
+                ):
+                    state["streams"].pop(old_epoch, None)
+        _obs_append_status("配信開始を検知 — YouTube配信IDを確認中…")
+
+        def _capture_worker() -> None:
+            broadcast = None
+            baseline_ids = None
+            lookup_errors: list[str] = []
+            try:
+                service = youtube_api.get_youtube_service()
+                try:
+                    capture_started_after = (
+                        stream_state["started_at"] - timedelta(seconds=30)
+                        if stream_state.get("observed_start")
+                        else None
+                    )
+                    broadcast = youtube_api.find_active_broadcast(
+                        service,
+                        started_after=capture_started_after,
+                    )
+                except Exception as exc:
+                    lookup_errors.append(f"配信ID: {exc}")
+                    logger.warning("YouTube active broadcast lookup failed: %s", exc)
+                try:
+                    baseline_ids = youtube_api.list_completed_broadcast_ids(
+                        service,
+                        completed_before=stream_state["started_at"],
+                    )
+                except Exception as exc:
+                    lookup_errors.append(f"終了済み配信一覧: {exc}")
+                    logger.warning("YouTube completed baseline lookup failed: %s", exc)
+
+                with state_lock:
+                    if (
+                        state["streams"].get(epoch) is not stream_state
+                        or not _is_current()
+                    ):
+                        return
+                    stream_state["broadcast"] = broadcast
+                    stream_state["baseline_ids"] = baseline_ids
+
+                if broadcast:
+                    _obs_append_status(
+                        "YouTube配信IDを記録: "
+                        f"{broadcast['video_id']} ({broadcast.get('title', '')})"
+                    )
+                else:
+                    _obs_append_status(
+                        "現在のYouTube配信はまだ見つかりません（終了時に再検索します）"
+                    )
+                if lookup_errors:
+                    _obs_append_status(
+                        "YouTube事前確認の一部に失敗: " + " / ".join(lookup_errors)
+                    )
+            except Exception as exc:
+                logger.warning("YouTube stream lookup setup failed: %s", exc)
+                _obs_append_status(
+                    f"YouTube配信IDの事前取得に失敗（終了時に再検索）: {exc}"
+                )
+            finally:
+                stream_state["capture_done"].set()
+                _unregister_obs_worker(threading.current_thread())
+
+        _spawn(_capture_worker)
+
+    def _on_stream_finished(fallback_recording_path: str | None) -> None:
+        if not _is_current():
+            return
+        _obs_append_status("配信終了を検知 — YouTubeアーカイブを待機します")
+        if not auto_process:
+            _obs_append_status("自動処理が無効のため検知のみ記録しました")
+            return
+        stopped_at = datetime.now(timezone.utc)
+        with state_lock:
+            epoch = state["epoch"]
+            if epoch in state["completed_epochs"]:
+                _obs_append_status("同じ配信終了イベントは処理済みのためスキップしました")
+                return
+            if epoch in state["finishing_epochs"]:
+                _obs_append_status("同じ配信終了イベントは既に処理中のためスキップしました")
+                return
+            state["finishing_epochs"].add(epoch)
+            stream_state = state["streams"].get(epoch)
+            if stream_state is None:
+                capture_done = threading.Event()
+                capture_done.set()
+                stream_state = {
+                    "broadcast": None,
+                    "baseline_ids": None,
+                    "resolved_archive": None,
+                    "started_at": stopped_at,
+                    "observed_start": False,
+                    "capture_done": capture_done,
+                }
+                state["streams"][epoch] = stream_state
+
+        def _finish_worker() -> None:
+            video_id = ""
+            owns_inflight = False
+            owns_pipeline_slot = False
+            try:
+                while not archive_pipeline_lock.acquire(timeout=0.25):
+                    if not _is_current():
+                        raise RuntimeError(
+                            "OBS連携が停止されたためアーカイブ処理を中止しました"
+                        )
+                owns_pipeline_slot = True
+                if not _obs_wait_for_event(
+                    stream_state["capture_done"],
+                    _OBS_ARCHIVE_DISCOVERY_TIMEOUT,
+                    _is_current,
+                ):
+                    raise TimeoutError(
+                        "配信開始時のYouTube情報取得が15分以内に完了しませんでした"
+                    )
+                if not _is_current():
+                    raise RuntimeError("OBS連携が停止されたためアーカイブ処理を中止しました")
+                with state_lock:
+                    cached_broadcast = (
+                        dict(stream_state["broadcast"])
+                        if isinstance(stream_state["broadcast"], dict)
+                        else None
+                    )
+                    baseline_ids = (
+                        set(stream_state["baseline_ids"])
+                        if stream_state["baseline_ids"] is not None
+                        else None
+                    )
+                    started_after = (
+                        stream_state["started_at"] - timedelta(seconds=30)
+                        if stream_state.get("observed_start")
+                        else None
+                    )
+                    excluded_ids = set(baseline_ids or ())
+                    excluded_ids.update(state["processed_ids"])
+                    excluded_ids.update(state["inflight_ids"])
+                    excluded_ids.update(state["claimed_ids"])
+                    for other_epoch, other_stream in state["streams"].items():
+                        if other_epoch == epoch:
+                            continue
+                        other_broadcast = other_stream.get("broadcast") or {}
+                        other_archive = other_stream.get("resolved_archive") or {}
+                        if other_broadcast.get("video_id"):
+                            excluded_ids.add(other_broadcast["video_id"])
+                        if other_archive.get("video_id"):
+                            excluded_ids.add(other_archive["video_id"])
+                    resolved_archive = stream_state.get("resolved_archive")
+                if isinstance(resolved_archive, dict):
+                    archive = dict(resolved_archive)
+                else:
+                    archive = _resolve_obs_youtube_archive(
+                        cached_broadcast,
+                        stopped_at,
+                        _is_current,
+                        (
+                            excluded_ids
+                        ),
+                        started_after,
+                        stream_state["started_at"],
+                    )
+                    with state_lock:
+                        stream_state["resolved_archive"] = dict(archive)
+                if not _is_current():
+                    raise RuntimeError("OBS連携が停止されたためアーカイブ処理を中止しました")
+                video_id = archive["video_id"]
+                with state_lock:
+                    state["claimed_ids"].add(video_id)
+                    if video_id in state["processed_ids"]:
+                        state["completed_epochs"].add(epoch)
+                        _obs_append_status(
+                            f"YouTubeアーカイブ {video_id} は処理済みのためスキップしました"
+                        )
+                        return
+                    if video_id in state["inflight_ids"]:
+                        _obs_append_status(
+                            f"YouTubeアーカイブ {video_id} は別の処理で実行中のためスキップしました"
+                        )
+                        return
+                    state["inflight_ids"].add(video_id)
+                    owns_inflight = True
+
+                archive_settings = dict(settings)
+                archive_settings["enable_clips"] = True
+                archive_settings["enable_chapters"] = True
+                if not _is_current():
+                    raise RuntimeError("OBS連携が停止されたためアーカイブ処理を中止しました")
+                _obs_append_status(
+                    f"アーカイブDL・切り抜き・タイムスタンプ生成開始: {archive['url']}"
+                )
+                outcome = _run_obs_youtube_pipeline_outcome(
+                    archive["url"],
+                    archive_settings,
+                )
+                _obs_append_status(outcome.log)
+                if not outcome.success:
+                    raise RuntimeError(outcome.error or outcome.log)
+                with state_lock:
+                    state["processed_ids"].add(video_id)
+                    state["completed_epochs"].add(epoch)
+                _obs_append_status(f"アーカイブ自動処理完了: {archive['url']}")
+            except Exception as exc:
+                if not _is_current():
+                    logger.info("OBS YouTube archive pipeline cancelled: %s", exc)
+                    return
+                logger.exception("OBS YouTube archive pipeline failed")
+                _obs_append_status(f"YouTubeアーカイブ処理エラー: {exc}")
+                if fallback_recording_path and _is_current():
+                    _obs_append_status(
+                        f"ローカル録画へフォールバックします: {fallback_recording_path}"
+                    )
+                    try:
+                        import obs_integration
+
+                        if not obs_integration.wait_until_file_stable(
+                            fallback_recording_path,
+                            checks=3,
+                            interval=2.0,
+                        ):
+                            raise RuntimeError("録画ファイルがまだ安定していません")
+                        fallback_settings = dict(settings)
+                        fallback_settings["enable_clips"] = True
+                        fallback_settings["enable_chapters"] = True
+                        fallback_settings["auto_append_youtube"] = False
+                        fallback_outcome = _run_obs_auto_pipeline_outcome(
+                            fallback_recording_path,
+                            fallback_settings,
+                        )
+                        _obs_append_status(fallback_outcome.log)
+                        if not fallback_outcome.success:
+                            raise RuntimeError(
+                                fallback_outcome.error or fallback_outcome.log
+                            )
+                        with state_lock:
+                            state["completed_epochs"].add(epoch)
+                        _obs_append_status(
+                            f"ローカル録画の自動処理完了: {fallback_recording_path}"
+                        )
+                    except Exception as fallback_exc:
+                        logger.exception("OBS local recording fallback failed")
+                        _obs_append_status(
+                            f"ローカル録画フォールバックも失敗: {fallback_exc}"
+                        )
+                elif not fallback_recording_path:
+                    _obs_append_status(
+                        "代替の録画ファイルはありません。YouTube認証・公開状態を確認してください"
+                    )
+            finally:
+                with state_lock:
+                    state["finishing_epochs"].discard(epoch)
+                    if epoch in state["completed_epochs"]:
+                        state["streams"].pop(epoch, None)
+                    if owns_inflight:
+                        state["inflight_ids"].discard(video_id)
+                if owns_pipeline_slot:
+                    archive_pipeline_lock.release()
+                _unregister_obs_worker(threading.current_thread())
+
+        _spawn(_finish_worker)
+
+    return _on_stream_started, _on_stream_finished
 
 
 def _obs_make_callback(
@@ -1202,8 +1930,10 @@ def _obs_make_callback(
                 if not _is_current():
                     return
                 _obs_append_status(f"自動パイプライン開始: {video_path}")
-                result_log = run_obs_auto_pipeline(video_path, settings)
-                _obs_append_status(result_log)
+                outcome = _run_obs_auto_pipeline_outcome(video_path, settings)
+                _obs_append_status(outcome.log)
+                if not outcome.success:
+                    raise RuntimeError(outcome.error or outcome.log)
                 _obs_append_status(f"自動処理完了: {video_path}")
             except Exception as e:
                 logger.exception("OBS auto pipeline worker crashed")
@@ -1250,6 +1980,7 @@ def start_obs_watch(
     stop_event: str,
     watch_folder: str,
     auto_process: bool,
+    auto_append_youtube: bool,
     num_clips,
     output_mode: str,
     generate_shorts: bool,
@@ -1291,6 +2022,7 @@ def start_obs_watch(
         settings["whisper_model"] = whisper_model
     if output_base_dir is not None:
         settings["output_base_dir"] = output_base_dir
+    settings["auto_append_youtube"] = bool(auto_append_youtube)
 
     config = {
         "host": host or "localhost",
@@ -1299,12 +2031,46 @@ def start_obs_watch(
         "stop_event": stop_event or "stream",
         "watch_folder": watch_folder or "",
     }
+    archive_mode = (
+        (method or "websocket").lower() == "websocket"
+        and (stop_event or "stream").lower() == "stream"
+    )
+    if archive_mode and auto_process:
+        try:
+            auth = youtube_api.check_auth_status()
+        except Exception as exc:
+            msg = f"YouTube認証状態を確認できません: {exc}"
+            _obs_append_status(msg)
+            return msg
+        if not auth.get("configured"):
+            msg = "YouTubeアーカイブ連携には Settings で credentials.json の設定が必要です"
+            _obs_append_status(msg)
+            return msg
+        if not auth.get("authenticated"):
+            msg = "YouTubeアーカイブ連携には Settings でYouTube認証が必要です"
+            _obs_append_status(msg)
+            return msg
+
     with _obs_watcher_lock:
         _obs_generation += 1
         gen = _obs_generation
     callback = _obs_make_callback(bool(auto_process), settings, gen)
+    archive_started = None
+    archive_finished = None
+    if archive_mode:
+        archive_started, archive_finished = _obs_make_archive_callbacks(
+            bool(auto_process),
+            settings,
+            gen,
+        )
     try:
-        watcher = obs_integration.create_watcher(method, config, callback)
+        watcher = obs_integration.create_watcher(
+            method,
+            config,
+            callback,
+            on_stream_started=archive_started,
+            on_stream_finished=archive_finished,
+        )
     except Exception as e:
         msg = f"ウォッチャー生成エラー: {e}"
         _obs_append_status(msg)
@@ -1319,6 +2085,10 @@ def start_obs_watch(
         return f"OBS連携開始エラー: {e}"
     status = watcher.status
     _obs_append_status(f"OBS連携を開始: {status}")
+    if archive_started is not None and str(status).lower().startswith("connected"):
+        # Covers the common case where OBS連携 is started after streaming has
+        # already begun and no StreamStateChanged STARTED event will arrive.
+        archive_started(proactive=True)
     return status
 
 
@@ -2423,9 +3193,12 @@ def create_ui():
                     "#### ② このタブの設定\n"
                     "下の **Host / Port / Password** を OBS の接続情報と同じ値にして、**「OBS連携 開始」** を押してください"
                     "(同じ PC なら Host は `localhost` のまま、Port は `4455`)。\n\n"
-                    "- **検知する停止イベント**: `stream`=配信停止で発火 / `record`=録画停止で発火\n"
-                    "- ⚠️ `stream`(配信停止)で使う場合は、**配信中に録画も同時に ON** にしてください"
-                    "(処理対象のローカル録画ファイルが必要なため)\n\n"
+                    "- **stream**: 配信停止後、YouTubeアーカイブの処理完了を待って自動DL。"
+                    "録画は不要で、切り抜きとタイムスタンプを両方生成します\n"
+                    "- **record**: OBSのローカル録画停止後、その録画ファイルを処理します\n"
+                    "- `stream` には Settings の **YouTube認証** が必要です。アーカイブは"
+                    " **公開または限定公開** にしてください。長時間配信はYouTube側の処理完了まで待機します\n"
+                    "- 「概要欄に自動追加」がONなら、生成したタイムスタンプを同じアーカイブへ反映します\n\n"
                     "#### フォルダ監視方式(WebSocket を使わない代替)\n"
                     "**検知方式** を `folder` にして OBS の録画出力先フォルダを指定すると、"
                     "新規動画ファイルの書き込み完了を検知して自動処理します(OBS WebSocket 不要)。"
@@ -2569,6 +3342,7 @@ def create_ui():
                 obs_stop_event_radio,
                 obs_watch_folder,
                 obs_auto_process,
+                auto_append_youtube,
                 num_clips,
                 output_mode,
                 generate_shorts,

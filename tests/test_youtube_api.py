@@ -1,11 +1,38 @@
 """Unit tests for youtube_api.py extractor + description merge."""
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import youtube_api
 from youtube_api import extract_video_id, _merge_description
+
+
+class _FakeListResource:
+    def __init__(self, response):
+        self.response = response
+        self.list_kwargs = None
+
+    def list(self, **kwargs):
+        self.list_kwargs = kwargs
+        return self
+
+    def execute(self):
+        return self.response
+
+
+class _FakeYouTubeService:
+    def __init__(self, broadcasts=None, videos=None):
+        self.broadcast_resource = _FakeListResource({"items": broadcasts or []})
+        self.video_resource = _FakeListResource({"items": videos or []})
+
+    def liveBroadcasts(self):
+        return self.broadcast_resource
+
+    def videos(self):
+        return self.video_resource
 
 
 def test_extract_id_standard_watch_url():
@@ -287,6 +314,324 @@ def test_install_credentials_from_file_rejects_web_client():
             assert not dest.exists(), "destination must not be touched on rejection"
     finally:
         youtube_api.CREDENTIALS_PATH = orig_creds
+
+
+def test_find_active_broadcast_selects_latest_actual_start():
+    service = _FakeYouTubeService(broadcasts=[
+        {
+            "id": "old-active",
+            "snippet": {
+                "title": "old",
+                "actualStartTime": "2026-07-22T09:00:00Z",
+            },
+            "status": {"lifeCycleStatus": "live", "privacyStatus": "public"},
+        },
+        {
+            "id": "current-live",
+            "snippet": {
+                "title": "current",
+                "actualStartTime": "2026-07-22T10:00:00Z",
+            },
+            "status": {"lifeCycleStatus": "live", "privacyStatus": "unlisted"},
+        },
+    ])
+
+    result = youtube_api.find_active_broadcast(service)
+
+    assert result == {
+        "video_id": "current-live",
+        "title": "current",
+        "actual_start_time": "2026-07-22T10:00:00Z",
+        "actual_end_time": "",
+        "privacy_status": "unlisted",
+    }
+    assert service.broadcast_resource.list_kwargs == {
+        "part": "id,snippet,status",
+        "broadcastStatus": "active",
+        "broadcastType": "all",
+        "maxResults": 50,
+    }
+
+
+def test_find_active_broadcast_rejects_stream_started_after_target_stop():
+    service = _FakeYouTubeService(broadcasts=[
+        {
+            "id": "target-stream",
+            "snippet": {"actualStartTime": "2026-07-22T10:00:00Z"},
+            "status": {"lifeCycleStatus": "live"},
+        },
+        {
+            "id": "next-stream",
+            "snippet": {"actualStartTime": "2026-07-22T10:06:00Z"},
+            "status": {"lifeCycleStatus": "live"},
+        },
+    ])
+
+    result = youtube_api.find_active_broadcast(
+        service,
+        started_before=datetime(2026, 7, 22, 10, 5, tzinfo=timezone.utc),
+    )
+
+    assert result["video_id"] == "target-stream"
+
+
+def test_find_active_broadcast_rejects_previous_stream_for_new_obs_start():
+    service = _FakeYouTubeService(broadcasts=[
+        {
+            "id": "previous-stream",
+            "snippet": {"actualStartTime": "2026-07-22T09:40:00Z"},
+            "status": {"lifeCycleStatus": "live"},
+        },
+        {
+            "id": "current-stream",
+            "snippet": {"actualStartTime": "2026-07-22T10:00:00Z"},
+            "status": {"lifeCycleStatus": "live"},
+        },
+    ])
+
+    result = youtube_api.find_active_broadcast(
+        service,
+        started_after=datetime(2026, 7, 22, 9, 59, 30, tzinfo=timezone.utc),
+    )
+
+    assert result["video_id"] == "current-stream"
+
+
+def test_find_recent_completed_broadcast_uses_obs_stop_window():
+    service = _FakeYouTubeService(broadcasts=[
+        {
+            "id": "too-old",
+            "snippet": {
+                "title": "old",
+                "actualEndTime": "2026-07-22T09:00:00Z",
+            },
+            "status": {"lifeCycleStatus": "complete", "privacyStatus": "public"},
+        },
+        {
+            "id": "just-ended",
+            "snippet": {
+                "title": "archive",
+                "actualStartTime": "2026-07-22T08:00:00Z",
+                "actualEndTime": "2026-07-22T10:05:00Z",
+            },
+            "status": {"lifeCycleStatus": "complete", "privacyStatus": "public"},
+        },
+    ])
+
+    result = youtube_api.find_recent_completed_broadcast(
+        service,
+        ended_after=datetime(2026, 7, 22, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert result["video_id"] == "just-ended"
+    assert result["actual_end_time"] == "2026-07-22T10:05:00Z"
+    assert service.broadcast_resource.list_kwargs["broadcastStatus"] == "completed"
+    assert "mine" not in service.broadcast_resource.list_kwargs
+
+
+def test_find_recent_completed_broadcast_excludes_preexisting_ids():
+    service = _FakeYouTubeService(broadcasts=[
+        {
+            "id": "previous-stream",
+            "snippet": {
+                "title": "previous",
+                "actualEndTime": "2026-07-22T10:04:00Z",
+            },
+            "status": {"lifeCycleStatus": "complete", "privacyStatus": "public"},
+        },
+        {
+            "id": "current-stream",
+            "snippet": {
+                "title": "current",
+                "actualEndTime": "2026-07-22T10:05:00Z",
+            },
+            "status": {"lifeCycleStatus": "complete", "privacyStatus": "public"},
+        },
+    ])
+
+    result = youtube_api.find_recent_completed_broadcast(
+        service,
+        ended_after=datetime(2026, 7, 22, 10, 0, tzinfo=timezone.utc),
+        exclude_video_ids={"previous-stream"},
+    )
+
+    assert result["video_id"] == "current-stream"
+
+
+def test_find_recent_completed_broadcast_rejects_next_stream():
+    service = _FakeYouTubeService(broadcasts=[
+        {
+            "id": "target-stream",
+            "snippet": {
+                "actualStartTime": "2026-07-22T10:00:00Z",
+                "actualEndTime": "2026-07-22T10:05:10Z",
+            },
+            "status": {"lifeCycleStatus": "complete"},
+        },
+        {
+            "id": "next-stream",
+            "snippet": {
+                "actualStartTime": "2026-07-22T10:05:30Z",
+                "actualEndTime": "2026-07-22T10:06:00Z",
+            },
+            "status": {"lifeCycleStatus": "complete"},
+        },
+    ])
+
+    result = youtube_api.find_recent_completed_broadcast(
+        service,
+        ended_after=datetime(2026, 7, 22, 10, 3, tzinfo=timezone.utc),
+        started_before=datetime(2026, 7, 22, 10, 5, 20, tzinfo=timezone.utc),
+    )
+
+    assert result["video_id"] == "target-stream"
+
+
+def test_find_recent_completed_broadcast_rejects_previous_late_completion():
+    service = _FakeYouTubeService(broadcasts=[
+        {
+            "id": "previous-stream",
+            "snippet": {
+                "actualStartTime": "2026-07-22T09:40:00Z",
+                "actualEndTime": "2026-07-22T10:05:15Z",
+            },
+            "status": {"lifeCycleStatus": "complete"},
+        },
+        {
+            "id": "current-stream",
+            "snippet": {
+                "actualStartTime": "2026-07-22T10:00:00Z",
+                "actualEndTime": "2026-07-22T10:05:10Z",
+            },
+            "status": {"lifeCycleStatus": "complete"},
+        },
+    ])
+
+    result = youtube_api.find_recent_completed_broadcast(
+        service,
+        ended_after=datetime(2026, 7, 22, 10, 3, tzinfo=timezone.utc),
+        started_after=datetime(2026, 7, 22, 9, 59, 30, tzinfo=timezone.utc),
+        started_before=datetime(2026, 7, 22, 10, 5, 20, tzinfo=timezone.utc),
+    )
+
+    assert result["video_id"] == "current-stream"
+
+
+def test_find_recent_completed_broadcast_prefers_latest_start_over_late_old_end():
+    service = _FakeYouTubeService(broadcasts=[
+        {
+            "id": "previous-stream",
+            "snippet": {
+                "actualStartTime": "2026-07-22T09:40:00Z",
+                "actualEndTime": "2026-07-22T10:05:15Z",
+            },
+            "status": {"lifeCycleStatus": "complete"},
+        },
+        {
+            "id": "current-stream",
+            "snippet": {
+                "actualStartTime": "2026-07-22T10:00:00Z",
+                "actualEndTime": "2026-07-22T10:05:10Z",
+            },
+            "status": {"lifeCycleStatus": "complete"},
+        },
+    ])
+
+    result = youtube_api.find_recent_completed_broadcast(
+        service,
+        ended_after=datetime(2026, 7, 22, 10, 3, tzinfo=timezone.utc),
+        started_before=datetime(2026, 7, 22, 10, 5, 20, tzinfo=timezone.utc),
+    )
+
+    assert result["video_id"] == "current-stream"
+
+
+def test_list_completed_broadcast_ids_returns_baseline_set():
+    service = _FakeYouTubeService(broadcasts=[
+        {"id": "first"},
+        {"id": "second"},
+        {"id": ""},
+    ])
+
+    result = youtube_api.list_completed_broadcast_ids(service)
+
+    assert result == {"first", "second"}
+    assert service.broadcast_resource.list_kwargs == {
+        "part": "id,snippet",
+        "broadcastStatus": "completed",
+        "broadcastType": "all",
+        "maxResults": 50,
+    }
+
+
+def test_completed_baseline_uses_obs_start_time_not_api_response_time():
+    service = _FakeYouTubeService(broadcasts=[
+        {
+            "id": "previous-stream",
+            "snippet": {"actualEndTime": "2026-07-22T09:59:00Z"},
+        },
+        {
+            "id": "current-stream",
+            "snippet": {"actualEndTime": "2026-07-22T10:01:00Z"},
+        },
+    ])
+
+    result = youtube_api.list_completed_broadcast_ids(
+        service,
+        completed_before=datetime(2026, 7, 22, 10, 0, tzinfo=timezone.utc),
+    )
+
+    assert result == {"previous-stream"}
+
+
+def test_get_archive_processing_state_requires_processed_and_non_private():
+    service = _FakeYouTubeService(videos=[{
+        "id": "archive-id",
+        "status": {"uploadStatus": "processed", "privacyStatus": "unlisted"},
+        "processingDetails": {"processingStatus": "succeeded"},
+    }])
+
+    state = youtube_api.get_archive_processing_state(service, "archive-id")
+
+    assert state == {
+        "ready": True,
+        "failed": False,
+        "processing_status": "succeeded",
+        "upload_status": "processed",
+        "privacy_status": "unlisted",
+    }
+    assert service.video_resource.list_kwargs == {
+        "part": "status,processingDetails",
+        "id": "archive-id",
+    }
+
+
+def test_get_archive_processing_state_allows_terminated_metadata_when_uploaded():
+    service = _FakeYouTubeService(videos=[{
+        "id": "archive-id",
+        "status": {"uploadStatus": "processed", "privacyStatus": "public"},
+        "processingDetails": {"processingStatus": "terminated"},
+    }])
+
+    state = youtube_api.get_archive_processing_state(service, "archive-id")
+
+    assert state["ready"] is True
+    assert state["failed"] is False
+
+
+def test_get_broadcast_lifecycle_status_by_id():
+    service = _FakeYouTubeService(broadcasts=[{
+        "id": "archive-id",
+        "status": {"lifeCycleStatus": "complete"},
+    }])
+
+    status = youtube_api.get_broadcast_lifecycle_status(service, "archive-id")
+
+    assert status == "complete"
+    assert service.broadcast_resource.list_kwargs == {
+        "part": "status",
+        "id": "archive-id",
+    }
 
 
 def run_all():

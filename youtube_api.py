@@ -11,6 +11,7 @@ directory (see _google_auth.get_user_config_dir).
 """
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import _google_auth
@@ -56,6 +57,214 @@ def get_youtube_service():
     return _google_auth.build_authenticated_service(
         "youtube", "v3", SCOPES, TOKEN_PATH, CREDENTIALS_PATH,
     )
+
+
+def _parse_api_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _broadcast_summary(item: dict) -> dict:
+    snippet = item.get("snippet", {})
+    status = item.get("status", {})
+    return {
+        "video_id": item.get("id", ""),
+        "title": snippet.get("title", ""),
+        "actual_start_time": snippet.get("actualStartTime", ""),
+        "actual_end_time": snippet.get("actualEndTime", ""),
+        "privacy_status": status.get("privacyStatus", ""),
+    }
+
+
+def find_active_broadcast(
+    service,
+    started_before: datetime | None = None,
+    started_after: datetime | None = None,
+) -> dict | None:
+    """Return the most recently started active broadcast for this channel."""
+    if started_before is not None:
+        if started_before.tzinfo is None:
+            started_before = started_before.replace(tzinfo=timezone.utc)
+        else:
+            started_before = started_before.astimezone(timezone.utc)
+    if started_after is not None:
+        if started_after.tzinfo is None:
+            started_after = started_after.replace(tzinfo=timezone.utc)
+        else:
+            started_after = started_after.astimezone(timezone.utc)
+
+    response = service.liveBroadcasts().list(
+        part="id,snippet,status",
+        broadcastStatus="active",
+        broadcastType="all",
+        maxResults=50,
+    ).execute()
+    candidates = []
+    for item in response.get("items", []):
+        if not item.get("id"):
+            continue
+        life_cycle = item.get("status", {}).get("lifeCycleStatus", "")
+        if life_cycle not in {"live", "liveStarting", "testing"}:
+            continue
+        started = _parse_api_datetime(item.get("snippet", {}).get("actualStartTime"))
+        if started_before is not None and (
+            started is None or started > started_before
+        ):
+            continue
+        if started_after is not None and (
+            started is None or started < started_after
+        ):
+            continue
+        candidates.append((started or datetime.min.replace(tzinfo=timezone.utc), item))
+    if not candidates:
+        return None
+    return _broadcast_summary(max(candidates, key=lambda pair: pair[0])[1])
+
+
+def list_completed_broadcast_ids(
+    service,
+    completed_before: datetime | None = None,
+) -> set[str]:
+    """Return IDs already completed when an OBS stream starts."""
+    if completed_before is not None:
+        if completed_before.tzinfo is None:
+            completed_before = completed_before.replace(tzinfo=timezone.utc)
+        else:
+            completed_before = completed_before.astimezone(timezone.utc)
+
+    response = service.liveBroadcasts().list(
+        part="id,snippet",
+        broadcastStatus="completed",
+        broadcastType="all",
+        maxResults=50,
+    ).execute()
+    completed_ids = set()
+    for item in response.get("items", []):
+        video_id = item.get("id")
+        if not video_id:
+            continue
+        if completed_before is not None:
+            ended = _parse_api_datetime(
+                item.get("snippet", {}).get("actualEndTime")
+            )
+            if ended is None or ended > completed_before:
+                continue
+        completed_ids.add(str(video_id))
+    return completed_ids
+
+
+def find_recent_completed_broadcast(
+    service,
+    ended_after: datetime | None = None,
+    exclude_video_ids: set[str] | None = None,
+    started_before: datetime | None = None,
+    started_after: datetime | None = None,
+) -> dict | None:
+    """Return the latest completed broadcast ending after ``ended_after``."""
+    excluded = set(exclude_video_ids or ())
+    if ended_after is not None:
+        if ended_after.tzinfo is None:
+            ended_after = ended_after.replace(tzinfo=timezone.utc)
+        else:
+            ended_after = ended_after.astimezone(timezone.utc)
+    if started_before is not None:
+        if started_before.tzinfo is None:
+            started_before = started_before.replace(tzinfo=timezone.utc)
+        else:
+            started_before = started_before.astimezone(timezone.utc)
+    if started_after is not None:
+        if started_after.tzinfo is None:
+            started_after = started_after.replace(tzinfo=timezone.utc)
+        else:
+            started_after = started_after.astimezone(timezone.utc)
+
+    response = service.liveBroadcasts().list(
+        part="id,snippet,status",
+        broadcastStatus="completed",
+        broadcastType="all",
+        maxResults=50,
+    ).execute()
+    candidates = []
+    for item in response.get("items", []):
+        if not item.get("id") or item.get("id") in excluded:
+            continue
+        if item.get("status", {}).get("lifeCycleStatus") != "complete":
+            continue
+        ended = _parse_api_datetime(item.get("snippet", {}).get("actualEndTime"))
+        if ended is None or (ended_after is not None and ended < ended_after):
+            continue
+        started = _parse_api_datetime(
+            item.get("snippet", {}).get("actualStartTime")
+        )
+        if started_before is not None:
+            if started is None or started > started_before:
+                continue
+        if started_after is not None and (
+            started is None or started < started_after
+        ):
+            continue
+        candidates.append((
+            started or datetime.min.replace(tzinfo=timezone.utc),
+            ended,
+            item,
+        ))
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda entry: (entry[0], entry[1]))
+    return _broadcast_summary(latest[2])
+
+
+def get_broadcast_lifecycle_status(service, video_id: str) -> str:
+    """Return the current lifecycle status for a YouTube live broadcast."""
+    response = service.liveBroadcasts().list(
+        part="status",
+        id=video_id,
+    ).execute()
+    items = response.get("items", [])
+    if not items:
+        return "not_found"
+    return items[0].get("status", {}).get("lifeCycleStatus", "unknown")
+
+
+def get_archive_processing_state(service, video_id: str) -> dict:
+    """Return whether a completed broadcast is downloadable by yt-dlp."""
+    response = service.videos().list(
+        part="status,processingDetails",
+        id=video_id,
+    ).execute()
+    items = response.get("items", [])
+    if not items:
+        return {
+            "ready": False,
+            "failed": False,
+            "processing_status": "not_found",
+            "upload_status": "not_found",
+            "privacy_status": "",
+        }
+
+    item = items[0]
+    processing_status = item.get("processingDetails", {}).get("processingStatus", "")
+    status = item.get("status", {})
+    upload_status = status.get("uploadStatus", "")
+    privacy_status = status.get("privacyStatus", "")
+    failed = processing_status == "failed" or upload_status in {
+        "failed", "rejected", "deleted",
+    }
+    processed = processing_status == "succeeded" or upload_status == "processed"
+    return {
+        "ready": bool(processed and privacy_status in {"public", "unlisted"}),
+        "failed": bool(failed),
+        "processing_status": processing_status,
+        "upload_status": upload_status,
+        "privacy_status": privacy_status,
+    }
 
 
 def _merge_description(existing: str, chapters: str, position: str) -> str:

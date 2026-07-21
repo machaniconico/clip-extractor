@@ -1,7 +1,7 @@
-"""OBS integration: feed finished recordings into the clip-extractor pipeline.
+"""OBS integration for local recordings and YouTube stream lifecycles.
 
-Two interchangeable watchers share a single callback interface
-``on_recording_finished(absolute_path: str)``:
+Two interchangeable watchers report finished local recordings.  The WebSocket
+watcher can additionally report stream start/stop without requiring recording:
 
 * ``ObsWebsocketWatcher`` — connects to obs-websocket v5 via ``obsws-python``
   and reacts to Record/Stream state-changed events.
@@ -27,11 +27,14 @@ logger = logging.getLogger("clip-extractor.obs")
 #: Video extensions recognised by the folder watcher.
 RECORDING_EXTENSIONS: tuple[str, ...] = (".mp4", ".mkv", ".flv", ".mov")
 
-#: obs-websocket output-state constant emitted when an output stops.
+#: obs-websocket output-state constants emitted when an output starts/stops.
+OBS_WEBSOCKET_OUTPUT_STARTED = "OBS_WEBSOCKET_OUTPUT_STARTED"
 OBS_WEBSOCKET_OUTPUT_STOPPED = "OBS_WEBSOCKET_OUTPUT_STOPPED"
 
 #: Type alias for the shared completion callback.
 OnRecordingFinished = Callable[[str], None]
+OnStreamStarted = Callable[[], None]
+OnStreamFinished = Callable[[Optional[str]], None]
 
 
 def _get(data: object, snake: str, camel: str) -> Optional[object]:
@@ -108,8 +111,8 @@ class ObsWebsocketWatcher(_WorkerMixin):
 
     The trigger event is selected by ``stop_event``: ``"record"`` fires the
     callback when recording stops (the recording path is in the event);
-    ``"stream"`` fires when the stream stops and uses the most recently seen
-    recording path (OBS is assumed to be recording the stream simultaneously).
+    ``"stream"`` invokes the optional lifecycle callbacks.  A recording path
+    from the same stream is supplied only as a best-effort fallback.
     """
 
     def __init__(
@@ -119,6 +122,8 @@ class ObsWebsocketWatcher(_WorkerMixin):
         password: str,
         on_recording_finished: OnRecordingFinished,
         stop_event: str = "stream",
+        on_stream_started: OnStreamStarted | None = None,
+        on_stream_finished: OnStreamFinished | None = None,
     ) -> None:
         super().__init__()
         self._stopped = False
@@ -126,6 +131,8 @@ class ObsWebsocketWatcher(_WorkerMixin):
         self._port = int(port)
         self._password = password
         self._callback = on_recording_finished
+        self._stream_started_callback = on_stream_started
+        self._stream_finished_callback = on_stream_finished
         self._trigger = (stop_event or "stream").lower()
         self._client = None
         self._status = "stopped"
@@ -214,22 +221,32 @@ class ObsWebsocketWatcher(_WorkerMixin):
             logger.exception("on_record_state_changed failed")
 
     def on_stream_state_changed(self, data: object) -> None:
-        """Handle StreamStateChanged: fire when trigger=stream using cached path."""
+        """Handle stream start/stop, optionally without a local recording."""
         try:
             state = _get(data, "output_state", "outputState")
-            if state != OBS_WEBSOCKET_OUTPUT_STOPPED:
-                return
             if self._trigger != "stream":
+                return
+            if state == OBS_WEBSOCKET_OUTPUT_STARTED:
+                logger.info("OBS stream started")
+                with self._state_lock:
+                    self._last_record_path = None
+                if self._stream_started_callback is not None:
+                    self._dispatch_stream_callback(self._stream_started_callback)
+                return
+            if state != OBS_WEBSOCKET_OUTPUT_STOPPED:
                 return
             logger.info("OBS stream stopped")
             path: Optional[str] = None
             with self._state_lock:
                 path = self._last_record_path
+                self._last_record_path = None
             if not path:
                 # Stream-stop events don't carry a recording path; try to
                 # recover it from OBS via GetRecordStatus.
                 path = self._query_last_record_path()
-            if path:
+            if self._stream_finished_callback is not None:
+                self._dispatch_stream_callback(self._stream_finished_callback, path)
+            elif path:
                 self._dispatch(path)
             else:
                 msg = "配信停止を検知しましたが録画パスを取得できませんでした（録画が同時に有効か確認してください）"
@@ -239,6 +256,15 @@ class ObsWebsocketWatcher(_WorkerMixin):
             logger.exception("on_stream_state_changed failed")
 
     # --- internals --------------------------------------------------------
+
+    def _dispatch_stream_callback(self, callback: Callable, *args) -> None:
+        """Invoke lightweight callbacks inline to preserve OBS event order."""
+        if self._stopped:
+            return
+        try:
+            callback(*args)
+        except Exception:
+            logger.exception("OBS stream lifecycle callback failed")
 
     def _query_last_record_path(self) -> Optional[str]:
         """Best-effort: ask OBS for the current recording path via ReqClient."""
@@ -255,6 +281,9 @@ class ObsWebsocketWatcher(_WorkerMixin):
                 timeout=5,
             )
             status = rc.get_record_status()
+            output_active = _get(status, "output_active", "outputActive")
+            if output_active is False:
+                return None
             for attr in ("output_path", "recording_path", "outputPath", "recordingPath"):
                 val = getattr(status, attr, None)
                 if val:
@@ -406,6 +435,8 @@ def create_watcher(
     method: str,
     config: dict,
     on_recording_finished: OnRecordingFinished,
+    on_stream_started: OnStreamStarted | None = None,
+    on_stream_finished: OnStreamFinished | None = None,
 ):
     """Factory: build a watcher by ``method`` ("websocket" | "folder").
 
@@ -427,5 +458,7 @@ def create_watcher(
             password=config.get("password", ""),
             on_recording_finished=on_recording_finished,
             stop_event=config.get("stop_event", "stream"),
+            on_stream_started=on_stream_started,
+            on_stream_finished=on_stream_finished,
         )
     raise ValueError(f"未知の検知方式です: {method} (websocket または folder を指定してください)")

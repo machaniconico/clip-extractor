@@ -77,6 +77,31 @@ def test_save_defaults_signature_matches_save_button_inputs():
     assert args[-4:] == ["generate_thumbnails", "audio_fusion", "audio_alpha", "karaoke"]
 
 
+def test_obs_start_signature_matches_inputs_and_passes_auto_append():
+    module = _module()
+    args = _function_args(module, "start_obs_watch")
+    assert args == [
+        "method", "host", "port", "password", "stop_event", "watch_folder",
+        "auto_process", "auto_append_youtube", "num_clips", "output_mode",
+        "generate_shorts", "ai_provider", "whisper_model", "output_base_dir",
+    ]
+    assert _click_input_names(module, "obs_start_btn") == [
+        "obs_trigger_radio", "obs_host", "obs_port", "obs_password",
+        "obs_stop_event_radio", "obs_watch_folder", "obs_auto_process",
+        "auto_append_youtube", "num_clips", "output_mode", "generate_shorts",
+        "ai_provider", "whisper_model", "output_base_dir",
+    ]
+
+
+def test_obs_help_explains_archive_clips_and_timestamps_without_recording():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert "録画は不要" in source
+    assert "切り抜きとタイムスタンプを両方生成" in source
+    assert "公開または限定公開" in source
+    assert "概要欄に自動追加" in source
+
+
 def test_google_unverified_app_guide_is_actionable_and_rendered():
     module = _module()
     guide_name = "GOOGLE_OAUTH_UNVERIFIED_GUIDE_MD"
