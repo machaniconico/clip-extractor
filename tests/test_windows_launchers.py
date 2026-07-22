@@ -18,8 +18,10 @@ def test_combined_batch_requests_obs_launch():
     assert 'call "%~dp0Clip Extractor.bat" --with-obs' in source
 
 
-def test_setup_creates_opt_in_obs_desktop_shortcut():
+def test_setup_creates_only_the_default_desktop_shortcut():
     source = (ROOT / "setup.bat").read_text(encoding="utf-8")
 
-    assert "Clip Extractor + OBS.lnk" in source
-    assert ".Arguments = '--with-obs'" in source
+    assert source.count("$ws.CreateShortcut(") == 1
+    assert "Clip Extractor.lnk" in source
+    assert "Clip Extractor + OBS.lnk" not in source
+    assert ".Arguments = '--with-obs'" not in source
