@@ -23,5 +23,7 @@
   "generate_thumbnails": false,
   "audio_fusion": false,
   "audio_alpha": 0.35,
-  "karaoke": false
+  "karaoke": false,
+  "obs_launch_on_startup": false,
+  "obs_executable_path": ""
 }

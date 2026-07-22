@@ -225,6 +225,8 @@ def load_defaults() -> dict:
         "whisper_model": "large-v3", "language": "ja",
         "font_name": "Noto Sans JP Black", "font_size": 96, "font_color": "#FFFFFF",
         "output_base_dir": "",
+        "obs_launch_on_startup": False,
+        "obs_executable_path": "",
     }
     if SETTINGS_FILE.exists():
         try:
@@ -245,7 +247,9 @@ def save_defaults(ai_provider, ai_model,
                   output_base_dir,
                   generate_thumbnails=False,
                   audio_fusion=False, audio_alpha=0.35,
-                  karaoke=False):
+                  karaoke=False,
+                  obs_launch_on_startup=False,
+                  obs_executable_path=""):
     """Save current settings as defaults."""
     data = {
         "ai_provider": ai_provider, "ai_model": ai_model,
@@ -265,6 +269,8 @@ def save_defaults(ai_provider, ai_model,
         "audio_fusion": bool(audio_fusion),
         "audio_alpha": float(audio_alpha),
         "karaoke": bool(karaoke),
+        "obs_launch_on_startup": bool(obs_launch_on_startup),
+        "obs_executable_path": (obs_executable_path or "").strip(),
     }
     SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return "Settings saved as default!"
@@ -2977,6 +2983,19 @@ def create_ui():
                             outputs=None,
                         )
 
+                        gr.HTML("<h3 style='margin-top: 1.5em;'>OBS Studio 起動</h3>")
+                        obs_launch_on_startup = gr.Checkbox(
+                            label="Clip Extractor起動時にOBS Studioも起動",
+                            value=bool(defaults.get("obs_launch_on_startup", False)),
+                            info="「デフォルトに設定」で保存後、次回起動から有効になります。OBSが起動中なら二重起動しません。",
+                        )
+                        obs_executable_path = gr.Textbox(
+                            label="OBS実行ファイルのパス",
+                            value=defaults.get("obs_executable_path", ""),
+                            placeholder=r"C:\Program Files\obs-studio\bin\64bit\obs64.exe",
+                            info="obs64.exe のフルパスを貼り付けます。空欄なら自動検出。専用の同時起動ショートカットでもこのパスを使います。",
+                        )
+
                 with gr.Row():
                     with gr.Column():
                         gr.HTML("<h3>Whisper Settings</h3>")
@@ -3144,7 +3163,8 @@ def create_ui():
                             output_base_dir,
                             generate_thumbnails,
                             audio_fusion, audio_alpha,
-                            karaoke],
+                            karaoke,
+                            obs_launch_on_startup, obs_executable_path],
                     outputs=save_defaults_msg,
                 )
 
@@ -3201,7 +3221,8 @@ def create_ui():
                     "- 「概要欄に自動追加」がONなら、生成したタイムスタンプを同じアーカイブへ反映します\n\n"
                     "#### フォルダ監視方式(WebSocket を使わない代替)\n"
                     "**検知方式** を `folder` にして OBS の録画出力先フォルダを指定すると、"
-                    "新規動画ファイルの書き込み完了を検知して自動処理します(OBS WebSocket 不要)。"
+                    "新規動画ファイルの書き込み完了を検知して自動処理します(OBS WebSocket 不要)。\n\n"
+                    "> OBS Studioも一緒に開く設定は **Settings / 設定 → OBS Studio 起動** にあります。"
                 )
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -3435,6 +3456,12 @@ Gemini は**無料枠あり・クレカ登録不要**で一番手軽です。
 
 
 if __name__ == "__main__":
+    from obs_launcher import launch_obs_from_settings
+
+    _obs_launch_result = launch_obs_from_settings(SETTINGS_FILE)
+    if _obs_launch_result is not None:
+        _level = "OK" if _obs_launch_result.ok else "WARN"
+        print(f"[{_level}] {_obs_launch_result.message}")
     app = create_ui()
     app.queue()
     app.launch(**safe_launch_kwargs(

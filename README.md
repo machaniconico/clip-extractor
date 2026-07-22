@@ -97,6 +97,21 @@ python launcher.py
 
 Windows では `Clip Extractor.bat` をダブルクリックでも起動できます。起動後 `http://localhost:7860` を開きます。
 
+### OBS Studio と同時起動（Windows）
+
+Settings / 設定タブの **「Clip Extractor起動時にOBS Studioも起動」** をONにし、画面下の **「デフォルトに設定」** で保存すると、次回から通常のClip Extractor起動時にOBSも一緒に開きます。
+
+- **OBS実行ファイルのパス**には `obs64.exe` のフルパスを貼り付けられます
+- パスを空欄にすると、PATHと標準インストール先から自動検出します
+- OBS が既に起動している場合は二重起動しません
+- OBS が見つからない・起動に失敗した場合も Clip Extractor は通常どおり起動します
+
+設定とは別に、`Clip Extractor with OBS.bat` をダブルクリックするとチェック状態に関係なく2つを一度に起動できます。`setup.bat` を実行した場合は、デスクトップに作成される **`Clip Extractor + OBS`** ショートカットからも同じ動作になります。更新済みの環境では `setup.bat` を再実行するか、同梱の新しいbatを直接使用してください。
+
+これは2つのアプリを同時に開く機能です。配信終了後の自動処理を使う場合は、Web UI の **OBS連携** タブで従来どおり **「OBS連携 開始」** を押してください。
+
+コマンドから使う場合は `python launcher.py --with-obs` でも起動できます。
+
 - AI プロバイダ（Claude / OpenAI / Gemini）とモデルを画面で選択
 - Gemini の API キーは画面から保存可能（`.gemini_key` に保存され、`GEMINI_API_KEY` 環境変数より優先）。取得手順は Settings タブの「📘 Gemini APIキーの取得手順」アコーディオンにも掲載
 - 「検出」後に各クリップのイン/アウト点・タイトルを編集してから「レンダリング」（再文字起こしは走りません）

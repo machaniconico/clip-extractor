@@ -37,6 +37,8 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         generate_thumbnails=False,
         audio_fusion=False, audio_alpha=0.35,
         karaoke=False,
+        obs_launch_on_startup=False,
+        obs_executable_path="",
     )
     args.update(overrides)
 
@@ -54,6 +56,8 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         args["generate_thumbnails"],
         args["audio_fusion"], args["audio_alpha"],
         args["karaoke"],
+        args["obs_launch_on_startup"],
+        args["obs_executable_path"],
     )
     assert settings_file.exists(), "save_defaults should write SETTINGS_FILE"
     return web_app.load_defaults()
@@ -96,6 +100,18 @@ def test_roundtrip_audio_fusion_fields(monkeypatch, tmp_path):
     assert loaded["audio_fusion"] is True, loaded
     assert loaded["audio_alpha"] == 0.65, loaded
     assert loaded["karaoke"] is True, loaded
+
+
+def test_roundtrip_obs_launch_fields(monkeypatch, tmp_path):
+    loaded = _save_with(
+        monkeypatch,
+        tmp_path,
+        obs_launch_on_startup=True,
+        obs_executable_path="  C:/Portable OBS/obs64.exe  ",
+    )
+
+    assert loaded["obs_launch_on_startup"] is True, loaded
+    assert loaded["obs_executable_path"] == "C:/Portable OBS/obs64.exe", loaded
 
 
 def test_does_not_touch_real_settings(monkeypatch, tmp_path):

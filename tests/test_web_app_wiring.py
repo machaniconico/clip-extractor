@@ -74,7 +74,22 @@ def test_save_defaults_signature_matches_save_button_inputs():
     module = _module()
     args = _function_args(module, "save_defaults")
     assert args == _click_input_names(module, "save_defaults_btn")
-    assert args[-4:] == ["generate_thumbnails", "audio_fusion", "audio_alpha", "karaoke"]
+    assert args[-2:] == ["obs_launch_on_startup", "obs_executable_path"]
+
+
+def test_settings_exposes_obs_startup_checkbox_and_executable_path():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert 'label="Clip Extractor起動時にOBS Studioも起動"' in source
+    assert 'label="OBS実行ファイルのパス"' in source
+    assert "obs_launch_on_startup" in _click_input_names(_module(), "save_defaults_btn")
+    assert "obs_executable_path" in _click_input_names(_module(), "save_defaults_btn")
+
+
+def test_direct_web_entry_applies_saved_obs_launch_setting():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert "launch_obs_from_settings(SETTINGS_FILE)" in source
 
 
 def test_obs_start_signature_matches_inputs_and_passes_auto_append():
