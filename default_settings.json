@@ -5,7 +5,7 @@
   "enable_chapters": true,
   "clip_prompt": "",
   "chapter_prompt": "",
-  "auto_append_youtube": false,
+  "auto_append_youtube": true,
   "num_clips": 5,
   "output_mode": "combined",
   "generate_shorts": false,
@@ -24,12 +24,6 @@
   "audio_fusion": false,
   "audio_alpha": 0.35,
   "karaoke": false,
-  "obs_enabled": false,
-  "obs_trigger_method": "websocket",
-  "obs_host": "localhost",
-  "obs_port": 4455,
-  "obs_password": "",
-  "obs_stop_event": "stream",
-  "obs_watch_folder": "",
-  "obs_auto_process": true
+  "obs_launch_on_startup": false,
+  "obs_executable_path": ""
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Clip Extractor launcher - entry point for .exe build."""
 
+import argparse
 import sys
 import webbrowser
 import threading
@@ -10,6 +11,9 @@ from pathlib import Path
 import os
 if getattr(sys, "frozen", False):
     os.chdir(Path(sys.executable).parent)
+
+
+SETTINGS_FILE = Path(__file__).parent / "default_settings.json"
 
 
 def open_browser():
@@ -33,7 +37,28 @@ def open_browser():
     webbrowser.open("http://localhost:7860")
 
 
-def main():
+def launch_obs_if_requested(argv=None, settings_path=None):
+    """Apply saved OBS launch settings or the combined-shortcut override."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--with-obs", action="store_true")
+    args, _unknown = parser.parse_known_args(argv)
+
+    from obs_launcher import launch_obs_from_settings
+
+    result = launch_obs_from_settings(
+        settings_path or SETTINGS_FILE,
+        force=args.with_obs,
+    )
+    if result is None:
+        return None
+    level = "OK" if result.ok else "WARN"
+    print(f"[{level}] {result.message}")
+    return result
+
+
+def main(argv=None):
+    launch_obs_if_requested(argv)
+
     # Check external dependencies
     import shutil
 

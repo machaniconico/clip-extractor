@@ -31,6 +31,6 @@ echo.
 :: soon as it accepts connections (falling back to opening anyway after 30s),
 :: which avoids the "connection refused" flash that happened when we fired
 :: `start http://localhost:8080` before the Gradio server bound the port.
-%PYTHON_CMD% launcher.py
+%PYTHON_CMD% launcher.py %*
 
 pause

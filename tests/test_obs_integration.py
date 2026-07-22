@@ -204,6 +204,128 @@ def test_obs_websocket_stream_uses_cached_record_path(tmp_path, monkeypatch):
     w.stop()
 
 
+def test_obs_websocket_stream_callbacks_work_without_recording(monkeypatch):
+    monkeypatch.setattr(oi.time, "sleep", lambda *a, **k: None)
+    started = threading.Event()
+    finished = threading.Event()
+    fallback_paths = []
+
+    def on_stream_finished(path):
+        fallback_paths.append(path)
+        finished.set()
+
+    w = oi.ObsWebsocketWatcher(
+        "localhost",
+        4455,
+        "pw",
+        lambda _path: None,
+        stop_event="stream",
+        on_stream_started=started.set,
+        on_stream_finished=on_stream_finished,
+    )
+    monkeypatch.setattr(w, "_query_last_record_path", lambda: None)
+
+    w.on_stream_state_changed(
+        types.SimpleNamespace(output_state="OBS_WEBSOCKET_OUTPUT_STARTED")
+    )
+    assert started.wait(timeout=5), "stream-start callback did not fire"
+
+    w.on_stream_state_changed(
+        types.SimpleNamespace(output_state=oi.OBS_WEBSOCKET_OUTPUT_STOPPED)
+    )
+    assert finished.wait(timeout=5), "stream-finished callback did not fire"
+    assert fallback_paths == [None]
+    w.stop()
+
+
+def test_stream_lifecycle_callbacks_preserve_obs_event_order(monkeypatch):
+    order = []
+    deferred_workers = []
+    w = oi.ObsWebsocketWatcher(
+        "localhost",
+        4455,
+        "pw",
+        lambda _path: None,
+        stop_event="stream",
+        on_stream_started=lambda: order.append("start"),
+        on_stream_finished=lambda _path: order.append("stop"),
+    )
+    monkeypatch.setattr(w, "_query_last_record_path", lambda: None)
+    monkeypatch.setattr(w, "_spawn_worker", deferred_workers.append)
+
+    w.on_stream_state_changed(
+        types.SimpleNamespace(output_state=oi.OBS_WEBSOCKET_OUTPUT_STARTED)
+    )
+    w.on_stream_state_changed(
+        types.SimpleNamespace(output_state=oi.OBS_WEBSOCKET_OUTPUT_STOPPED)
+    )
+
+    assert order == ["start", "stop"]
+    assert deferred_workers == []
+    w.stop()
+
+
+def test_obs_websocket_new_stream_drops_previous_recording_path(tmp_path, monkeypatch):
+    previous = tmp_path / "previous.mp4"
+    previous.write_bytes(b"old recording")
+    finished = threading.Event()
+    fallback_paths = []
+
+    def on_stream_finished(path):
+        fallback_paths.append(path)
+        finished.set()
+
+    w = oi.ObsWebsocketWatcher(
+        "localhost",
+        4455,
+        "pw",
+        lambda _path: None,
+        stop_event="stream",
+        on_stream_finished=on_stream_finished,
+    )
+    w.on_record_state_changed(_stopped_event(previous))
+    monkeypatch.setattr(w, "_query_last_record_path", lambda: None)
+
+    w.on_stream_state_changed(
+        types.SimpleNamespace(output_state=oi.OBS_WEBSOCKET_OUTPUT_STARTED)
+    )
+    w.on_stream_state_changed(
+        types.SimpleNamespace(output_state=oi.OBS_WEBSOCKET_OUTPUT_STOPPED)
+    )
+
+    assert finished.wait(timeout=5)
+    assert fallback_paths == [None]
+    w.stop()
+
+
+def test_query_record_path_ignores_inactive_obs_recording(monkeypatch):
+    fake = types.ModuleType("obsws_python")
+
+    class _Ws:
+        def close(self):
+            pass
+
+    class _ReqClient:
+        def __init__(self, **_kwargs):
+            self.base_client = types.SimpleNamespace(ws=_Ws())
+
+        def get_record_status(self):
+            return types.SimpleNamespace(
+                output_active=False,
+                output_path="C:/recordings/previous.mp4",
+            )
+
+    fake.ReqClient = _ReqClient
+    monkeypatch.setitem(sys.modules, "obsws_python", fake)
+
+    w = oi.ObsWebsocketWatcher(
+        "localhost", 4455, "pw", lambda _path: None, stop_event="stream"
+    )
+
+    assert w._query_last_record_path() is None
+    w.stop()
+
+
 def test_obs_websocket_ignores_non_stopped_state(tmp_path, monkeypatch):
     monkeypatch.setattr(oi.time, "sleep", lambda *a, **k: None)
     rec = tmp_path / "obs_running.mp4"
@@ -297,6 +419,20 @@ def test_create_watcher_websocket():
         lambda p: None,
     )
     assert isinstance(w, oi.ObsWebsocketWatcher)
+
+
+def test_create_watcher_passes_optional_stream_callbacks():
+    started = lambda: None
+    finished = lambda _path: None
+    w = oi.create_watcher(
+        "websocket",
+        {"stop_event": "stream"},
+        lambda _path: None,
+        on_stream_started=started,
+        on_stream_finished=finished,
+    )
+    assert w._stream_started_callback is started
+    assert w._stream_finished_callback is finished
 
 
 def test_create_watcher_folder():

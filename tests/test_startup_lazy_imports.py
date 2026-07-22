@@ -45,6 +45,15 @@ leaked = [name for name in {_HEAVY_MODULES!r} if name in sys.modules]
 print(",".join(leaked))
 """
 
+_MATPLOTLIB_BACKEND_CHECK_SCRIPT = """
+import sys
+import web_app
+import matplotlib
+
+print(matplotlib.get_backend())
+print(",".join(name for name in sys.modules if name.startswith("PyQt5")) or "-")
+"""
+
 
 def test_creating_ui_does_not_load_heavy_deps():
     """`import web_app` and `create_ui()` must not pull in faster_whisper /
@@ -66,3 +75,25 @@ def test_creating_ui_does_not_load_heavy_deps():
     )
     leaked = result.stdout.strip()
     assert leaked == "", f"heavy module(s) loaded by import web_app + create_ui(): {leaked}"
+
+
+def test_web_app_forces_headless_matplotlib_backend():
+    """The browser UI must not load Qt's native DLLs into the Whisper process."""
+    if importlib.util.find_spec("gradio") is None:
+        pytest.skip("gradio not installed")
+    if importlib.util.find_spec("matplotlib") is None:
+        pytest.skip("matplotlib not installed")
+
+    result = subprocess.run(
+        [sys.executable, "-c", _MATPLOTLIB_BACKEND_CHECK_SCRIPT],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, (
+        f"Matplotlib backend check failed in subprocess:\n{result.stdout}\n{result.stderr}"
+    )
+    backend, pyqt_modules = result.stdout.strip().splitlines()
+    assert backend.lower() == "agg"
+    assert pyqt_modules == "-"

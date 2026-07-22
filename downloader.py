@@ -37,6 +37,12 @@ def download_video(url: str, output_dir: Path) -> Path:
         "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "merge_output_format": "mp4",
         "outtmpl": output_template,
+        # Keep yt-dlp's default Deno candidate and add the Node.js runtime
+        # installed by setup.bat. Node must be opted into explicitly.
+        "js_runtimes": {
+            "deno": {"path": None},
+            "node": {"path": None},
+        },
         "retries": 10,
         "fragment_retries": 10,
         "file_access_retries": 5,

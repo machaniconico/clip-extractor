@@ -144,11 +144,13 @@ echo [OK] CUDA libraries installed (if GPU available)
 echo.
 echo [7/7] Creating desktop shortcut with icon...
 powershell -NoProfile -Command "try { $desktop = [Environment]::GetFolderPath('Desktop'); $ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut(\"$desktop\Clip Extractor.lnk\"); $sc.TargetPath = '%~dp0Clip Extractor.bat'; $sc.WorkingDirectory = '%~dp0'; $iconPath = '%~dp0assets\icon.ico'; if (Test-Path $iconPath) { $sc.IconLocation = $iconPath } else { Write-Host '[WARN] assets\icon.ico not found, using default icon' }; $sc.Description = 'Clip Extractor - highlight detection + video clipping'; $sc.Save(); Write-Host '[OK] Desktop shortcut created with icon' } catch { Write-Host '[WARN] Could not create shortcut:' $_.Exception.Message }"
+powershell -NoProfile -Command "try { $desktop = [Environment]::GetFolderPath('Desktop'); $ws = New-Object -ComObject WScript.Shell; $sc = $ws.CreateShortcut(\"$desktop\Clip Extractor + OBS.lnk\"); $sc.TargetPath = '%~dp0Clip Extractor.bat'; $sc.Arguments = '--with-obs'; $sc.WorkingDirectory = '%~dp0'; $iconPath = '%~dp0assets\icon.ico'; if (Test-Path $iconPath) { $sc.IconLocation = $iconPath }; $sc.Description = 'Launch OBS Studio and Clip Extractor together'; $sc.Save(); Write-Host '[OK] OBS combined desktop shortcut created' } catch { Write-Host '[WARN] Could not create OBS shortcut:' $_.Exception.Message }"
 
 echo.
 echo ==========================================
 echo   Setup complete!
 echo   Launch via "Clip Extractor.bat" or
-echo   the desktop shortcut.
+echo   the desktop shortcut. Use "Clip Extractor + OBS"
+echo   to launch both applications together.
 echo ==========================================
 pause
