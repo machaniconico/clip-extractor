@@ -201,6 +201,64 @@ def test_render_phase_uses_edited_highlights(monkeypatch, tmp_path):
     assert passed["start_sec"] == 2.5
     assert passed["end_sec"] == 7.5
     assert passed["title"] == "Edited title"
+    assert len(result) == 6
+    premiere_job = result[5]
+    assert premiere_job["project_name"] == session["video_path"].stem
+    assert [Path(path).name for path in premiere_job["clip_paths"]] == ["clip.mp4"]
+    assert all(Path(path).is_absolute() for path in premiere_job["clip_paths"])
+    assert Path(premiere_job["xml_paths"][0]).is_file()
+
+
+def test_chapters_only_render_clears_stale_premiere_job(tmp_path):
+    session = _session(tmp_path)
+    session["modes"]["enable_clips"] = False
+    session["_premiere_output"] = {"clip_paths": ["stale.mp4"]}
+
+    result = web_app.render_phase(
+        session,
+        "combined",
+        False,
+        "crop",
+        "center",
+        True,
+        False,
+        False,
+        False,
+        "Noto Sans JP",
+        96,
+        "#FFFFFF",
+        False,
+        False,
+        progress=_progress,
+    )
+
+    assert len(result) == 6
+    assert result[5] is None
+    assert "_premiere_output" not in session
+
+
+def test_new_detect_without_auto_render_clears_previous_premiere_state():
+    result = web_app.maybe_render_phase(
+        False,
+        {"video_path": "new-source.mp4"},
+        "combined",
+        False,
+        "crop",
+        "center",
+        True,
+        False,
+        False,
+        False,
+        "Noto Sans JP",
+        96,
+        "#FFFFFF",
+        False,
+        False,
+        progress=_progress,
+    )
+
+    assert len(result) == 6
+    assert result[5] is None
 
 
 def test_edited_highlights_flow_into_srt_and_xml_duration(tmp_path):

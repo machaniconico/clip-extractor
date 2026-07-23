@@ -32,8 +32,8 @@ class ProcessResult:
 
     Fields line up with the Gradio outputs wired in render_btn.click:
     (log_output, highlights_output, download_output, drive_link_output,
-    chapters_output). Building this dataclass instead of scattering raw
-    5-tuples across every return statement keeps the field order in one
+    chapters_output, premiere_job_state). Building this dataclass instead of
+    scattering raw tuples across every return statement keeps the field order in one
     place — adding/removing a field no longer requires touching every
     early-exit and error branch.
 
@@ -45,6 +45,7 @@ class ProcessResult:
     download_path: Path | None = None
     drive_link: str = ""
     chapters_text: str = ""
+    premiere_job: dict | None = None
 
     def as_gradio_outputs(self) -> tuple:
         """Order matches render_btn.click(outputs=[...])."""
@@ -54,6 +55,7 @@ class ProcessResult:
             self.download_path,
             self.drive_link,
             self.chapters_text,
+            self.premiere_job,
         )
 
 
@@ -225,6 +227,7 @@ def load_defaults() -> dict:
         "whisper_model": "large-v3", "language": "ja",
         "font_name": "Noto Sans JP Black", "font_size": 96, "font_color": "#FFFFFF",
         "output_base_dir": "",
+        "premiere_executable_path": "",
         "obs_launch_on_startup": False,
         "obs_executable_path": "",
     }
@@ -248,6 +251,7 @@ def save_defaults(ai_provider, ai_model,
                   generate_thumbnails=False,
                   audio_fusion=False, audio_alpha=0.35,
                   karaoke=False,
+                  premiere_executable_path="",
                   obs_launch_on_startup=False,
                   obs_executable_path=""):
     """Save current settings as defaults."""
@@ -269,6 +273,7 @@ def save_defaults(ai_provider, ai_model,
         "audio_fusion": bool(audio_fusion),
         "audio_alpha": float(audio_alpha),
         "karaoke": bool(karaoke),
+        "premiere_executable_path": (premiere_executable_path or "").strip(),
         "obs_launch_on_startup": bool(obs_launch_on_startup),
         "obs_executable_path": (obs_executable_path or "").strip(),
     }
@@ -393,12 +398,52 @@ import clipper
 from clipper import extract_clips, generate_thumbnails as generate_thumbnail_candidates, get_video_info
 from subtitles import generate_all_karaoke_ass, generate_all_srts
 from premiere_xml import generate_combined_xml, generate_individual_xmls
+from premiere_bridge import (
+    get_bridge_status_text,
+    open_plugin_installer,
+    request_premiere_edit,
+)
 from drive_upload import upload_output_directory, is_configured as drive_is_configured
 from modes import GenerationModes
 import youtube_api
 
 
 _MIN_REVIEW_CLIP_DURATION_SEC = 0.1
+
+
+def install_premiere_plugin_ui() -> str:
+    """Open the CCX installer and keep errors inside the Gradio event."""
+    try:
+        return open_plugin_installer()
+    except Exception as exc:
+        logger.exception("Premiere plugin installer failed")
+        message = f"Premiere連携プラグインを開けません: {exc}"
+        gr.Warning(message)
+        return message
+
+
+def request_premiere_edit_ui(
+    premiere_job: dict | None,
+    include_shorts: bool,
+    executable_path: str,
+) -> str:
+    """Queue one rendered output for Premiere and return reader-facing status."""
+    try:
+        return request_premiere_edit(
+            premiere_job,
+            include_shorts=bool(include_shorts),
+            executable_path=executable_path or "",
+        )
+    except Exception as exc:
+        logger.exception("Premiere edit request failed")
+        message = f"Premiere連携エラー: {exc}"
+        gr.Warning(message)
+        return message
+
+
+def clear_premiere_job_state() -> None:
+    """Invalidate the previous render before a new Detect or Render starts."""
+    return None
 
 
 def _format_highlight_timestamp(seconds: float) -> str:
@@ -771,7 +816,9 @@ def render_phase(
             log="Error: 先に Detect を実行してください / Run Detect before Render.",
         ).as_gradio_outputs()
 
+    session.pop("_premiere_output", None)
     logs = list(session.get("logs") or [])
+    premiere_output = None
 
     def log(msg: str):
         logger.info(msg)
@@ -840,6 +887,7 @@ def render_phase(
         shorts_srt_paths: list[Path] = []
         shorts_ass_paths: list[Path] = []
         thumbnail_paths: list[Path] = []
+        xml_paths: list[Path] = []
 
         if modes.enable_clips:
             progress(0.6, desc="[Step 4/6] Extracting clips...")
@@ -901,29 +949,48 @@ def render_phase(
             log("[Step 6/6] Exporting Premiere Pro XML...")
             if output_mode == "combined":
                 xml_path = output_dir / "project.xml"
-                generate_combined_xml(
-                    clip_paths, highlights, video_info, xml_path,
-                    project_name=video_path.stem,
+                xml_paths.append(
+                    generate_combined_xml(
+                        clip_paths, highlights, video_info, xml_path,
+                        project_name=video_path.stem,
+                    )
                 )
                 if generate_shorts and shorts_paths:
                     shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                    generate_combined_xml(
-                        shorts_paths, highlights, shorts_video_info,
-                        output_dir / "project_shorts.xml",
-                        project_name=f"{video_path.stem}_shorts",
+                    xml_paths.append(
+                        generate_combined_xml(
+                            shorts_paths, highlights, shorts_video_info,
+                            output_dir / "project_shorts.xml",
+                            project_name=f"{video_path.stem}_shorts",
+                        )
                     )
                 log("  Premiere Pro XML (combined mode) exported")
             else:
-                generate_individual_xmls(
-                    clip_paths, highlights, video_info, clips_dir,
+                xml_paths.extend(
+                    generate_individual_xmls(
+                        clip_paths, highlights, video_info, clips_dir,
+                    )
                 )
                 if generate_shorts and shorts_paths:
                     shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                    generate_individual_xmls(
-                        shorts_paths, highlights,
-                        shorts_video_info, output_dir / "shorts",
+                    xml_paths.extend(
+                        generate_individual_xmls(
+                            shorts_paths, highlights,
+                            shorts_video_info, output_dir / "shorts",
+                        )
                     )
                 log("  Premiere Pro XML (individual mode) exported")
+
+            if clip_paths:
+                premiere_output = {
+                    "output_dir": str(output_dir.resolve()),
+                    "project_name": video_path.stem,
+                    "clip_paths": [str(path.resolve()) for path in clip_paths],
+                    "shorts_paths": [str(path.resolve()) for path in shorts_paths],
+                    "srt_paths": [str(path.resolve()) for path in srt_paths],
+                    "xml_paths": [str(path.resolve()) for path in xml_paths],
+                }
+                session["_premiere_output"] = premiere_output
         else:
             log("[Skip 4-6] Clip generation disabled — chapters-only run")
 
@@ -985,6 +1052,7 @@ def render_phase(
             download_path=zip_path,
             drive_link=drive_link,
             chapters_text=chapters_text,
+            premiere_job=premiere_output,
         ).as_gradio_outputs()
 
     except subprocess.CalledProcessError as e:
@@ -1029,7 +1097,10 @@ def maybe_render_phase(
     STEP 2 still behaves exactly as before.
     """
     if not auto_run or not isinstance(session, dict) or not session.get("video_path"):
-        return tuple(gr.update() for _ in range(5))
+        # A new Detect invalidates the previous render's Premiere payload even
+        # when automatic STEP 2 is disabled. Keep the five visible outputs but
+        # explicitly clear the hidden Premiere job state.
+        return tuple(gr.update() for _ in range(5)) + (None,)
     return render_phase(
         session,
         output_mode,
@@ -2786,6 +2857,7 @@ def create_ui():
 
                 session_state = gr.State({})
                 highlights_state = gr.State([])
+                premiere_job_state = gr.State(None)
 
                 with gr.Row():
                     detect_btn = gr.Button(
@@ -2983,6 +3055,37 @@ def create_ui():
                             outputs=None,
                         )
 
+                        gr.HTML("<h3 style='margin-top: 1.5em;'>Adobe Premiere Pro 連携</h3>")
+                        premiere_executable_path = gr.Textbox(
+                            label="Premiere Pro実行ファイルのパス",
+                            value=defaults.get("premiere_executable_path", ""),
+                            placeholder=r"C:\Program Files\Adobe\Adobe Premiere Pro 2026\Adobe Premiere Pro.exe",
+                            info="空欄なら自動検出します。検出できない場合だけ Adobe Premiere Pro.exe のフルパスを指定してください。",
+                        )
+                        with gr.Row():
+                            premiere_install_settings_btn = gr.Button(
+                                "連携プラグインをインストール",
+                                variant="primary",
+                            )
+                            premiere_refresh_settings_btn = gr.Button(
+                                "連携状態を更新",
+                                variant="secondary",
+                            )
+                        premiere_settings_status = gr.Textbox(
+                            label="Premiere連携ステータス",
+                            value=get_bridge_status_text(),
+                            interactive=False,
+                            lines=3,
+                        )
+                        premiere_install_settings_btn.click(
+                            fn=install_premiere_plugin_ui,
+                            outputs=premiere_settings_status,
+                        )
+                        premiere_refresh_settings_btn.click(
+                            fn=get_bridge_status_text,
+                            outputs=premiere_settings_status,
+                        )
+
                         gr.HTML("<h3 style='margin-top: 1.5em;'>OBS Studio 起動</h3>")
                         obs_launch_on_startup = gr.Checkbox(
                             label="Clip Extractor起動時にOBS Studioも起動",
@@ -3164,6 +3267,7 @@ def create_ui():
                             generate_thumbnails,
                             audio_fusion, audio_alpha,
                             karaoke,
+                            premiere_executable_path,
                             obs_launch_on_startup, obs_executable_path],
                     outputs=save_defaults_msg,
                 )
@@ -3196,6 +3300,68 @@ def create_ui():
                         lines=8,
                         interactive=False,
                     )
+
+                with gr.Group():
+                    gr.Markdown(
+                        "### Adobe Premiere Proへ送る\n"
+                        "書き出した動画を現在のプロジェクトへ読み込み、"
+                        "各クリップのシーケンスを自動作成します。初回だけ連携プラグインを導入してください。"
+                    )
+                    with gr.Row():
+                        premiere_edit_btn = gr.Button(
+                            "Premiere Proで編集",
+                            variant="primary",
+                            size="lg",
+                        )
+                        premiere_include_shorts = gr.Checkbox(
+                            label="ショート動画も読み込む",
+                            value=True,
+                        )
+                    with gr.Row():
+                        premiere_install_output_btn = gr.Button(
+                            "連携プラグインをインストール",
+                            variant="secondary",
+                        )
+                        premiere_refresh_output_btn = gr.Button(
+                            "連携状態を更新",
+                            variant="secondary",
+                        )
+                    premiere_output_status = gr.Textbox(
+                        label="Premiere連携ステータス",
+                        value=get_bridge_status_text(),
+                        interactive=False,
+                        lines=4,
+                    )
+                    premiere_edit_btn.click(
+                        fn=request_premiere_edit_ui,
+                        inputs=[
+                            premiere_job_state,
+                            premiere_include_shorts,
+                            premiere_executable_path,
+                        ],
+                        outputs=premiere_output_status,
+                        concurrency_limit=1,
+                    )
+                    premiere_install_output_btn.click(
+                        fn=install_premiere_plugin_ui,
+                        outputs=premiere_output_status,
+                    )
+                    premiere_refresh_output_btn.click(
+                        fn=get_bridge_status_text,
+                        outputs=premiere_output_status,
+                    )
+
+                    _premiere_timer = None
+                    if hasattr(gr, "Timer"):
+                        try:
+                            _premiere_timer = gr.Timer(value=2.0)
+                        except Exception:
+                            _premiere_timer = None
+                    if _premiere_timer is not None:
+                        _premiere_timer.tick(
+                            fn=get_bridge_status_text,
+                            outputs=premiere_output_status,
+                        )
 
             # --- OBS連携 Tab ---
             with gr.Tab("OBS連携 / OBS"):
@@ -3288,6 +3454,9 @@ def create_ui():
                     _obs_timer.tick(fn=_obs_status_poll, outputs=obs_status_box)
 
         detect_event = detect_btn.click(
+            fn=clear_premiere_job_state,
+            outputs=premiere_job_state,
+        ).then(
             fn=detect_phase,
             inputs=[
                 input_url, input_file,
@@ -3324,11 +3493,21 @@ def create_ui():
                 generate_thumbnails,
                 karaoke,
             ],
-            outputs=[log_output, highlights_output, download_output, drive_link_output, chapters_output],
+            outputs=[
+                log_output,
+                highlights_output,
+                download_output,
+                drive_link_output,
+                chapters_output,
+                premiere_job_state,
+            ],
             concurrency_limit=1,
         )
 
         render_btn.click(
+            fn=clear_premiere_job_state,
+            outputs=premiere_job_state,
+        ).then(
             fn=render_phase,
             inputs=[
                 session_state,
@@ -3346,7 +3525,14 @@ def create_ui():
                 generate_thumbnails,
                 karaoke,
             ],
-            outputs=[log_output, highlights_output, download_output, drive_link_output, chapters_output],
+            outputs=[
+                log_output,
+                highlights_output,
+                download_output,
+                drive_link_output,
+                chapters_output,
+                premiere_job_state,
+            ],
             concurrency_limit=1,
         )
 
@@ -3390,8 +3576,9 @@ def create_ui():
 ### 基本的な使い方
 1. **Input** タブでYouTube URLを貼り付けるか、動画ファイルをアップロード
 2. クリップ数や出力モードを設定
-3. **Generate Clips** ボタンをクリック
-4. **Output** タブで結果を確認、ZIPファイルをダウンロード
+3. **STEP 1：AIがおすすめ箇所を抽出** → 内容を確認
+4. **STEP 2：クリップを書き出し** をクリック
+5. **Output** タブで結果を確認し、必要ならPremiere Proへ送る
 
 ### 分析 AI の準備 (Gemini を使う場合)
 Gemini は**無料枠あり・クレカ登録不要**で一番手軽です。
@@ -3404,11 +3591,17 @@ Gemini は**無料枠あり・クレカ登録不要**で一番手軽です。
 > ⚠️ この Gemini API キーと、下で説明する `credentials.json` (YouTube/Drive 連携用) は**別物**です。
 
 ### Premiere Pro での読み込み
-1. ダウンロードしたZIPを展開
-2. Premiere Pro → File → Import → `project.xml` を選択
-3. 各シーケンスにクリップが配置済み
-4. SRTファイルをキャプションとしてインポート
-5. フォント・位置・カット位置を自由に調整
+初回だけ、Output または Settings の
+**「連携プラグインをインストール」**を押し、Creative Cloudで許可して
+Premiere Proを再起動します。
+
+1. STEP 2の書き出し完了後、Outputの **「Premiere Proで編集」** をクリック
+2. Premiere Proが自動起動し、書き出した動画を現在のプロジェクトへ読み込み
+3. 各動画のシーケンスが作成され、最初のシーケンスが開く
+4. SRTファイルは必要に応じてキャプションとして読み込み、フォントや位置を調整
+
+連携プラグインを使えない場合も、従来どおり
+Premiere Pro → File → Import → `project.xml` で手動読み込みできます。
 
 ### Photoshopでテロップを編集する方法
 1. SRTキャプションをタイムライン上で選択

@@ -1,0 +1,34 @@
+{
+  "manifestVersion": 5,
+  "id": "com.macha.clip-extractor.premiere-bridge",
+  "name": "Clip Extractor Premiere Bridge",
+  "shortname": "ClipExtractorBridge",
+  "version": "1.0.0",
+  "main": "index.js",
+  "host": {
+    "app": "premierepro",
+    "minVersion": "25.6.0"
+  },
+  "hostUIContext": {
+    "hideFromMenu": true
+  },
+  "requiredPermissions": {
+    "localFileSystem": "fullAccess",
+    "network": {
+      "domains": [
+        "http://127.0.0.1:43127",
+        "http://127.0.0.1:43128",
+        "http://127.0.0.1:43129"
+      ]
+    }
+  },
+  "entrypoints": [
+    {
+      "type": "command",
+      "id": "bridge",
+      "label": {
+        "default": "Clip Extractor Bridge"
+      }
+    }
+  ]
+}
