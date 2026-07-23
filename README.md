@@ -13,7 +13,7 @@ YouTube 配信アーカイブ（または手元の動画ファイル）から、
 - **サムネイル候補の自動生成** — 代表フレームを抽出し、タイトルを焼き込んだ候補画像を生成
 - **音声の盛り上がり融合** — 音量（dBFS）カーブ＋スパイク検出で「盛り上がりスコア」を作り、AI のハイライト順位に融合して再ランク（失敗時は元の順位を維持する fail-open）
 - **概要欄タイムスタンプ生成** — チャプター（タイムスタンプ）テキストを生成。YouTube の概要欄へ自動追記も可能
-- **Premiere Pro 連携** — combined / individual の XML を書き出し
+- **Premiere Pro 連携** — ボタン1つで書き出し済みクリップを読み込み、シーケンスを自動作成。combined / individual の XML 手動読み込みも維持
 - **2フェーズ Web UI** — 「検出」と「レンダリング」を分離。検出後に各クリップの **イン/アウト点・タイトルをプレビューしながら編集** してから書き出せる（再文字起こし不要）
 - **外部連携（任意）** — YouTube 概要欄への自動追記、Google Drive へのアップロード
 
@@ -32,7 +32,7 @@ YouTube 配信アーカイブ（または手元の動画ファイル）から、
         ├─ カラオケ字幕（--karaoke）
         └─ サムネ候補（--thumbnails）
   └─ 概要欄タイムスタンプ生成（+ 任意で YouTube へ追記）
-  └─ Premiere Pro 用 XML 書き出し
+  └─ Premiere Proへ直接送信（または XML 書き出し）
 ```
 
 ---
@@ -41,6 +41,7 @@ YouTube 配信アーカイブ（または手元の動画ファイル）から、
 
 - **Python 3.10+**
 - **ffmpeg / ffprobe** — 切り抜き・ショート・サムネ生成に必須（PATH に通しておくこと）
+- **Adobe Premiere Pro 25.6+** — 「Premiere Proで編集」を使う場合のみ
 - **ハイライト検出に使う AI**（いずれか1つ）
   - **Claude**（CLI 既定）: `claude` CLI が必要 — `npm install -g @anthropic-ai/claude-code`
   - **OpenAI**: `OPENAI_API_KEY`
@@ -115,6 +116,21 @@ Settings / 設定タブの **「Clip Extractor起動時にOBS Studioも起動」
 - AI プロバイダ（Claude / OpenAI / Gemini）とモデルを画面で選択
 - Gemini の API キーは画面から保存可能（`.gemini_key` に保存され、`GEMINI_API_KEY` 環境変数より優先）。取得手順は Settings タブの「📘 Gemini APIキーの取得手順」アコーディオンにも掲載
 - 「検出」後に各クリップのイン/アウト点・タイトルを編集してから「レンダリング」（再文字起こしは走りません）
+
+### Premiere Proへ直接送る
+
+初回だけ、Web UIの Output または Settings にある
+**「連携プラグインをインストール」**を押します。Creative Cloudの確認画面で
+インストールとローカルファイルアクセスを許可し、Premiere Proを再起動してください。
+
+以降は切り抜き書き出し後、Outputの **「Premiere Proで編集」** を押すだけです。
+Premiere Proを自動起動し、書き出したクリップ（任意でショートも）を現在の
+プロジェクトへ読み込み、動画ごとのシーケンスを作って最初のシーケンスを開きます。
+プロジェクトが開かれていない場合は、書き出し先に新しい `.prproj` を作成します。
+
+連携はPC内の `127.0.0.1` 専用ポートだけを使い、外部ネットワークには公開しません。
+プラグインを使えない環境では、従来どおり生成済みの `project.xml` を
+Premiere Proの File → Import から読み込めます。
 
 ### コマンドライン（main.py）
 
@@ -207,4 +223,5 @@ YouTube / Drive 連携のセットアップ手順は `CREDENTIALS_SETUP.txt` を
 | `subtitles.py` | SRT / カラオケ ASS 字幕生成 |
 | `chapters.py` | 概要欄タイムスタンプ生成 |
 | `premiere_xml.py` | Premiere Pro 用 XML 書き出し |
+| `premiere_bridge.py` / `premiere_uxp/` | Premiere Proへの直接送信とUXPプラグイン |
 | `youtube_api.py` / `drive_upload.py` / `_google_auth.py` | YouTube / Drive 連携 |

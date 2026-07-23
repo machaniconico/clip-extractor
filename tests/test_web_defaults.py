@@ -37,6 +37,7 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         generate_thumbnails=False,
         audio_fusion=False, audio_alpha=0.35,
         karaoke=False,
+        premiere_executable_path="",
         obs_launch_on_startup=False,
         obs_executable_path="",
     )
@@ -56,6 +57,7 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         args["generate_thumbnails"],
         args["audio_fusion"], args["audio_alpha"],
         args["karaoke"],
+        args["premiere_executable_path"],
         args["obs_launch_on_startup"],
         args["obs_executable_path"],
     )
@@ -112,6 +114,22 @@ def test_roundtrip_obs_launch_fields(monkeypatch, tmp_path):
 
     assert loaded["obs_launch_on_startup"] is True, loaded
     assert loaded["obs_executable_path"] == "C:/Portable OBS/obs64.exe", loaded
+
+
+def test_roundtrip_premiere_executable_path(monkeypatch, tmp_path):
+    loaded = _save_with(
+        monkeypatch,
+        tmp_path,
+        premiere_executable_path=(
+            "  C:/Program Files/Adobe/Adobe Premiere Pro 2026/"
+            "Adobe Premiere Pro.exe  "
+        ),
+    )
+
+    assert loaded["premiere_executable_path"] == (
+        "C:/Program Files/Adobe/Adobe Premiere Pro 2026/"
+        "Adobe Premiere Pro.exe"
+    )
 
 
 def test_does_not_touch_real_settings(monkeypatch, tmp_path):
