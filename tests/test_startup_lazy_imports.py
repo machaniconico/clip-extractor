@@ -38,10 +38,13 @@ _HEAVY_MODULES = ("faster_whisper", "yt_dlp", "googleapiclient", "google_auth_oa
 _CHECK_SCRIPT = f"""
 import sys
 import web_app
+import premiere_bridge
 
 app = web_app.create_ui()
 
 leaked = [name for name in {_HEAVY_MODULES!r} if name in sys.modules]
+if premiere_bridge.get_bridge(start=False) is not None:
+    leaked.append("premiere_bridge_server")
 print(",".join(leaked))
 """
 

@@ -40,6 +40,74 @@ def _click_input_names(module: ast.Module, button_name: str) -> list[str]:
     raise AssertionError(f"{button_name}.click(inputs=[...]) not found")
 
 
+def _event_output_names(
+    module: ast.Module,
+    function_name: str,
+    event_method: str = "click",
+) -> list[str]:
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == event_method
+        ):
+            continue
+        callback_name = None
+        for keyword in node.keywords:
+            if keyword.arg == "fn" and isinstance(keyword.value, ast.Name):
+                callback_name = keyword.value.id
+        if callback_name != function_name:
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "outputs":
+                continue
+            assert isinstance(keyword.value, ast.List), ast.dump(keyword.value)
+            names = []
+            for elt in keyword.value.elts:
+                assert isinstance(elt, ast.Name), ast.dump(elt)
+                names.append(elt.id)
+            return names
+    raise AssertionError(
+        f"{event_method}(fn={function_name}, outputs=[...]) not found"
+    )
+
+
+def _event_input_names(
+    module: ast.Module,
+    function_name: str,
+    event_method: str,
+) -> list[str]:
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == event_method
+        ):
+            continue
+        callback_name = None
+        for keyword in node.keywords:
+            if keyword.arg == "fn" and isinstance(keyword.value, ast.Name):
+                callback_name = keyword.value.id
+        if callback_name != function_name:
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "inputs":
+                continue
+            assert isinstance(keyword.value, ast.List), ast.dump(keyword.value)
+            names = []
+            for elt in keyword.value.elts:
+                assert isinstance(elt, ast.Name), ast.dump(elt)
+                names.append(elt.id)
+            return names
+    raise AssertionError(
+        f"{event_method}(fn={function_name}, inputs=[...]) not found"
+    )
+
+
 def _string_constant(module: ast.Module, name: str) -> str:
     for node in module.body:
         if not isinstance(node, ast.Assign):
@@ -55,7 +123,7 @@ def test_detect_phase_signature_matches_detect_inputs():
     module = _module()
     args = _function_args(module, "detect_phase")
     args = [arg for arg in args if arg != "progress"]
-    assert args == _click_input_names(module, "detect_btn")
+    assert args == _event_input_names(module, "detect_phase", "then")
     assert args[-3:] == ["audio_fusion", "audio_alpha", "output_base_dir"]
 
 
@@ -63,10 +131,10 @@ def test_render_phase_signature_matches_render_inputs():
     module = _module()
     args = _function_args(module, "render_phase")
     args = [arg for arg in args if arg != "progress"]
-    click_inputs = _click_input_names(module, "render_btn")
+    render_inputs = _event_input_names(module, "render_phase", "then")
     assert args[0] == "session"
-    assert click_inputs[0] == "session_state"
-    assert args[1:] == click_inputs[1:]
+    assert render_inputs[0] == "session_state"
+    assert args[1:] == render_inputs[1:]
     assert args[-2:] == ["generate_thumbnails", "karaoke"]
 
 
@@ -84,6 +152,29 @@ def test_settings_exposes_obs_startup_checkbox_and_executable_path():
     assert 'label="OBS実行ファイルのパス"' in source
     assert "obs_launch_on_startup" in _click_input_names(_module(), "save_defaults_btn")
     assert "obs_executable_path" in _click_input_names(_module(), "save_defaults_btn")
+
+
+def test_premiere_button_and_render_state_are_wired():
+    module = _module()
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert 'label="Premiere Pro実行ファイルのパス"' in source
+    assert '"Premiere Proで編集"' in source
+    assert _click_input_names(module, "premiere_edit_btn") == [
+        "premiere_job_state",
+        "premiere_include_shorts",
+        "premiere_executable_path",
+    ]
+    assert _event_output_names(
+        module,
+        "render_phase",
+        "then",
+    )[-1] == "premiere_job_state"
+    assert source.count("fn=clear_premiere_job_state") == 2
+    assert "premiere_executable_path" in _click_input_names(
+        module,
+        "save_defaults_btn",
+    )
 
 
 def test_direct_web_entry_applies_saved_obs_launch_setting():
