@@ -122,7 +122,11 @@ def _string_constant(module: ast.Module, name: str) -> str:
 def test_detect_phase_signature_matches_detect_inputs():
     module = _module()
     args = _function_args(module, "detect_phase")
-    args = [arg for arg in args if arg != "progress"]
+    args = [
+        arg
+        for arg in args
+        if arg not in {"progress", "video_downloader"}
+    ]
     assert args == _event_input_names(module, "detect_phase", "then")
     assert args[-3:] == ["audio_fusion", "audio_alpha", "output_base_dir"]
 

@@ -268,8 +268,9 @@ def test_obs_archive_callback_runs_without_local_recording(monkeypatch):
         _capture_pipeline(url, settings)
         return "[OBS] Render 完了"
 
-    def fake_pipeline_outcome(url, settings):
+    def fake_pipeline_outcome(url, settings, **kwargs):
         _capture_pipeline(url, settings)
+        captured["pipeline_kwargs"] = kwargs
         return SimpleNamespace(
             log="[OBS] Render 完了",
             success=True,
@@ -300,6 +301,7 @@ def test_obs_archive_callback_runs_without_local_recording(monkeypatch):
     assert captured["url"].endswith("dQw4w9WgXcQ")
     assert captured["settings"]["enable_clips"] is True
     assert captured["settings"]["enable_chapters"] is True
+    assert captured["pipeline_kwargs"]["post_live"] is True
     assert "配信終了を検知" in web_app._obs_status_text()
 
 
@@ -347,6 +349,32 @@ def test_resolve_cached_archive_waits_for_complete_before_processing(monkeypatch
 
     assert lifecycle_calls == ["dQw4w9WgXcQ", "dQw4w9WgXcQ"]
     assert result["url"].endswith("dQw4w9WgXcQ")
+
+
+def test_resolve_post_live_returns_before_vod_processing(monkeypatch):
+    service = object()
+    processing_called = []
+    monkeypatch.setattr(web_app.youtube_api, "get_youtube_service", lambda: service)
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "get_broadcast_lifecycle_status",
+        lambda _service, _video_id: "complete",
+    )
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "get_archive_processing_state",
+        lambda *_args: processing_called.append(True),
+    )
+
+    result = web_app._resolve_obs_youtube_archive(
+        {"video_id": "post-live-id", "title": "archive"},
+        datetime.now(timezone.utc),
+        lambda: True,
+        wait_for_processed=False,
+    )
+
+    assert result["url"].endswith("post-live-id")
+    assert processing_called == []
 
 
 def test_archive_api_transient_errors_are_retried(monkeypatch):
@@ -704,7 +732,14 @@ def test_consecutive_streams_resolve_in_order_and_exclude_first_id(monkeypatch):
         lambda _service, **_kwargs: set(),
     )
 
-    def fake_resolver(cached, _stopped, _current, excluded=None, *_args):
+    def fake_resolver(
+        cached,
+        _stopped,
+        _current,
+        excluded=None,
+        *_args,
+        **_kwargs,
+    ):
         resolve_exclusions.append(set(excluded or set()))
         if len(resolve_exclusions) == 1:
             assert cached["video_id"] == "first-stream"
@@ -720,7 +755,7 @@ def test_consecutive_streams_resolve_in_order_and_exclude_first_id(monkeypatch):
             "url": "https://www.youtube.com/watch?v=second-stream",
         }
 
-    def fake_pipeline(url, _settings):
+    def fake_pipeline(url, _settings, **_kwargs):
         pipeline_urls.append(url)
         if len(pipeline_urls) == 2:
             pipelines_done.set()
@@ -780,7 +815,7 @@ def test_archive_failure_is_retryable_for_the_same_video_id(monkeypatch):
     def fake_pipeline(_url, _settings):
         return "[OBS] Render 完了" if _next_result() else "Error: first attempt failed"
 
-    def fake_pipeline_outcome(_url, _settings):
+    def fake_pipeline_outcome(_url, _settings, **_kwargs):
         success = _next_result()
         return SimpleNamespace(
             log="[OBS] Render 完了" if success else "Error: first attempt failed",
@@ -801,15 +836,11 @@ def test_archive_failure_is_retryable_for_the_same_video_id(monkeypatch):
     deadline = time.time() + 5
     while len(calls) < 1 and time.time() < deadline:
         time.sleep(0.01)
-    deadline = time.time() + 5
-    while "YouTubeアーカイブ処理エラー" not in web_app._obs_status_text() and time.time() < deadline:
-        time.sleep(0.01)
-    time.sleep(0.05)
+    assert second_call.wait(timeout=5)
     finished(None)
 
-    assert second_call.wait(timeout=5)
     assert calls == [1, 2]
-    assert resolve_calls == [1]
+    assert resolve_calls == [1, 1]
 
 
 def test_completed_archive_ignores_duplicate_stop_event(monkeypatch):
@@ -827,7 +858,7 @@ def test_completed_archive_ignores_duplicate_stop_event(monkeypatch):
         },
     )
 
-    def fake_pipeline(_url, _settings):
+    def fake_pipeline(_url, _settings, **_kwargs):
         calls.append(1)
         completed.set()
         return SimpleNamespace(log="[OBS] Render 完了", success=True, error="")
@@ -838,7 +869,7 @@ def test_completed_archive_ignores_duplicate_stop_event(monkeypatch):
     finished(None)
     assert completed.wait(timeout=5)
     deadline = time.time() + 5
-    while "アーカイブ自動処理完了" not in web_app._obs_status_text() and time.time() < deadline:
+    while "post-live DVRから自動処理完了" not in web_app._obs_status_text() and time.time() < deadline:
         time.sleep(0.01)
     finished(None)
     time.sleep(0.1)
@@ -945,6 +976,108 @@ def test_archive_local_fallback_forces_clips_and_timestamps(tmp_path, monkeypatc
     finished(str(recording))
     time.sleep(0.1)
     assert fallback_calls == [1]
+
+
+def test_three_source_chain_prefers_stable_obs_recording(tmp_path, monkeypatch):
+    import obs_integration
+
+    with web_app._obs_status_lock:
+        web_app._obs_status_lines.clear()
+    recording = tmp_path / "local.mkv"
+    recording.write_bytes(b"recording")
+    completed = threading.Event()
+    calls = []
+
+    monkeypatch.setattr(
+        web_app,
+        "_resolve_obs_youtube_archive",
+        lambda *_args, **_kwargs: {
+            "video_id": "local-first",
+            "url": "https://www.youtube.com/watch?v=local-first",
+        },
+    )
+    monkeypatch.setattr(
+        obs_integration,
+        "wait_until_file_stable",
+        lambda *_args, **_kwargs: True,
+    )
+
+    def fake_local(path, url, settings):
+        calls.append(("local", path, url, settings))
+        completed.set()
+        return SimpleNamespace(log="local ok", success=True, error="")
+
+    monkeypatch.setattr(
+        web_app,
+        "_run_obs_local_youtube_pipeline_outcome",
+        fake_local,
+    )
+    monkeypatch.setattr(
+        web_app,
+        "_run_obs_youtube_pipeline_outcome",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("YouTube sources must not run after local success")
+        ),
+    )
+
+    _started, finished = web_app._obs_make_archive_callbacks(True, {})
+    finished(str(recording))
+
+    assert completed.wait(timeout=5)
+    assert calls[0][0] == "local"
+    deadline = time.time() + 5
+    while "OBS録画から自動処理完了" not in web_app._obs_status_text() and time.time() < deadline:
+        time.sleep(0.01)
+    assert "取得元1/3 OBS録画から自動処理完了" in web_app._obs_status_text()
+
+
+def test_three_source_chain_falls_back_from_post_live_to_processed(
+    monkeypatch,
+):
+    with web_app._obs_status_lock:
+        web_app._obs_status_lines.clear()
+    resolved_modes = []
+    pipeline_modes = []
+    completed = threading.Event()
+
+    def fake_resolve(*_args, **kwargs):
+        resolved_modes.append(kwargs.get("wait_for_processed", True))
+        return {
+            "video_id": "three-source",
+            "url": "https://www.youtube.com/watch?v=three-source",
+        }
+
+    def fake_pipeline(_url, _settings, **kwargs):
+        is_post_live = kwargs.get("post_live", False)
+        pipeline_modes.append(is_post_live)
+        if is_post_live:
+            return SimpleNamespace(
+                log="post-live incomplete",
+                success=False,
+                error="duration mismatch",
+            )
+        completed.set()
+        return SimpleNamespace(log="processed ok", success=True, error="")
+
+    monkeypatch.setattr(web_app, "_resolve_obs_youtube_archive", fake_resolve)
+    monkeypatch.setattr(
+        web_app,
+        "_run_obs_youtube_pipeline_outcome",
+        fake_pipeline,
+    )
+
+    _started, finished = web_app._obs_make_archive_callbacks(True, {})
+    finished(None)
+
+    assert completed.wait(timeout=5)
+    assert resolved_modes == [False, True]
+    assert pipeline_modes == [True, False]
+    deadline = time.time() + 5
+    while "完成アーカイブから自動処理完了" not in web_app._obs_status_text() and time.time() < deadline:
+        time.sleep(0.01)
+    status = web_app._obs_status_text()
+    assert "取得元2/3 post-live DVRの先行取得を開始" in status
+    assert "取得元3/3 完成アーカイブから自動処理完了" in status
 
 
 def test_local_obs_failure_is_not_reported_as_complete(monkeypatch):
