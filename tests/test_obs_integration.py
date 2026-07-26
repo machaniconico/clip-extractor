@@ -179,6 +179,54 @@ def test_obs_websocket_record_stopped_fires_callback(tmp_path, monkeypatch):
     w.stop()
 
 
+def test_record_trigger_dispatches_recording_and_stream_lifecycle(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(oi.time, "sleep", lambda *a, **k: None)
+    rec = tmp_path / "obs_primary.mkv"
+    rec.write_bytes(b"video")
+    recording_paths: list[str] = []
+    callback_order: list[str] = []
+    recorded = threading.Event()
+    stream_started = threading.Event()
+    stream_finished = threading.Event()
+
+    def on_recorded(path):
+        callback_order.append("stable")
+        recording_paths.append(path)
+        recorded.set()
+
+    def on_recording_stopped(_path):
+        callback_order.append("stopped")
+
+    w = oi.ObsWebsocketWatcher(
+        "localhost",
+        4455,
+        "pw",
+        on_recorded,
+        stop_event="record",
+        on_recording_stopped=on_recording_stopped,
+        on_stream_started=stream_started.set,
+        on_stream_finished=stream_finished.set,
+    )
+
+    w.on_stream_state_changed(
+        types.SimpleNamespace(output_state=oi.OBS_WEBSOCKET_OUTPUT_STARTED)
+    )
+    w.on_record_state_changed(_stopped_event(rec))
+    w.on_stream_state_changed(
+        types.SimpleNamespace(output_state=oi.OBS_WEBSOCKET_OUTPUT_STOPPED)
+    )
+
+    assert stream_started.wait(timeout=5)
+    assert recorded.wait(timeout=5)
+    assert stream_finished.wait(timeout=5)
+    assert recording_paths == [str(rec)]
+    assert callback_order == ["stopped", "stable"]
+    w.stop()
+
+
 def test_obs_websocket_stream_ignores_recording_stop(tmp_path, monkeypatch):
     monkeypatch.setattr(oi.time, "sleep", lambda *a, **k: None)
     rec = tmp_path / "obs_stream.mp4"
@@ -357,6 +405,16 @@ def test_create_watcher_websocket():
         lambda p: None,
     )
     assert isinstance(w, oi.ObsWebsocketWatcher)
+
+
+def test_websocket_defaults_to_record_trigger_for_empty_stop_event():
+    w = oi.create_watcher(
+        "websocket",
+        {"stop_event": ""},
+        lambda _path: None,
+    )
+
+    assert w._trigger == "record"
 
 
 def test_create_watcher_passes_optional_stream_callbacks():

@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 pytest.importorskip("gradio")
 
 import web_app
+from config import AppConfig
 
 
 def _save_with(monkeypatch, tmp_path, **overrides):
@@ -88,6 +89,17 @@ def test_roundtrip_preserves_defaults(monkeypatch, tmp_path):
     assert loaded["audio_fusion"] is False, loaded
     assert loaded["audio_alpha"] == 0.35, loaded
     assert loaded["karaoke"] is False, loaded
+
+
+def test_obs_recording_is_the_default_source(monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        web_app,
+        "SETTINGS_FILE",
+        tmp_path / "missing-settings.json",
+    )
+
+    assert web_app.load_defaults()["obs_stop_event"] == "record"
+    assert AppConfig().obs_stop_event == "record"
 
 
 def test_roundtrip_audio_fusion_fields(monkeypatch, tmp_path):

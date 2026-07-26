@@ -72,6 +72,6 @@ class AppConfig:
     obs_host: str = "localhost"
     obs_port: int = 4455
     obs_password: str = ""
-    obs_stop_event: str = "stream"          # "stream" | "record"
+    obs_stop_event: str = "record"          # "record" | "stream"
     obs_watch_folder: str = ""
     obs_auto_process: bool = True

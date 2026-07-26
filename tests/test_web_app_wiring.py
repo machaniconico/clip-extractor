@@ -199,21 +199,33 @@ def test_obs_start_signature_matches_inputs_and_passes_auto_append():
     ]
 
 
-def test_obs_help_explains_two_separate_source_modes():
+def test_obs_help_explains_recording_primary_setup_and_archive_fallback():
     source = WEB_APP.read_text(encoding="utf-8")
 
-    assert "自動処理の取得元は次の **二択**" in source
-    assert "record（OBS録画）" in source
-    assert "stream（完成アーカイブ）" in source
-    assert "OBS録画：録画停止後すぐ処理" in source
-    assert "YouTube完成アーカイブ：再エンコード後に処理" in source
+    assert "**OBS録画を既定の素材**" in source
+    assert "OBS録画優先：失敗時のみ完成アーカイブ" in source
+    assert "YouTube完成アーカイブのみ：再エンコード後" in source
+    assert "設定 → 出力" in source
+    assert "出力モードを「詳細」" in source
+    assert "録画出力先" in source
+    assert "MKV（推奨）" in source
+    assert "配信エンコーダーを使用" in source
+    assert "設定 → 一般 → 出力" in source
+    assert "配信時に自動的に録画する" in source
+    assert "配信開始と同時に録画タイマーも動き" in source
+    assert "https://obsproject.com/kb/standard-recording-output-guide" in source
+    assert "https://obsproject.com/kb/obs-studio-overview" in source
+    assert "録画処理が失敗した時だけ" in source
+    assert "アーカイブをDLし直さず" in source
+    assert "タイムスタンプだけをYouTube概要欄へ自動反映" in source
     assert "再エンコード完了" in source
-    assert "途中で別方式へ切り替えません" in source
-    assert "`stream` は最大6時間待機します" in source
+    assert "完成アーカイブ待機は最大6時間" in source
     assert "完成アーカイブURLを貼って生成できます" in source
     assert "公開または限定公開" in source
-    assert "概要欄に自動追加」は `stream` のみ対応" in source
-    assert "`folder` は `record` 専用" in source
+    assert "post-live DVR" in source
+    assert "アーカイブへの" in source
+    assert "フォールバックとYouTube概要欄への自動反映は行いません" in source
+    assert 'defaults.get("obs_stop_event", "record")' in source
 
 
 def test_google_unverified_app_guide_is_actionable_and_rendered():

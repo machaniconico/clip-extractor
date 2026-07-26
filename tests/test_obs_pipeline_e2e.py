@@ -349,6 +349,41 @@ def test_resolve_cached_archive_waits_for_complete_before_processing(monkeypatch
     assert result["url"].endswith("dQw4w9WgXcQ")
 
 
+def test_resolver_can_skip_reencode_wait_for_local_chapter_append(monkeypatch):
+    service = object()
+    processing_called = threading.Event()
+    monkeypatch.setattr(web_app.youtube_api, "get_youtube_service", lambda: service)
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "get_broadcast_lifecycle_status",
+        lambda actual_service, video_id: (
+            "complete"
+            if actual_service is service and video_id == "local-stream"
+            else "revoked"
+        ),
+    )
+
+    def fail_if_processing_checked(_service, _video_id):
+        processing_called.set()
+        raise AssertionError("local success must not wait for archive re-encode")
+
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "get_archive_processing_state",
+        fail_if_processing_checked,
+    )
+
+    result = web_app._resolve_obs_youtube_archive(
+        {"video_id": "local-stream", "title": "archive"},
+        datetime.now(timezone.utc),
+        lambda: True,
+        wait_for_processed=False,
+    )
+
+    assert result["url"].endswith("local-stream")
+    assert not processing_called.is_set()
+
+
 def test_archive_api_transient_errors_are_retried(monkeypatch):
     service = object()
     services = iter([TimeoutError("temporary connection timeout"), service])
@@ -927,6 +962,443 @@ def test_archive_mode_never_falls_back_to_local_recording(monkeypatch):
     assert not local_called.is_set()
 
 
+def test_recording_primary_uses_local_and_appends_chapters_without_download(
+    monkeypatch,
+):
+    with web_app._obs_status_lock:
+        web_app._obs_status_lines.clear()
+    local_called = threading.Event()
+    appended = threading.Event()
+    fallback_called = threading.Event()
+    captured = {}
+
+    def fake_local(_path, settings):
+        captured["local_calls"] = captured.get("local_calls", 0) + 1
+        captured["local_settings"] = settings
+        local_called.set()
+        return web_app.ObsPipelineOutcome(
+            log="[OBS] Render 完了",
+            success=True,
+            clip_paths=("clip.mp4",),
+            chapters_path="chapters.txt",
+            chapters_text="0:00 Intro\n1:00 Topic",
+        )
+
+    def fake_resolve(*args, **kwargs):
+        captured["wait_for_processed"] = (
+            kwargs.get("wait_for_processed")
+            if "wait_for_processed" in kwargs
+            else args[6]
+        )
+        return {
+            "video_id": "recording-primary",
+            "url": "https://www.youtube.com/watch?v=recording-primary",
+        }
+
+    def fake_update(service, video_id, chapters, position="prepend"):
+        captured["append_calls"] = captured.get("append_calls", 0) + 1
+        captured["service"] = service
+        captured["video_id"] = video_id
+        captured["chapters"] = chapters
+        captured["position"] = position
+        appended.set()
+
+    monkeypatch.setattr(web_app, "_run_obs_auto_pipeline_outcome", fake_local)
+    monkeypatch.setattr(web_app, "_resolve_obs_youtube_archive", fake_resolve)
+    monkeypatch.setattr(
+        web_app,
+        "_run_obs_youtube_pipeline_outcome",
+        lambda *_args, **_kwargs: fallback_called.set(),
+    )
+    service = object()
+    monkeypatch.setattr(web_app.youtube_api, "get_youtube_service", lambda: service)
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "update_video_description",
+        fake_update,
+    )
+
+    recorded, recording_stopped, _started, finished = (
+        web_app._obs_make_recording_primary_callbacks(True, {})
+    )
+    recording_path = "C:/recordings/stream.mkv"
+    recording_stopped(recording_path)
+    recorded(recording_path)
+    assert local_called.wait(timeout=5)
+    finished()
+
+    assert appended.wait(timeout=5), web_app._obs_status_text()
+    assert captured["local_settings"]["enable_clips"] is True
+    assert captured["local_settings"]["enable_chapters"] is True
+    assert captured["local_settings"]["auto_append_youtube"] is False
+    assert captured["wait_for_processed"] is False
+    assert captured["service"] is service
+    assert captured["video_id"] == "recording-primary"
+    assert captured["chapters"] == "0:00 Intro\n1:00 Topic"
+    assert captured["position"] == "prepend"
+    assert not fallback_called.is_set()
+    deadline = time.time() + 5
+    while (
+        "YouTubeタイムスタンプ反映が完了"
+        not in web_app._obs_status_text()
+        and time.time() < deadline
+    ):
+        time.sleep(0.01)
+    recording_stopped(recording_path)
+    recorded(recording_path)
+    finished()
+    time.sleep(0.05)
+    assert captured["local_calls"] == 1
+    assert captured["append_calls"] == 1
+
+
+def test_recording_primary_waits_for_record_stop_after_stream_stop(monkeypatch):
+    with web_app._obs_status_lock:
+        web_app._obs_status_lines.clear()
+    monkeypatch.setattr(web_app, "_OBS_RECORDING_EVENT_TIMEOUT", 2)
+    local_called = threading.Event()
+    appended = threading.Event()
+    fallback_called = threading.Event()
+
+    def fake_local(_path, _settings):
+        local_called.set()
+        return web_app.ObsPipelineOutcome(
+            log="[OBS] Render 完了",
+            success=True,
+            chapters_path="chapters.txt",
+            chapters_text="0:00 Intro",
+        )
+
+    monkeypatch.setattr(web_app, "_run_obs_auto_pipeline_outcome", fake_local)
+    monkeypatch.setattr(
+        web_app,
+        "_resolve_obs_youtube_archive",
+        lambda *_args, **_kwargs: {
+            "video_id": "reverse-order",
+            "url": "https://www.youtube.com/watch?v=reverse-order",
+        },
+    )
+    monkeypatch.setattr(
+        web_app,
+        "_append_obs_chapters_to_archive",
+        lambda *_args, **_kwargs: appended.set(),
+    )
+    monkeypatch.setattr(
+        web_app,
+        "_run_obs_youtube_pipeline_outcome",
+        lambda *_args, **_kwargs: fallback_called.set(),
+    )
+
+    recorded, recording_stopped, _started, finished = (
+        web_app._obs_make_recording_primary_callbacks(True, {})
+    )
+    finished()
+    recording_path = "C:/recordings/late.mkv"
+    recording_stopped(recording_path)
+    recorded(recording_path)
+
+    assert local_called.wait(timeout=5)
+    assert appended.wait(timeout=5), web_app._obs_status_text()
+    assert not fallback_called.is_set()
+
+
+def test_recording_primary_falls_back_when_recording_is_missing(monkeypatch):
+    with web_app._obs_status_lock:
+        web_app._obs_status_lines.clear()
+    monkeypatch.setattr(web_app, "_OBS_RECORDING_EVENT_TIMEOUT", 0.01)
+    fallback_done = threading.Event()
+    captured = {}
+
+    def fake_resolve(*args, **kwargs):
+        captured["wait_for_processed"] = (
+            kwargs.get("wait_for_processed")
+            if "wait_for_processed" in kwargs
+            else args[6]
+        )
+        return {
+            "video_id": "missing-recording",
+            "url": "https://www.youtube.com/watch?v=missing-recording",
+        }
+
+    def fake_archive(_url, settings):
+        captured["archive_settings"] = settings
+        fallback_done.set()
+        return web_app.ObsPipelineOutcome(
+            log="[OBS] Render 完了",
+            success=True,
+        )
+
+    monkeypatch.setattr(web_app, "_resolve_obs_youtube_archive", fake_resolve)
+    monkeypatch.setattr(
+        web_app,
+        "_run_obs_youtube_pipeline_outcome",
+        fake_archive,
+    )
+
+    _recorded, _recording_stopped, _started, finished = (
+        web_app._obs_make_recording_primary_callbacks(True, {})
+    )
+    finished()
+
+    assert fallback_done.wait(timeout=5), web_app._obs_status_text()
+    assert captured["wait_for_processed"] is True
+    assert captured["archive_settings"]["enable_clips"] is True
+    assert captured["archive_settings"]["enable_chapters"] is True
+    assert captured["archive_settings"]["auto_append_youtube"] is True
+    assert "60秒以内に安定したOBS録画を検知できなかった" in web_app._obs_status_text()
+
+
+def test_consecutive_streams_keep_missing_a_separate_from_recorded_b(
+    monkeypatch,
+):
+    monkeypatch.setattr(web_app, "_OBS_RECORDING_EVENT_TIMEOUT", 0.1)
+    captures = iter([
+        {"video_id": "stream-a", "title": "A"},
+        {"video_id": "stream-b", "title": "B"},
+    ])
+    capture_count = 0
+    first_captured = threading.Event()
+    second_captured = threading.Event()
+    appended = threading.Event()
+    archive_done = threading.Event()
+    local_paths = []
+    appended_ids = []
+    archive_urls = []
+    resolve_modes = {}
+
+    monkeypatch.setattr(web_app.youtube_api, "get_youtube_service", lambda: object())
+
+    def fake_active(_service, **_kwargs):
+        nonlocal capture_count
+        broadcast = next(captures)
+        capture_count += 1
+        (first_captured if capture_count == 1 else second_captured).set()
+        return broadcast
+
+    monkeypatch.setattr(web_app.youtube_api, "find_active_broadcast", fake_active)
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "list_completed_broadcast_ids",
+        lambda *_args, **_kwargs: set(),
+    )
+
+    def fake_resolve(cached, *_args, **_kwargs):
+        wait_for_processed = _args[5]
+        video_id = cached["video_id"]
+        resolve_modes[video_id] = wait_for_processed
+        return {
+            "video_id": video_id,
+            "url": f"https://www.youtube.com/watch?v={video_id}",
+        }
+
+    def fake_local(path, _settings):
+        local_paths.append(path)
+        return web_app.ObsPipelineOutcome(
+            log="[OBS] Render 完了",
+            success=True,
+            chapters_path="chapters.txt",
+            chapters_text="0:00 Intro",
+        )
+
+    def fake_append(video_id, _chapters, _is_current):
+        appended_ids.append(video_id)
+        appended.set()
+
+    def fake_archive(url, _settings):
+        archive_urls.append(url)
+        archive_done.set()
+        return web_app.ObsPipelineOutcome(
+            log="[OBS] Render 完了",
+            success=True,
+        )
+
+    monkeypatch.setattr(web_app, "_resolve_obs_youtube_archive", fake_resolve)
+    monkeypatch.setattr(web_app, "_run_obs_auto_pipeline_outcome", fake_local)
+    monkeypatch.setattr(web_app, "_append_obs_chapters_to_archive", fake_append)
+    monkeypatch.setattr(
+        web_app,
+        "_run_obs_youtube_pipeline_outcome",
+        fake_archive,
+    )
+
+    recorded, recording_stopped, started, finished = (
+        web_app._obs_make_recording_primary_callbacks(True, {})
+    )
+    started()
+    assert first_captured.wait(timeout=5)
+    finished()  # A has no recording event and must fall back.
+    started()
+    assert second_captured.wait(timeout=5)
+    finished()
+    recording_path_b = "C:/recordings/stream-b.mkv"
+    recording_stopped(recording_path_b)
+    recorded(recording_path_b)
+
+    assert appended.wait(timeout=5), web_app._obs_status_text()
+    assert archive_done.wait(timeout=5), web_app._obs_status_text()
+    assert local_paths == [recording_path_b]
+    assert appended_ids == ["stream-b"]
+    assert archive_urls == [
+        "https://www.youtube.com/watch?v=stream-a",
+    ]
+    assert resolve_modes == {"stream-a": True, "stream-b": False}
+
+
+def test_late_recording_is_ignored_after_archive_fallback_is_claimed(
+    monkeypatch,
+):
+    monkeypatch.setattr(web_app, "_OBS_RECORDING_EVENT_TIMEOUT", 0.01)
+    archive_entered = threading.Event()
+    release_archive = threading.Event()
+    local_called = threading.Event()
+
+    monkeypatch.setattr(
+        web_app,
+        "_resolve_obs_youtube_archive",
+        lambda *_args, **_kwargs: {
+            "video_id": "fallback-claimed",
+            "url": "https://www.youtube.com/watch?v=fallback-claimed",
+        },
+    )
+
+    def fake_archive(_url, _settings):
+        archive_entered.set()
+        assert release_archive.wait(timeout=5)
+        return web_app.ObsPipelineOutcome(
+            log="[OBS] Render 完了",
+            success=True,
+        )
+
+    monkeypatch.setattr(
+        web_app,
+        "_run_obs_youtube_pipeline_outcome",
+        fake_archive,
+    )
+    monkeypatch.setattr(
+        web_app,
+        "_run_obs_auto_pipeline_outcome",
+        lambda *_args, **_kwargs: local_called.set(),
+    )
+
+    recorded, recording_stopped, _started, finished = (
+        web_app._obs_make_recording_primary_callbacks(True, {})
+    )
+    finished()
+    assert archive_entered.wait(timeout=5)
+    recording_path = "C:/recordings/too-late.mkv"
+    recording_stopped(recording_path)
+    recorded(recording_path)
+    time.sleep(0.05)
+    release_archive.set()
+
+    assert not local_called.is_set()
+
+
+def test_recording_primary_falls_back_when_local_pipeline_fails(monkeypatch):
+    with web_app._obs_status_lock:
+        web_app._obs_status_lines.clear()
+    local_done = threading.Event()
+    fallback_done = threading.Event()
+
+    def fake_local(_path, _settings):
+        local_done.set()
+        return web_app.ObsPipelineOutcome(
+            log="Error: local failed",
+            success=False,
+            error="local failed",
+        )
+
+    monkeypatch.setattr(web_app, "_run_obs_auto_pipeline_outcome", fake_local)
+    monkeypatch.setattr(
+        web_app,
+        "_resolve_obs_youtube_archive",
+        lambda *_args, **_kwargs: {
+            "video_id": "failed-recording",
+            "url": "https://www.youtube.com/watch?v=failed-recording",
+        },
+    )
+    monkeypatch.setattr(
+        web_app,
+        "_run_obs_youtube_pipeline_outcome",
+        lambda *_args, **_kwargs: (
+            fallback_done.set()
+            or web_app.ObsPipelineOutcome(
+                log="[OBS] Render 完了",
+                success=True,
+            )
+        ),
+    )
+
+    recorded, recording_stopped, _started, finished = (
+        web_app._obs_make_recording_primary_callbacks(True, {})
+    )
+    recording_path = "C:/recordings/broken.mkv"
+    recording_stopped(recording_path)
+    recorded(recording_path)
+    assert local_done.wait(timeout=5)
+    finished()
+
+    assert fallback_done.wait(timeout=5), web_app._obs_status_text()
+    assert "完成アーカイブへフォールバック" in web_app._obs_status_text()
+
+
+def test_local_timestamp_append_failure_never_downloads_archive(monkeypatch):
+    with web_app._obs_status_lock:
+        web_app._obs_status_lines.clear()
+    local_done = threading.Event()
+    fallback_called = threading.Event()
+
+    def fake_local(_path, _settings):
+        local_done.set()
+        return web_app.ObsPipelineOutcome(
+            log="[OBS] Render 完了",
+            success=True,
+            chapters_path="chapters.txt",
+            chapters_text="0:00 Intro",
+        )
+
+    monkeypatch.setattr(web_app, "_run_obs_auto_pipeline_outcome", fake_local)
+    monkeypatch.setattr(
+        web_app,
+        "_resolve_obs_youtube_archive",
+        lambda *_args, **_kwargs: {
+            "video_id": "append-failure",
+            "url": "https://www.youtube.com/watch?v=append-failure",
+        },
+    )
+    monkeypatch.setattr(
+        web_app,
+        "_append_obs_chapters_to_archive",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("description denied")
+        ),
+    )
+    monkeypatch.setattr(
+        web_app,
+        "_run_obs_youtube_pipeline_outcome",
+        lambda *_args, **_kwargs: fallback_called.set(),
+    )
+
+    recorded, recording_stopped, _started, finished = (
+        web_app._obs_make_recording_primary_callbacks(True, {})
+    )
+    recording_path = "C:/recordings/valid.mkv"
+    recording_stopped(recording_path)
+    recorded(recording_path)
+    assert local_done.wait(timeout=5)
+    finished()
+
+    deadline = time.time() + 5
+    while (
+        "YouTube概要欄へのタイムスタンプ反映エラー"
+        not in web_app._obs_status_text()
+        and time.time() < deadline
+    ):
+        time.sleep(0.01)
+    assert "切り替えません" in web_app._obs_status_text()
+    assert not fallback_called.is_set()
+
+
 def test_local_obs_failure_is_not_reported_as_complete(monkeypatch):
     with web_app._obs_status_lock:
         web_app._obs_status_lines.clear()
@@ -1068,7 +1540,11 @@ def test_start_obs_stream_watch_wires_youtube_archive_callbacks(monkeypatch):
     web_app.stop_obs_watch()
 
 
-def test_start_obs_stream_watch_requires_youtube_auth(monkeypatch):
+@pytest.mark.parametrize("source_mode", ["record", "stream"])
+def test_start_obs_websocket_watch_requires_youtube_auth(
+    monkeypatch,
+    source_mode,
+):
     import obs_integration
 
     create_called = False
@@ -1085,7 +1561,7 @@ def test_start_obs_stream_watch_requires_youtube_auth(monkeypatch):
     monkeypatch.setattr(obs_integration, "create_watcher", fake_create_watcher)
 
     status = web_app.start_obs_watch(
-        "websocket", "localhost", 4455, "pw", "stream", "", True, False,
+        "websocket", "localhost", 4455, "pw", source_mode, "", True, False,
         5, "combined", False, "gemini", "large-v3", "",
     )
 
@@ -1094,10 +1570,24 @@ def test_start_obs_stream_watch_requires_youtube_auth(monkeypatch):
     assert create_called is False
 
 
-def test_start_obs_record_watch_disables_youtube_append(monkeypatch):
+def test_start_obs_record_watch_wires_primary_callbacks_and_forces_append(
+    monkeypatch,
+):
     import obs_integration
 
     captured = {}
+
+    def recording_finished(_path):
+        pass
+
+    def recording_stopped(_path):
+        pass
+
+    def stream_started(**_kwargs):
+        captured["proactive"] = True
+
+    def stream_finished():
+        pass
 
     class FakeWatcher:
         status = "connected"
@@ -1108,40 +1598,101 @@ def test_start_obs_record_watch_disables_youtube_append(monkeypatch):
         def stop(self):
             self.status = "stopped"
 
+    def fake_primary_factory(_auto_process, settings, _generation):
+        captured["settings"] = settings
+        return (
+            recording_finished,
+            recording_stopped,
+            stream_started,
+            stream_finished,
+        )
+
+    def fake_create_watcher(_method, _config, callback, **kwargs):
+        captured["recording_callback"] = callback
+        captured.update(kwargs)
+        return FakeWatcher()
+
+    monkeypatch.setattr(
+        web_app,
+        "_obs_make_recording_primary_callbacks",
+        fake_primary_factory,
+    )
+    monkeypatch.setattr(obs_integration, "create_watcher", fake_create_watcher)
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "check_auth_status",
+        lambda: {"configured": True, "authenticated": True},
+    )
+
+    status = web_app.start_obs_watch(
+        "websocket", "localhost", 4455, "pw", "record", "", True, False,
+        5, "combined", False, "gemini", "large-v3", "",
+    )
+
+    assert status == "connected"
+    assert captured["settings"]["auto_append_youtube"] is True
+    assert captured["recording_callback"] is recording_finished
+    assert captured["on_recording_stopped"] is recording_stopped
+    assert captured["on_stream_started"] is stream_started
+    assert captured["on_stream_finished"] is stream_finished
+    assert captured["proactive"] is True
+    web_app.stop_obs_watch()
+
+
+def test_start_obs_folder_record_mode_remains_local_only(monkeypatch):
+    import obs_integration
+
+    captured = {}
+
+    def local_callback(_path):
+        pass
+
+    class FakeWatcher:
+        status = "watching"
+
+        def start(self):
+            pass
+
+        def stop(self):
+            self.status = "stopped"
+
     def fake_make_callback(_auto_process, settings, _generation):
         captured["settings"] = settings
-        return lambda _path: None
+        return local_callback
 
-    def fake_create_watcher(_method, _config, _callback, **kwargs):
+    def fake_create_watcher(_method, _config, callback, **kwargs):
+        captured["recording_callback"] = callback
         captured.update(kwargs)
         return FakeWatcher()
 
     monkeypatch.setattr(web_app, "_obs_make_callback", fake_make_callback)
     monkeypatch.setattr(
         web_app,
-        "_obs_make_archive_callbacks",
+        "_obs_make_recording_primary_callbacks",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("record mode must not create archive callbacks")
+            AssertionError("folder mode must not create stream callbacks")
         ),
     )
-    monkeypatch.setattr(obs_integration, "create_watcher", fake_create_watcher)
     monkeypatch.setattr(
         web_app.youtube_api,
         "check_auth_status",
         lambda: (_ for _ in ()).throw(
-            AssertionError("record mode must not require YouTube auth")
+            AssertionError("folder mode must not require YouTube auth")
         ),
     )
+    monkeypatch.setattr(obs_integration, "create_watcher", fake_create_watcher)
 
     status = web_app.start_obs_watch(
-        "websocket", "localhost", 4455, "pw", "record", "", True, True,
-        5, "combined", False, "gemini", "large-v3", "",
+        "folder", "localhost", 4455, "", "record", "C:/recordings",
+        True, True, 5, "combined", False, "gemini", "large-v3", "",
     )
 
-    assert status == "connected"
-    assert captured["settings"]["auto_append_youtube"] is False
+    assert status == "watching"
+    assert captured["recording_callback"] is local_callback
+    assert captured["on_recording_stopped"] is None
     assert captured["on_stream_started"] is None
     assert captured["on_stream_finished"] is None
+    assert captured["settings"]["auto_append_youtube"] is False
     web_app.stop_obs_watch()
 
 

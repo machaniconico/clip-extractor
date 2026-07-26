@@ -33,6 +33,7 @@ OBS_WEBSOCKET_OUTPUT_STOPPED = "OBS_WEBSOCKET_OUTPUT_STOPPED"
 
 #: Type alias for the shared completion callback.
 OnRecordingFinished = Callable[[str], None]
+OnRecordingStopped = Callable[[str], None]
 OnStreamStarted = Callable[[], None]
 OnStreamFinished = Callable[[], None]
 
@@ -109,10 +110,10 @@ class _WorkerMixin:
 class ObsWebsocketWatcher(_WorkerMixin):
     """Watch OBS via obs-websocket v5 and fire on recording/stream stop.
 
-    The trigger event is selected by ``stop_event``: ``"record"`` fires the
-    callback when recording stops (the recording path is in the event);
-    ``"stream"`` invokes the optional lifecycle callbacks without coupling
-    them to the local recording output.
+    ``"record"`` fires the recording callback and can also invoke optional
+    stream lifecycle callbacks so one coordinator can prefer the local file
+    and use the completed archive only as a fallback. ``"stream"`` invokes
+    only the lifecycle callbacks.
     """
 
     def __init__(
@@ -121,9 +122,10 @@ class ObsWebsocketWatcher(_WorkerMixin):
         port: int,
         password: str,
         on_recording_finished: OnRecordingFinished,
-        stop_event: str = "stream",
+        stop_event: str = "record",
         on_stream_started: OnStreamStarted | None = None,
         on_stream_finished: OnStreamFinished | None = None,
+        on_recording_stopped: OnRecordingStopped | None = None,
     ) -> None:
         super().__init__()
         self._stopped = False
@@ -131,9 +133,10 @@ class ObsWebsocketWatcher(_WorkerMixin):
         self._port = int(port)
         self._password = password
         self._callback = on_recording_finished
+        self._recording_stopped_callback = on_recording_stopped
         self._stream_started_callback = on_stream_started
         self._stream_finished_callback = on_stream_finished
-        self._trigger = (stop_event or "stream").lower()
+        self._trigger = (stop_event or "record").lower()
         self._client = None
         self._status = "stopped"
 
@@ -212,6 +215,11 @@ class ObsWebsocketWatcher(_WorkerMixin):
             if path:
                 logger.info(f"OBS recording stopped: {path}")
             if self._trigger == "record":
+                if path and self._recording_stopped_callback is not None:
+                    self._dispatch_stream_callback(
+                        self._recording_stopped_callback,
+                        str(path),
+                    )
                 self._dispatch(path)
         except Exception:
             logger.exception("on_record_state_changed failed")
@@ -220,7 +228,11 @@ class ObsWebsocketWatcher(_WorkerMixin):
         """Handle stream start/stop, optionally without a local recording."""
         try:
             state = _get(data, "output_state", "outputState")
-            if self._trigger != "stream":
+            if (
+                self._trigger != "stream"
+                and self._stream_started_callback is None
+                and self._stream_finished_callback is None
+            ):
                 return
             if state == OBS_WEBSOCKET_OUTPUT_STARTED:
                 logger.info("OBS stream started")
@@ -389,6 +401,7 @@ def create_watcher(
     on_recording_finished: OnRecordingFinished,
     on_stream_started: OnStreamStarted | None = None,
     on_stream_finished: OnStreamFinished | None = None,
+    on_recording_stopped: OnRecordingStopped | None = None,
 ):
     """Factory: build a watcher by ``method`` ("websocket" | "folder").
 
@@ -409,7 +422,8 @@ def create_watcher(
             port=int(config.get("port", 4455)),
             password=config.get("password", ""),
             on_recording_finished=on_recording_finished,
-            stop_event=config.get("stop_event", "stream"),
+            stop_event=config.get("stop_event", "record"),
+            on_recording_stopped=on_recording_stopped,
             on_stream_started=on_stream_started,
             on_stream_finished=on_stream_finished,
         )
