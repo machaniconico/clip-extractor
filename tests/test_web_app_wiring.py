@@ -122,11 +122,7 @@ def _string_constant(module: ast.Module, name: str) -> str:
 def test_detect_phase_signature_matches_detect_inputs():
     module = _module()
     args = _function_args(module, "detect_phase")
-    args = [
-        arg
-        for arg in args
-        if arg not in {"progress", "video_downloader"}
-    ]
+    args = [arg for arg in args if arg != "progress"]
     assert args == _event_input_names(module, "detect_phase", "then")
     assert args[-3:] == ["audio_fusion", "audio_alpha", "output_base_dir"]
 
@@ -203,13 +199,21 @@ def test_obs_start_signature_matches_inputs_and_passes_auto_append():
     ]
 
 
-def test_obs_help_explains_archive_clips_and_timestamps_without_recording():
+def test_obs_help_explains_two_separate_source_modes():
     source = WEB_APP.read_text(encoding="utf-8")
 
-    assert "録画は不要" in source
-    assert "切り抜きとタイムスタンプを両方生成" in source
+    assert "自動処理の取得元は次の **二択**" in source
+    assert "record（OBS録画）" in source
+    assert "stream（完成アーカイブ）" in source
+    assert "OBS録画：録画停止後すぐ処理" in source
+    assert "YouTube完成アーカイブ：再エンコード後に処理" in source
+    assert "再エンコード完了" in source
+    assert "途中で別方式へ切り替えません" in source
+    assert "`stream` は最大6時間待機します" in source
+    assert "完成アーカイブURLを貼って生成できます" in source
     assert "公開または限定公開" in source
-    assert "概要欄に自動追加" in source
+    assert "概要欄に自動追加」は `stream` のみ対応" in source
+    assert "`folder` は `record` 専用" in source
 
 
 def test_google_unverified_app_guide_is_actionable_and_rendered():

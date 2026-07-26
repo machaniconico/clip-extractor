@@ -34,7 +34,7 @@ OBS_WEBSOCKET_OUTPUT_STOPPED = "OBS_WEBSOCKET_OUTPUT_STOPPED"
 #: Type alias for the shared completion callback.
 OnRecordingFinished = Callable[[str], None]
 OnStreamStarted = Callable[[], None]
-OnStreamFinished = Callable[[Optional[str]], None]
+OnStreamFinished = Callable[[], None]
 
 
 def _get(data: object, snake: str, camel: str) -> Optional[object]:
@@ -111,8 +111,8 @@ class ObsWebsocketWatcher(_WorkerMixin):
 
     The trigger event is selected by ``stop_event``: ``"record"`` fires the
     callback when recording stops (the recording path is in the event);
-    ``"stream"`` invokes the optional lifecycle callbacks.  A recording path
-    from the same stream is supplied only as a best-effort fallback.
+    ``"stream"`` invokes the optional lifecycle callbacks without coupling
+    them to the local recording output.
     """
 
     def __init__(
@@ -136,8 +136,6 @@ class ObsWebsocketWatcher(_WorkerMixin):
         self._trigger = (stop_event or "stream").lower()
         self._client = None
         self._status = "stopped"
-        self._last_record_path: Optional[str] = None
-        self._state_lock = threading.Lock()
 
     @property
     def status(self) -> str:
@@ -205,15 +203,13 @@ class ObsWebsocketWatcher(_WorkerMixin):
     # StreamStateChanged.
 
     def on_record_state_changed(self, data: object) -> None:
-        """Handle RecordStateChanged: cache the path; fire when trigger=record."""
+        """Handle RecordStateChanged and fire only when trigger=record."""
         try:
             state = _get(data, "output_state", "outputState")
             path = _get(data, "output_path", "outputPath")
             if state != OBS_WEBSOCKET_OUTPUT_STOPPED:
                 return
             if path:
-                with self._state_lock:
-                    self._last_record_path = str(path)
                 logger.info(f"OBS recording stopped: {path}")
             if self._trigger == "record":
                 self._dispatch(path)
@@ -228,30 +224,18 @@ class ObsWebsocketWatcher(_WorkerMixin):
                 return
             if state == OBS_WEBSOCKET_OUTPUT_STARTED:
                 logger.info("OBS stream started")
-                with self._state_lock:
-                    self._last_record_path = None
                 if self._stream_started_callback is not None:
                     self._dispatch_stream_callback(self._stream_started_callback)
                 return
             if state != OBS_WEBSOCKET_OUTPUT_STOPPED:
                 return
             logger.info("OBS stream stopped")
-            path: Optional[str] = None
-            with self._state_lock:
-                path = self._last_record_path
-                self._last_record_path = None
-            if not path:
-                # Stream-stop events don't carry a recording path; try to
-                # recover it from OBS via GetRecordStatus.
-                path = self._query_last_record_path()
             if self._stream_finished_callback is not None:
-                self._dispatch_stream_callback(self._stream_finished_callback, path)
-            elif path:
-                self._dispatch(path)
+                self._dispatch_stream_callback(self._stream_finished_callback)
             else:
-                msg = "配信停止を検知しましたが録画パスを取得できませんでした（録画が同時に有効か確認してください）"
+                msg = "配信停止を検知しました"
                 self._status = msg
-                logger.warning(msg)
+                logger.info(msg)
         except Exception:
             logger.exception("on_stream_state_changed failed")
 
@@ -265,38 +249,6 @@ class ObsWebsocketWatcher(_WorkerMixin):
             callback(*args)
         except Exception:
             logger.exception("OBS stream lifecycle callback failed")
-
-    def _query_last_record_path(self) -> Optional[str]:
-        """Best-effort: ask OBS for the current recording path via ReqClient."""
-        try:
-            import obsws_python as obs  # type: ignore[import-not-found]
-        except ImportError:
-            return None
-        rc = None
-        try:
-            rc = obs.ReqClient(
-                host=self._host,
-                port=self._port,
-                password=self._password,
-                timeout=5,
-            )
-            status = rc.get_record_status()
-            output_active = _get(status, "output_active", "outputActive")
-            if output_active is False:
-                return None
-            for attr in ("output_path", "recording_path", "outputPath", "recordingPath"):
-                val = getattr(status, attr, None)
-                if val:
-                    return str(val)
-        except Exception as e:
-            logger.warning(f"GetRecordStatus での録画パス取得に失敗: {e}")
-        finally:
-            if rc is not None:
-                try:
-                    rc.base_client.ws.close()  # type: ignore[attr-defined]
-                except Exception:
-                    pass
-        return None
 
     def _dispatch(self, path: Optional[str]) -> None:
         if not path:
