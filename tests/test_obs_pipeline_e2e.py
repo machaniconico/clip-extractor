@@ -55,6 +55,21 @@ SYNTH_DURATION = 40  # seconds; must comfortably exceed CLIP_END
 # Fixtures / helpers
 # --------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _isolate_obs_settings_files(monkeypatch, tmp_path):
+    """Never let OBS start tests overwrite the user's real local settings."""
+    monkeypatch.setattr(
+        web_app,
+        "SETTINGS_FILE",
+        tmp_path / "default_settings.json",
+    )
+    monkeypatch.setattr(
+        web_app,
+        "OBS_PASSWORD_FILE",
+        tmp_path / ".obs_password",
+    )
+
+
 def _make_synthetic_video(dest: Path, duration: int = SYNTH_DURATION) -> Path:
     """Generate a small synthetic video (testsrc + sine) via ffmpeg."""
     cmd = [
@@ -1529,7 +1544,7 @@ def test_start_obs_stream_watch_wires_youtube_archive_callbacks(monkeypatch):
     monkeypatch.setattr(obs_integration, "create_watcher", fake_create_watcher)
 
     status = web_app.start_obs_watch(
-        "websocket", "localhost", 4455, "pw", "stream", "", True, False,
+        "websocket", "localhost", 4455, "pw", False, "stream", "", True, False,
         5, "combined", False, "gemini", "large-v3", "",
     )
 
@@ -1561,7 +1576,7 @@ def test_start_obs_websocket_watch_requires_youtube_auth(
     monkeypatch.setattr(obs_integration, "create_watcher", fake_create_watcher)
 
     status = web_app.start_obs_watch(
-        "websocket", "localhost", 4455, "pw", source_mode, "", True, False,
+        "websocket", "localhost", 4455, "pw", False, source_mode, "", True, False,
         5, "combined", False, "gemini", "large-v3", "",
     )
 
@@ -1625,7 +1640,7 @@ def test_start_obs_record_watch_wires_primary_callbacks_and_forces_append(
     )
 
     status = web_app.start_obs_watch(
-        "websocket", "localhost", 4455, "pw", "record", "", True, False,
+        "websocket", "localhost", 4455, "pw", False, "record", "", True, False,
         5, "combined", False, "gemini", "large-v3", "",
     )
 
@@ -1683,7 +1698,7 @@ def test_start_obs_folder_record_mode_remains_local_only(monkeypatch):
     monkeypatch.setattr(obs_integration, "create_watcher", fake_create_watcher)
 
     status = web_app.start_obs_watch(
-        "folder", "localhost", 4455, "", "record", "C:/recordings",
+        "folder", "localhost", 4455, "", False, "record", "C:/recordings",
         True, True, 5, "combined", False, "gemini", "large-v3", "",
     )
 
@@ -1708,7 +1723,7 @@ def test_start_obs_rejects_folder_with_archive_mode(monkeypatch):
     monkeypatch.setattr(obs_integration, "create_watcher", fake_create_watcher)
 
     status = web_app.start_obs_watch(
-        "folder", "localhost", 4455, "", "stream", "C:/recordings",
+        "folder", "localhost", 4455, "", False, "stream", "C:/recordings",
         True, False, 5, "combined", False, "gemini", "large-v3", "",
     )
 
@@ -1750,7 +1765,7 @@ def test_start_obs_connection_failure_does_not_probe_youtube(monkeypatch):
     )
 
     status = web_app.start_obs_watch(
-        "websocket", "localhost", 4455, "pw", "stream", "", True, False,
+        "websocket", "localhost", 4455, "pw", False, "stream", "", True, False,
         5, "combined", False, "gemini", "large-v3", "",
     )
 

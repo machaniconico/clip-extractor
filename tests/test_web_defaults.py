@@ -22,6 +22,11 @@ def _save_with(monkeypatch, tmp_path, **overrides):
     """Call save_defaults against a temp SETTINGS_FILE and return load_defaults()."""
     settings_file = tmp_path / "default_settings.json"
     monkeypatch.setattr(web_app, "SETTINGS_FILE", settings_file)
+    monkeypatch.setattr(
+        web_app,
+        "OBS_PASSWORD_FILE",
+        tmp_path / ".obs_password",
+    )
 
     # Baseline args matching the current save_defaults positional signature.
     args = dict(
@@ -40,6 +45,7 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         karaoke=False,
         premiere_executable_path="",
         obs_launch_on_startup=False,
+        obs_auto_connect_on_startup=False,
         obs_executable_path="",
     )
     args.update(overrides)
@@ -61,6 +67,7 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         args["premiere_executable_path"],
         args["obs_launch_on_startup"],
         args["obs_executable_path"],
+        args["obs_auto_connect_on_startup"],
     )
     assert settings_file.exists(), "save_defaults should write SETTINGS_FILE"
     return web_app.load_defaults()
@@ -97,6 +104,11 @@ def test_obs_recording_is_the_default_source(monkeypatch, tmp_path):
         "SETTINGS_FILE",
         tmp_path / "missing-settings.json",
     )
+    monkeypatch.setattr(
+        web_app,
+        "OBS_PASSWORD_FILE",
+        tmp_path / ".obs_password",
+    )
 
     assert web_app.load_defaults()["obs_stop_event"] == "record"
     assert AppConfig().obs_stop_event == "record"
@@ -121,10 +133,12 @@ def test_roundtrip_obs_launch_fields(monkeypatch, tmp_path):
         monkeypatch,
         tmp_path,
         obs_launch_on_startup=True,
+        obs_auto_connect_on_startup=True,
         obs_executable_path="  C:/Portable OBS/obs64.exe  ",
     )
 
     assert loaded["obs_launch_on_startup"] is True, loaded
+    assert loaded["obs_auto_connect_on_startup"] is True, loaded
     assert loaded["obs_executable_path"] == "C:/Portable OBS/obs64.exe", loaded
 
 

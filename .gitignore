@@ -1,5 +1,6 @@
 # Secrets
 .gemini_key
+.obs_password
 credentials.json
 token.json
 token.pickle
