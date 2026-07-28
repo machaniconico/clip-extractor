@@ -100,7 +100,7 @@ Windows では `Clip Extractor.bat` をダブルクリックでも起動でき�
 
 ### OBS Studio と同時起動（Windows）
 
-Settings / 設定タブの **「Clip Extractor起動時にOBS Studioも起動」** をONにし、画面下の **「デフォルトに設定」** で保存すると、次回から通常のClip Extractor起動時にOBSも一緒に開きます。
+Settings / 設定タブの **「Clip Extractor起動時にOBS Studioも起動」** をONにし、画面下の **「デフォルトに設定」** で保存すると、次回から通常のClip Extractor起動時にOBSも一緒に開きます。続けて **「起動時にOBS連携も自動開始」** をONにすると、OBS WebSocketの準備完了を最大30秒待ち、OBS連携タブの保存済み設定で自動接続します。
 
 - **OBS実行ファイルのパス**には `obs64.exe` のフルパスを貼り付けられます
 - パスを空欄にすると、PATHと標準インストール先から自動検出します
@@ -109,7 +109,27 @@ Settings / 設定タブの **「Clip Extractor起動時にOBS Studioも起動」
 
 設定とは別に、`Clip Extractor with OBS.bat` をダブルクリックするとチェック状態に関係なく2つを一度に起動できます。`setup.bat` が作成するデスクトップショートカットは通常の **`Clip Extractor`** 1つだけです。同時起動を常に使いたい場合は上記の設定をONにしてください。
 
-これは2つのアプリを同時に開く機能です。配信終了後の自動処理を使う場合は、Web UI の **OBS連携** タブで従来どおり **「OBS連携 開始」** を押してください。
+自動連携をOFFにしている場合、配信終了後の自動処理を使うにはWeb UIの **OBS連携** タブで **「OBS連携 開始」** を押してください。OBS WebSocketにPasswordを設定している場合は、同タブの **「Passwordを保存」** をONにして一度手動接続すると、次回の自動連携で安全に再利用されます。待機や接続に失敗してもClip Extractorの起動は続き、同タブのステータスから手動で再試行できます。
+
+OBS連携は `record`（OBS録画優先）が既定です。配信と同時に保存したローカル録画をすぐ切り抜き、録画を取得できなかった、または録画処理に失敗した場合だけ、再エンコード完了後のYouTubeアーカイブをDLして保険として処理します。録画から処理できた場合も、生成したタイムスタンプを同じ配信のYouTube概要欄へ自動反映します。配信直後のpost-live DVRは使用しません。
+
+OBS側では最初に次を設定してください。
+
+1. **設定 → 出力** で出力モードを **詳細** にする
+2. **録画** タブで録画出力先を確認し、録画フォーマットを **MKV（推奨）**、録画エンコーダーを **配信エンコーダーを使用（Use stream encoder）** にする
+3. **設定 → 一般 → 出力** で **配信時に自動的に録画する** をONにする
+4. テスト配信で、配信開始と同時に録画も始まり、終了後に録画ファイルが作られることを確認する
+
+設定項目の詳細は [OBS Standard Recording Output Guide](https://obsproject.com/kb/standard-recording-output-guide) と [OBS Studio Overview](https://obsproject.com/kb/obs-studio-overview) を参照してください。
+
+自動処理の取得元は次の二択です。
+
+1. `record`（既定）— OBS録画を優先し、配信終了後60秒以内に安定した録画が見つからない、または録画処理に失敗した時だけ完成アーカイブへフォールバック
+2. `stream` — OBS録画を使わず、再エンコード後のYouTube完成アーカイブだけをDLして処理
+
+WebSocket方式の自動処理にはSettingsのYouTube認証が必要で、アーカイブは公開または限定公開にしてください。完成アーカイブの待機上限は6時間です。上限を超えた場合は、後日 **Input** タブへ完成アーカイブURLを貼って生成できます。
+
+`folder`監視はローカル録画専用です。配信IDを対応付けられないため、アーカイブへのフォールバックとYouTube概要欄への自動反映は行いません。
 
 コマンドから使う場合は `python launcher.py --with-obs` でも起動できます。
 

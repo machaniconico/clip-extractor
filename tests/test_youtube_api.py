@@ -78,6 +78,16 @@ def test_merge_prepend_empty_existing():
     assert out == "0:00 イントロ"
 
 
+def test_merge_prepend_does_not_duplicate_existing_chapters():
+    existing = "0:00 Intro\n1:00 Topic\n\nDescription"
+
+    assert _merge_description(
+        existing,
+        "0:00 Intro\n1:00 Topic",
+        "prepend",
+    ) == existing
+
+
 def test_merge_append():
     out = _merge_description("existing", "0:00 A", "append")
     assert out == "existing\n\n0:00 A"
@@ -86,6 +96,16 @@ def test_merge_append():
 def test_merge_append_empty_existing():
     out = _merge_description("", "0:00 A", "append")
     assert out == "0:00 A"
+
+
+def test_merge_append_does_not_duplicate_existing_chapters():
+    existing = "Description\n\n0:00 Intro\n1:00 Topic"
+
+    assert _merge_description(
+        existing,
+        "0:00 Intro\n1:00 Topic",
+        "append",
+    ) == existing
 
 
 def test_merge_replace():

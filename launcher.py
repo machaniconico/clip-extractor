@@ -95,8 +95,14 @@ def main(argv=None):
     print("終了するにはこのウィンドウを閉じてください")
     print()
 
-    from web_app import create_ui, LAUNCH_THEME_KWARGS, safe_launch_kwargs
+    from web_app import (
+        LAUNCH_THEME_KWARGS,
+        create_ui,
+        safe_launch_kwargs,
+        schedule_obs_auto_connect,
+    )
 
+    schedule_obs_auto_connect()
     app = create_ui()
     app.queue()
     app.launch(**safe_launch_kwargs(

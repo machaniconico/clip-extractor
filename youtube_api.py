@@ -287,10 +287,18 @@ def _merge_description(existing: str, chapters: str, position: str) -> str:
     if position == "append":
         if not existing:
             return chapters
+        if existing == chapters or existing.rstrip().endswith(
+            f"\n\n{chapters}"
+        ):
+            return existing
         return f"{existing.rstrip()}\n\n{chapters}"
     # default: prepend
     if not existing:
         return chapters
+    if existing == chapters or existing.lstrip().startswith(
+        f"{chapters}\n\n"
+    ):
+        return existing
     return f"{chapters}\n\n{existing.lstrip()}"
 
 
