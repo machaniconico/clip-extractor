@@ -232,6 +232,23 @@ def load_obs_password() -> str:
         return ""
 
 
+def _obs_password_ui_copy(has_saved_password: bool) -> tuple[str, str]:
+    """Describe saved-secret state without sending the secret to the browser."""
+    if has_saved_password:
+        return (
+            "••••••••（保存済み）",
+            "Passwordは保存済みです。空欄のまま再利用します。"
+            "変更する場合は新しいPasswordを入力して「OBS連携 開始」を"
+            "押してください。",
+        )
+    return (
+        "Passwordを入力",
+        "Passwordは未保存です。「Passwordを保存」をONにして入力後、"
+        "「OBS連携 開始」を押すと保存します。"
+        "チェックだけでは保存されません。",
+    )
+
+
 def _save_obs_password(password: str) -> None:
     """Persist the OBS secret locally, or remove it when cleared."""
     value = password or ""
@@ -3817,6 +3834,10 @@ def create_ui():
                             value=defaults.get("obs_port", 4455),
                             precision=0,
                         )
+                        (
+                            obs_password_placeholder,
+                            obs_password_info,
+                        ) = _obs_password_ui_copy(bool(load_obs_password()))
                         with gr.Row(elem_classes="obs-password-heading"):
                             gr.HTML(
                                 "<span>WebSocket Password</span>",
@@ -3837,10 +3858,8 @@ def create_ui():
                             show_label=False,
                             value="",
                             type="password",
-                            info=(
-                                "ONで保存済みなら空欄のまま再利用します。"
-                                "OFFでは今回の接続だけに使用し、保存値を削除します。"
-                            ),
+                            placeholder=obs_password_placeholder,
+                            info=obs_password_info,
                         )
                         obs_watch_folder = gr.Textbox(
                             label="録画出力フォルダ (folder 方式 / またはパス補完用)",

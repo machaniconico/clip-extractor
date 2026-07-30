@@ -309,6 +309,21 @@ def test_unsaved_password_delete_failure_aborts_before_watcher_creation(
     assert password_file.read_text(encoding="utf-8") == "old-secret"
 
 
+def test_obs_password_ui_copy_makes_saved_state_and_save_timing_clear():
+    saved_placeholder, saved_info = web_app._obs_password_ui_copy(True)
+    empty_placeholder, empty_info = web_app._obs_password_ui_copy(False)
+
+    assert "保存済み" in saved_placeholder
+    assert "保存済み" in saved_info
+    assert "空欄のまま再利用" in saved_info
+    assert "OBS連携 開始" in saved_info
+
+    assert "入力" in empty_placeholder
+    assert "未保存" in empty_info
+    assert "OBS連携 開始" in empty_info
+    assert "チェックだけでは保存されません" in empty_info
+
+
 def test_obs_password_is_never_rendered_as_a_textbox_initial_value():
     module = ast.parse(WEB_APP.read_text(encoding="utf-8"))
 
@@ -327,9 +342,10 @@ def test_obs_password_is_never_rendered_as_a_textbox_initial_value():
         }
         assert isinstance(keywords["value"], ast.Constant)
         assert keywords["value"].value == ""
-        assert isinstance(keywords["info"], ast.Constant)
-        assert "保存済み" in keywords["info"].value
-        assert "空欄" in keywords["info"].value
+        assert isinstance(keywords["placeholder"], ast.Name)
+        assert keywords["placeholder"].id == "obs_password_placeholder"
+        assert isinstance(keywords["info"], ast.Name)
+        assert keywords["info"].id == "obs_password_info"
         break
     else:
         raise AssertionError("obs_password Textbox assignment not found")
@@ -338,6 +354,8 @@ def test_obs_password_is_never_rendered_as_a_textbox_initial_value():
     assert 'label="Passwordを保存"' in source
     assert "value=True" in source
     assert "value=bool(load_obs_password())" not in source
+    assert "placeholder=obs_password_placeholder" in source
+    assert "info=obs_password_info" in source
     assert 'elem_classes="obs-password-heading"' in source
     assert 'elem_classes="obs-password-save"' in source
     assert "保存済みPasswordを削除" not in source
