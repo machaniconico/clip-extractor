@@ -111,6 +111,7 @@ def test_obs_recording_is_the_default_source(monkeypatch, tmp_path):
     )
 
     assert web_app.load_defaults()["obs_stop_event"] == "record"
+    assert web_app.load_defaults()["obs_auto_connect_on_startup"] is True
     assert AppConfig().obs_stop_event == "record"
 
 

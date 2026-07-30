@@ -312,6 +312,28 @@ def test_stream_lifecycle_callbacks_preserve_obs_event_order(monkeypatch):
     w.stop()
 
 
+def test_duplicate_stream_started_events_dispatch_once():
+    starts = []
+    w = oi.ObsWebsocketWatcher(
+        "localhost",
+        4455,
+        "pw",
+        lambda _path: None,
+        stop_event="stream",
+        on_stream_started=lambda: starts.append("started"),
+    )
+    event = types.SimpleNamespace(
+        output_state=oi.OBS_WEBSOCKET_OUTPUT_STARTED,
+    )
+
+    w.on_stream_state_changed(event)
+    w.on_stream_state_changed(event)
+
+    assert starts == ["started"]
+    assert w.stream_active is True
+    w.stop()
+
+
 def test_obs_websocket_ignores_non_stopped_state(tmp_path, monkeypatch):
     monkeypatch.setattr(oi.time, "sleep", lambda *a, **k: None)
     rec = tmp_path / "obs_running.mp4"
@@ -361,6 +383,99 @@ def test_obs_websocket_start_registers_callbacks(monkeypatch):
     assert w._client.callback.registered == [w.on_record_state_changed, w.on_stream_state_changed]
     w.stop()
     assert w.status == "stopped"
+
+
+def test_obs_websocket_start_detects_an_already_active_stream(monkeypatch):
+    fake = types.ModuleType("obsws_python")
+    starts = []
+    request_clients = []
+
+    class _Callback:
+        def register(self, _fn):
+            pass
+
+    class _EventClient:
+        def __init__(self, **_kwargs):
+            self.callback = _Callback()
+
+        def disconnect(self):
+            pass
+
+    class _ReqClient:
+        def __init__(self, **_kwargs):
+            self.disconnected = False
+            request_clients.append(self)
+
+        def get_stream_status(self):
+            return types.SimpleNamespace(output_active=True)
+
+        def disconnect(self):
+            self.disconnected = True
+
+    fake.EventClient = _EventClient
+    fake.ReqClient = _ReqClient
+    monkeypatch.setitem(sys.modules, "obsws_python", fake)
+
+    w = oi.ObsWebsocketWatcher(
+        "localhost",
+        4455,
+        "pw",
+        lambda _path: None,
+        stop_event="stream",
+        on_stream_started=lambda: starts.append("started"),
+    )
+    w.start()
+
+    assert starts == ["started"]
+    assert w.stream_status_checked is True
+    assert w.stream_active is True
+    assert request_clients[0].disconnected is True
+    w.stop()
+
+
+def test_obs_websocket_start_does_not_report_an_inactive_stream(monkeypatch):
+    fake = types.ModuleType("obsws_python")
+    starts = []
+
+    class _Callback:
+        def register(self, _fn):
+            pass
+
+    class _EventClient:
+        def __init__(self, **_kwargs):
+            self.callback = _Callback()
+
+        def disconnect(self):
+            pass
+
+    class _ReqClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_stream_status(self):
+            return types.SimpleNamespace(output_active=False)
+
+        def disconnect(self):
+            pass
+
+    fake.EventClient = _EventClient
+    fake.ReqClient = _ReqClient
+    monkeypatch.setitem(sys.modules, "obsws_python", fake)
+
+    w = oi.ObsWebsocketWatcher(
+        "localhost",
+        4455,
+        "pw",
+        lambda _path: None,
+        stop_event="stream",
+        on_stream_started=lambda: starts.append("started"),
+    )
+    w.start()
+
+    assert starts == []
+    assert w.stream_status_checked is True
+    assert w.stream_active is False
+    w.stop()
 
 
 def test_obs_websocket_start_missing_dep(monkeypatch):

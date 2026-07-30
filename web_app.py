@@ -259,7 +259,7 @@ def load_defaults() -> dict:
         "output_base_dir": "",
         "premiere_executable_path": "",
         "obs_launch_on_startup": False,
-        "obs_auto_connect_on_startup": False,
+        "obs_auto_connect_on_startup": True,
         "obs_executable_path": "",
     }
     defaults.update(OBS_CONNECTION_DEFAULTS)
@@ -319,7 +319,7 @@ def save_defaults(ai_provider, ai_model,
                   premiere_executable_path="",
                   obs_launch_on_startup=False,
                   obs_executable_path="",
-                  obs_auto_connect_on_startup=False):
+                  obs_auto_connect_on_startup=True):
     """Save current settings as defaults."""
     saved_obs = {
         key: value
@@ -381,7 +381,10 @@ def _create_output_dir(base_dir: Path) -> Path:
     raise RuntimeError("一意な出力フォルダを作成できませんでした")
 
 
-def pick_folder_dialog(current_value: str) -> str:
+def pick_folder_dialog(
+    current_value: str,
+    title: str = "保存先フォルダを選択",
+) -> str:
     """Open the native OS folder-picker and return the selected path.
 
     On cancel / error, returns the current textbox value unchanged so
@@ -395,15 +398,18 @@ def pick_folder_dialog(current_value: str) -> str:
     except Exception:
         pass
 
-    fallback = current_value if (current_value or "").strip() else str(initial)
+    fallback = current_value or ""
 
     if os.name == "nt":
         try:
+            safe_initial = str(initial).replace("'", "''")
+            safe_title = str(title).replace("'", "''")
             ps_cmd = (
+                "[Console]::OutputEncoding=[Text.UTF8Encoding]::new();"
                 "Add-Type -AssemblyName System.Windows.Forms | Out-Null;"
                 "$d = New-Object System.Windows.Forms.FolderBrowserDialog;"
-                f"$d.SelectedPath = '{str(initial).replace(chr(39), chr(39)*2)}';"
-                "$d.Description = '保存先フォルダを選択';"
+                f"$d.SelectedPath = '{safe_initial}';"
+                f"$d.Description = '{safe_title}';"
                 "$d.ShowNewFolderButton = $true;"
                 "if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) "
                 "{ [Console]::Out.WriteLine($d.SelectedPath) }"
@@ -426,7 +432,7 @@ def pick_folder_dialog(current_value: str) -> str:
             _root.withdraw()
             _root.attributes("-topmost", True)
             picked = _fd.askdirectory(
-                title="保存先フォルダを選択",
+                title=title,
                 initialdir=str(initial),
             )
             _root.destroy()
@@ -436,6 +442,14 @@ def pick_folder_dialog(current_value: str) -> str:
             logger.warning(f"tkinter folder picker failed: {exc}")
 
     return fallback
+
+
+def pick_obs_watch_folder_dialog(current_value: str) -> str:
+    """Open the native picker for the OBS recording output directory."""
+    return pick_folder_dialog(
+        current_value,
+        title="録画出力フォルダを選択",
+    )
 
 
 def open_output_folder(current_base: str) -> None:
@@ -2643,9 +2657,15 @@ def _start_obs_watch_impl(
         return f"OBS連携開始エラー: {e}"
     status = watcher.status
     _obs_append_status(f"OBS連携を開始: {status}")
-    if archive_started is not None and str(status).lower().startswith("connected"):
-        # Covers the common case where OBS連携 is started after streaming has
-        # already begun and no StreamStateChanged STARTED event will arrive.
+    if (
+        archive_started is not None
+        and str(status).lower().startswith("connected")
+        and not bool(getattr(watcher, "stream_status_checked", False))
+        and not bool(getattr(watcher, "stream_active", False))
+    ):
+        # Compatibility fallback for older/mocked obsws-python clients that
+        # cannot query GetStreamStatus. Current clients invoke the callback
+        # only when output_active is true.
         archive_started(proactive=True)
     return status
 
@@ -2698,35 +2718,51 @@ def _wait_for_obs_websocket(
     host: str,
     port: int,
     *,
-    timeout: float,
+    timeout: float | None,
     retry_interval: float,
 ) -> bool:
     """Wait until OBS' TCP endpoint accepts connections or startup is canceled."""
-    deadline = time.monotonic() + max(0.0, float(timeout))
+    deadline = (
+        None
+        if timeout is None
+        else time.monotonic() + max(0.0, float(timeout))
+    )
     interval = max(0.05, float(retry_interval))
 
     while not _obs_auto_connect_cancel.is_set():
-        remaining = max(0.0, deadline - time.monotonic())
+        remaining = (
+            None
+            if deadline is None
+            else max(0.0, deadline - time.monotonic())
+        )
         try:
             with socket.create_connection(
                 (host, int(port)),
-                timeout=max(0.05, min(0.5, remaining or 0.05)),
+                timeout=(
+                    0.5
+                    if remaining is None
+                    else max(0.05, min(0.5, remaining or 0.05))
+                ),
             ):
                 return True
         except (OSError, TypeError, ValueError):
             pass
 
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        if _obs_auto_connect_cancel.wait(timeout=min(interval, remaining)):
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            sleep_for = min(interval, remaining)
+        else:
+            sleep_for = interval
+        if _obs_auto_connect_cancel.wait(timeout=sleep_for):
             return False
     return False
 
 
 def start_obs_watch_from_defaults(
     *,
-    wait_timeout: float = 30.0,
+    wait_timeout: float | None = 30.0,
     retry_interval: float = 0.5,
 ) -> str | None:
     """Start OBS integration from saved settings when the opt-in is enabled.
@@ -2760,8 +2796,13 @@ def start_obs_watch_from_defaults(
             if _obs_auto_connect_cancel.is_set():
                 msg = "手動操作を優先し、起動時のOBS自動連携をキャンセルしました"
             else:
+                waited = (
+                    f"{float(wait_timeout):g}秒"
+                    if wait_timeout is not None
+                    else ""
+                )
                 msg = (
-                    f"OBS WebSocketを{float(wait_timeout):g}秒待ちましたが"
+                    f"OBS WebSocketを{waited}待ちましたが"
                     "準備完了を確認できませんでした。OBS連携タブから手動で"
                     "開始するか、WebSocketサーバー設定を確認してください"
                 )
@@ -2801,7 +2842,7 @@ def start_obs_watch_from_defaults(
 
 
 def _run_obs_auto_connect_worker(
-    wait_timeout: float,
+    wait_timeout: float | None,
     retry_interval: float,
 ) -> None:
     """Daemon-thread target with a final fail-open safety boundary."""
@@ -2822,10 +2863,10 @@ def _run_obs_auto_connect_worker(
 
 def schedule_obs_auto_connect(
     *,
-    wait_timeout: float = 30.0,
+    wait_timeout: float | None = None,
     retry_interval: float = 0.5,
 ) -> threading.Thread | None:
-    """Schedule at most one non-blocking startup connection attempt."""
+    """Wait in the background for OBS, then connect at most one watcher."""
     global _obs_auto_connect_thread
     try:
         enabled = load_defaults().get("obs_auto_connect_on_startup") is True
@@ -3785,7 +3826,7 @@ def create_ui():
                             )
                             obs_save_password = gr.Checkbox(
                                 label="Passwordを保存",
-                                value=bool(load_obs_password()),
+                                value=True,
                                 container=False,
                                 scale=0,
                                 min_width=0,
@@ -3804,7 +3845,19 @@ def create_ui():
                         obs_watch_folder = gr.Textbox(
                             label="録画出力フォルダ (folder 方式 / またはパス補完用)",
                             value=defaults.get("obs_watch_folder", ""),
-                            info="folder 方式で監視するフォルダの絶対パス",
+                            info=(
+                                "ボタンから選ぶか、folder 方式で監視する"
+                                "フォルダの絶対パスを直接入力します。"
+                            ),
+                        )
+                        obs_browse_folder_btn = gr.Button(
+                            "📁 録画出力フォルダを選択…",
+                            variant="secondary",
+                        )
+                        obs_browse_folder_btn.click(
+                            fn=pick_obs_watch_folder_dialog,
+                            inputs=obs_watch_folder,
+                            outputs=obs_watch_folder,
                         )
 
                 with gr.Row():
@@ -3973,12 +4026,14 @@ def create_ui():
                             value=bool(
                                 defaults.get(
                                     "obs_auto_connect_on_startup",
-                                    False,
+                                    True,
                                 )
                             ),
                             info=(
-                                "OBS WebSocketの準備完了を最大30秒待ち、"
-                                "OBS連携タブの保存済み設定で接続します。"
+                                "OBS WebSocketへ自動接続します。"
+                                "OBSが後から起動した場合も待機を続け、"
+                                "配信開始を検知すると"
+                                "OBS連携タブの保存済み設定で処理を開始します。"
                                 "Passwordが必要な場合は同タブで保存してください。"
                             ),
                         )

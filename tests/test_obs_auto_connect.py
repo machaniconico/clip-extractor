@@ -172,7 +172,7 @@ def test_websocket_readiness_retries_until_port_accepts(monkeypatch):
     assert web_app._wait_for_obs_websocket(
         "localhost",
         4455,
-        timeout=0.3,
+        timeout=None,
         retry_interval=0.01,
     ) is True
     assert len(calls) == 3
@@ -208,8 +208,10 @@ def test_scheduler_is_daemon_nonblocking_and_deduplicated(monkeypatch, tmp_path)
     _isolate_settings(monkeypatch, tmp_path)
     started = threading.Event()
     release = threading.Event()
+    received_kwargs = []
 
-    def fake_auto_start(**_kwargs):
+    def fake_auto_start(**kwargs):
+        received_kwargs.append(kwargs)
         started.set()
         release.wait(timeout=2)
         return "connected"
@@ -224,6 +226,10 @@ def test_scheduler_is_daemon_nonblocking_and_deduplicated(monkeypatch, tmp_path)
     assert second is first
     assert first.daemon is True
     assert first.name == "obs-auto-connect"
+    assert received_kwargs == [{
+        "wait_timeout": None,
+        "retry_interval": 0.5,
+    }]
 
     release.set()
     first.join(timeout=1)
