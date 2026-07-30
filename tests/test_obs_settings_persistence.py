@@ -336,7 +336,8 @@ def test_obs_password_is_never_rendered_as_a_textbox_initial_value():
 
     source = WEB_APP.read_text(encoding="utf-8")
     assert 'label="Passwordを保存"' in source
-    assert "value=bool(load_obs_password())" in source
+    assert "value=True" in source
+    assert "value=bool(load_obs_password())" not in source
     assert 'elem_classes="obs-password-heading"' in source
     assert 'elem_classes="obs-password-save"' in source
     assert "保存済みPasswordを削除" not in source

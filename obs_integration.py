@@ -139,11 +139,26 @@ class ObsWebsocketWatcher(_WorkerMixin):
         self._trigger = (stop_event or "record").lower()
         self._client = None
         self._status = "stopped"
+        self._stream_state_lock = threading.Lock()
+        self._stream_active = False
+        self._stream_status_checked = False
 
     @property
     def status(self) -> str:
         """Human-readable connection/handler status (safe to poll from UI)."""
         return self._status
+
+    @property
+    def stream_active(self) -> bool:
+        """Whether a stream-start event/current-status probe reports active."""
+        with self._stream_state_lock:
+            return self._stream_active
+
+    @property
+    def stream_status_checked(self) -> bool:
+        """Whether OBS current stream status was queried successfully."""
+        with self._stream_state_lock:
+            return self._stream_status_checked
 
     def start(self) -> None:
         """Connect to OBS and subscribe to record/stream state events.
@@ -170,6 +185,12 @@ class ObsWebsocketWatcher(_WorkerMixin):
                 f"connected: {self._host}:{self._port} (trigger={self._trigger})"
             )
             logger.info(self._status)
+            if (
+                self._trigger == "stream"
+                or self._stream_started_callback is not None
+                or self._stream_finished_callback is not None
+            ):
+                self._probe_current_stream_status(obs)
         except Exception as e:  # ConnectionRefusedError, TimeoutError, auth errors
             self._client = None
             self._status = f"接続失敗: {e}"
@@ -198,6 +219,8 @@ class ObsWebsocketWatcher(_WorkerMixin):
                 except Exception:
                     pass
         self._join_workers()
+        with self._stream_state_lock:
+            self._stream_active = False
         self._status = "stopped"
 
     # --- obsws-python event callbacks -------------------------------------
@@ -235,12 +258,18 @@ class ObsWebsocketWatcher(_WorkerMixin):
             ):
                 return
             if state == OBS_WEBSOCKET_OUTPUT_STARTED:
+                with self._stream_state_lock:
+                    if self._stream_active:
+                        return
+                    self._stream_active = True
                 logger.info("OBS stream started")
                 if self._stream_started_callback is not None:
                     self._dispatch_stream_callback(self._stream_started_callback)
                 return
             if state != OBS_WEBSOCKET_OUTPUT_STOPPED:
                 return
+            with self._stream_state_lock:
+                self._stream_active = False
             logger.info("OBS stream stopped")
             if self._stream_finished_callback is not None:
                 self._dispatch_stream_callback(self._stream_finished_callback)
@@ -252,6 +281,38 @@ class ObsWebsocketWatcher(_WorkerMixin):
             logger.exception("on_stream_state_changed failed")
 
     # --- internals --------------------------------------------------------
+
+    def _probe_current_stream_status(self, obs_module: object) -> None:
+        """Detect a stream that was already active when the listener connected.
+
+        EventClient only receives future StreamStateChanged events. A short-lived
+        ReqClient query closes that gap. Query failure is non-fatal: the event
+        listener remains connected and a compatibility fallback can still run.
+        """
+        request_client = None
+        try:
+            request_client = obs_module.ReqClient(  # type: ignore[attr-defined]
+                host=self._host,
+                port=self._port,
+                password=self._password,
+                timeout=5,
+            )
+            response = request_client.get_stream_status()
+            with self._stream_state_lock:
+                self._stream_status_checked = True
+            if bool(getattr(response, "output_active", False)):
+                self.on_stream_state_changed(
+                    {"outputState": OBS_WEBSOCKET_OUTPUT_STARTED}
+                )
+        except Exception as exc:
+            logger.warning("OBS stream status probe failed: %s", exc)
+        finally:
+            disconnect = getattr(request_client, "disconnect", None)
+            if callable(disconnect):
+                try:
+                    disconnect()
+                except Exception:
+                    pass
 
     def _dispatch_stream_callback(self, callback: Callable, *args) -> None:
         """Invoke lightweight callbacks inline to preserve OBS event order."""

@@ -63,6 +63,8 @@ def _event_output_names(
         for keyword in node.keywords:
             if keyword.arg != "outputs":
                 continue
+            if isinstance(keyword.value, ast.Name):
+                return [keyword.value.id]
             assert isinstance(keyword.value, ast.List), ast.dump(keyword.value)
             names = []
             for elt in keyword.value.elts:
@@ -97,6 +99,8 @@ def _event_input_names(
         for keyword in node.keywords:
             if keyword.arg != "inputs":
                 continue
+            if isinstance(keyword.value, ast.Name):
+                return [keyword.value.id]
             assert isinstance(keyword.value, ast.List), ast.dump(keyword.value)
             names = []
             for elt in keyword.value.elts:
@@ -200,6 +204,25 @@ def test_settings_exposes_obs_startup_checkbox_and_executable_path():
         "save_defaults_btn",
     )
     assert "obs_executable_path" in _click_input_names(_module(), "save_defaults_btn")
+    assert "OBSが後から起動した場合も待機を続け" in source
+    assert "配信開始を検知" in source
+
+
+def test_obs_recording_folder_picker_updates_the_watch_folder_textbox():
+    module = _module()
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert '"📁 録画出力フォルダを選択…"' in source
+    assert _event_input_names(
+        module,
+        "pick_obs_watch_folder_dialog",
+        "click",
+    ) == ["obs_watch_folder"]
+    assert _event_output_names(
+        module,
+        "pick_obs_watch_folder_dialog",
+        "click",
+    ) == ["obs_watch_folder"]
 
 
 def test_premiere_button_and_render_state_are_wired():
