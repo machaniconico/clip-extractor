@@ -118,6 +118,7 @@ def test_obs_processing_profile_is_separate_from_archive_defaults(
         True,
         0.8,
         True,
+        False,
     )
 
     assert "OBS" in result
@@ -132,6 +133,7 @@ def test_obs_processing_profile_is_separate_from_archive_defaults(
         "enable_chapters": True,
         "chapter_prompt": "OBS chapters",
         "auto_append_youtube": True,
+        "confirm_before_auto_process": False,
         "num_clips": 11,
         "min_duration": 55,
         "max_duration": 120,
@@ -157,6 +159,9 @@ def test_roundtrip_preserves_defaults(monkeypatch, tmp_path):
     assert loaded["audio_fusion"] is False, loaded
     assert loaded["audio_alpha"] == 0.35, loaded
     assert loaded["karaoke"] is False, loaded
+    assert web_app._obs_processing_settings_from_defaults(loaded)[
+        "confirm_before_auto_process"
+    ] is True
 
 
 def test_obs_recording_is_the_default_source(monkeypatch, tmp_path):

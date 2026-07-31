@@ -212,6 +212,96 @@ def test_obs_auto_pipeline_empty_path_returns_error():
     assert "パス" in result  # "録画パスが空です"
 
 
+def _wait_for_obs_confirmation(timeout=5):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with web_app._obs_confirmation_lock:
+            if web_app._obs_pending_confirmation is not None:
+                return True
+        time.sleep(0.01)
+    return False
+
+
+def test_obs_auto_callback_waits_for_confirmation_before_running_pipeline(monkeypatch):
+    with web_app._obs_status_lock:
+        web_app._obs_status_lines.clear()
+    pipeline_called = threading.Event()
+
+    def fake_pipeline(_path, _settings):
+        pipeline_called.set()
+        return web_app.ObsPipelineOutcome(log="[OBS] Render 完了", success=True)
+
+    monkeypatch.setattr(web_app, "_run_obs_auto_pipeline_outcome", fake_pipeline)
+    callback = web_app._obs_make_callback(
+        auto_process=True,
+        settings={
+            "enable_clips": True,
+            "enable_chapters": True,
+            "clip_prompt": "",
+            "confirm_before_auto_process": True,
+        },
+    )
+    callback("C:/recordings/confirmation.mkv")
+
+    assert _wait_for_obs_confirmation(), web_app._obs_status_text()
+    assert not pipeline_called.wait(timeout=0.2)
+    assert web_app._obs_resolve_confirmation(True) is True
+    assert pipeline_called.wait(timeout=5), web_app._obs_status_text()
+    assert "Render 完了" in web_app._obs_status_text()
+
+
+def test_obs_auto_callback_skips_when_confirmation_is_declined(monkeypatch):
+    with web_app._obs_status_lock:
+        web_app._obs_status_lines.clear()
+    pipeline_called = threading.Event()
+
+    monkeypatch.setattr(
+        web_app,
+        "_run_obs_auto_pipeline_outcome",
+        lambda *_args, **_kwargs: pipeline_called.set(),
+    )
+    callback = web_app._obs_make_callback(
+        auto_process=True,
+        settings={
+            "enable_clips": True,
+            "enable_chapters": True,
+            "clip_prompt": "",
+            "confirm_before_auto_process": True,
+        },
+    )
+    callback("C:/recordings/skip-confirmation.mkv")
+
+    assert _wait_for_obs_confirmation(), web_app._obs_status_text()
+    assert web_app._obs_resolve_confirmation(False) is True
+    time.sleep(0.2)
+    assert not pipeline_called.is_set()
+    assert "自動生成をスキップしました" in web_app._obs_status_text()
+
+
+def test_obs_auto_callback_starts_without_confirmation_when_disabled(monkeypatch):
+    pipeline_called = threading.Event()
+    monkeypatch.setattr(
+        web_app,
+        "_run_obs_auto_pipeline_outcome",
+        lambda *_args, **_kwargs: (
+            pipeline_called.set()
+            or web_app.ObsPipelineOutcome(log="[OBS] Render 完了", success=True)
+        ),
+    )
+    callback = web_app._obs_make_callback(
+        auto_process=True,
+        settings={
+            "enable_clips": True,
+            "enable_chapters": True,
+            "clip_prompt": "",
+            "confirm_before_auto_process": False,
+        },
+    )
+    callback("C:/recordings/no-confirmation.mkv")
+
+    assert pipeline_called.wait(timeout=5), web_app._obs_status_text()
+
+
 def test_obs_youtube_pipeline_uses_url_and_respects_generation_toggles(
     tmp_path, monkeypatch
 ):

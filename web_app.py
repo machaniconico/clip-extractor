@@ -72,6 +72,7 @@ class ObsPipelineOutcome:
     chapters_path: str = ""
     chapters_text: str = ""
     youtube_appended: bool | None = None
+    skipped: bool = False
 
 # --- File logging setup ---
 # Use TEMP dir to avoid Japanese path issues with OneDrive/Desktop
@@ -187,6 +188,7 @@ OBS_PROCESSING_DEFAULTS = {
     "enable_chapters": True,
     "chapter_prompt": "",
     "auto_append_youtube": False,
+    "confirm_before_auto_process": True,
     "num_clips": 5,
     "min_duration": 30,
     "max_duration": 90,
@@ -229,6 +231,7 @@ def _normalise_obs_processing_settings(
     base["enable_clips"] = bool(base["enable_clips"])
     base["enable_chapters"] = bool(base["enable_chapters"])
     base["auto_append_youtube"] = bool(base["auto_append_youtube"])
+    base["confirm_before_auto_process"] = bool(base["confirm_before_auto_process"])
     base["generate_shorts"] = bool(base["generate_shorts"])
     base["shorts_title"] = bool(base["shorts_title"])
     base["generate_thumbnails"] = bool(base["generate_thumbnails"])
@@ -268,6 +271,7 @@ def _build_obs_processing_settings(
     audio_fusion,
     audio_alpha,
     karaoke,
+    confirm_before_auto_process=True,
 ) -> dict:
     """Build the OBS profile from the dedicated controls in the UI."""
     return _normalise_obs_processing_settings(
@@ -277,6 +281,7 @@ def _build_obs_processing_settings(
             "enable_chapters": enable_chapters,
             "chapter_prompt": chapter_prompt,
             "auto_append_youtube": auto_append_youtube,
+            "confirm_before_auto_process": confirm_before_auto_process,
             "num_clips": num_clips,
             "min_duration": min_duration,
             "max_duration": max_duration,
@@ -515,6 +520,7 @@ def save_obs_processing_defaults(
     audio_fusion,
     audio_alpha,
     karaoke,
+    confirm_before_auto_process=True,
 ):
     """Persist the dedicated OBS processing profile without changing Input."""
     data = load_defaults()
@@ -537,6 +543,7 @@ def save_obs_processing_defaults(
         audio_fusion,
         audio_alpha,
         karaoke,
+        confirm_before_auto_process,
     )
     SETTINGS_FILE.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
@@ -1434,7 +1441,10 @@ _obs_generation = 0
 _obs_pipeline_threads: list[threading.Thread] = []
 _obs_status_lines: list[str] = []
 _obs_status_lock = threading.Lock()
+_obs_confirmation_lock = threading.Lock()
+_obs_pending_confirmation: dict | None = None
 _OBS_STATUS_MAX = 80
+_OBS_CONFIRMATION_TIMEOUT = 15 * 60
 _OBS_ARCHIVE_DISCOVERY_TIMEOUT = 15 * 60
 _OBS_ARCHIVE_READY_TIMEOUT = 6 * 60 * 60
 _OBS_RECORDING_EVENT_TIMEOUT = 60
@@ -1550,6 +1560,115 @@ def _obs_status_text() -> str:
 def _obs_status_poll() -> str:
     """Gradio Timer/btn target: return the current shared status text."""
     return _obs_status_text()
+
+
+def _obs_effective_prompt(settings: dict) -> str:
+    """Return the prompt that will actually drive automatic highlight detection."""
+    if bool(settings.get("enable_clips", True)):
+        return str(settings.get("clip_prompt", "") or "").strip()
+    if bool(settings.get("enable_chapters", True)):
+        return str(settings.get("chapter_prompt", "") or "").strip()
+    return ""
+
+
+def _obs_confirmation_poll() -> tuple:
+    """Return the pending confirmation panel state for the Gradio timer."""
+    with _obs_confirmation_lock:
+        request = dict(_obs_pending_confirmation or {})
+    if not request:
+        return gr.update(visible=False), ""
+    return gr.update(visible=True), request.get("message", "")
+
+
+def _obs_resolve_confirmation(approved: bool) -> bool:
+    """Resolve the current user confirmation from a Gradio button event."""
+    with _obs_confirmation_lock:
+        request = _obs_pending_confirmation
+        if request is None or request.get("decision") is not None:
+            return False
+        request["decision"] = bool(approved)
+        request["event"].set()
+    return True
+
+
+def _obs_confirmation_button_result(approved: bool) -> tuple:
+    resolved = _obs_resolve_confirmation(approved)
+    if resolved:
+        _obs_append_status(
+            "自動生成の確認を受け付けました: "
+            + ("生成を開始します" if approved else "今回はスキップします")
+        )
+    return gr.update(visible=False), "", _obs_status_text()
+
+
+def _obs_confirm_generation() -> tuple:
+    return _obs_confirmation_button_result(True)
+
+
+def _obs_skip_generation() -> tuple:
+    return _obs_confirmation_button_result(False)
+
+
+def _obs_cancel_pending_confirmation() -> None:
+    """Wake a worker waiting for confirmation when OBS integration stops."""
+    with _obs_confirmation_lock:
+        request = _obs_pending_confirmation
+        if request is not None and request.get("decision") is None:
+            request["decision"] = False
+            request["event"].set()
+
+
+def _obs_confirm_before_auto_process(
+    settings: dict,
+    source_label: str,
+    is_current: Callable[[], bool],
+) -> bool:
+    """Wait for confirmation when enabled and the effective prompt is empty.
+
+    The watcher runs outside a Gradio request, so confirmation is represented by
+    a small shared request that the UI timer renders and the two buttons resolve.
+    A timeout or watcher stop is fail-closed and skips generation.
+    """
+    if not bool(settings.get("confirm_before_auto_process", False)):
+        return True
+    if _obs_effective_prompt(settings):
+        return True
+
+    request = {
+        "event": threading.Event(),
+        "decision": None,
+        "message": (
+            "### 自動生成の確認\n\n"
+            "プロンプトが未入力です。このまま自動生成を開始してもよろしいですか？\n\n"
+            f"対象: `{source_label}`"
+        ),
+    }
+    global _obs_pending_confirmation
+    with _obs_confirmation_lock:
+        if _obs_pending_confirmation is not None:
+            _obs_append_status("別の自動生成確認が処理中のため、この処理をスキップしました")
+            return False
+        _obs_pending_confirmation = request
+    _obs_append_status("プロンプト未入力のため、自動生成の確認を待っています")
+
+    deadline = time.monotonic() + _OBS_CONFIRMATION_TIMEOUT
+    while is_current() and time.monotonic() < deadline:
+        if request["event"].wait(timeout=0.25):
+            break
+
+    with _obs_confirmation_lock:
+        if _obs_pending_confirmation is request:
+            _obs_pending_confirmation = None
+        decision = request.get("decision")
+
+    if not is_current():
+        return False
+    if decision is True:
+        return True
+    if decision is False:
+        return False
+    _obs_append_status("自動生成の確認がタイムアウトしたため、今回はスキップしました")
+    return False
 
 
 def _register_obs_worker(t: threading.Thread) -> None:
@@ -2064,6 +2183,7 @@ def _obs_make_stream_pipeline_callbacks(
             "recording_done": threading.Event(),
             "recording_path": "",
             "recording_outcome": None,
+            "confirmation_decision": None,
             "source_claim": None,
         }
 
@@ -2152,6 +2272,23 @@ def _obs_make_stream_pipeline_callbacks(
             try:
                 if not _is_current():
                     return
+                if not _obs_confirm_before_auto_process(
+                    settings,
+                    str(video_path),
+                    _is_current,
+                ):
+                    skipped = ObsPipelineOutcome(
+                        log="自動生成の確認がないため、OBS録画の処理をスキップしました",
+                        success=True,
+                        skipped=True,
+                    )
+                    with state_lock:
+                        stream_state["confirmation_decision"] = "skipped"
+                        stream_state["recording_outcome"] = skipped
+                    _obs_append_status(skipped.log)
+                    return
+                with state_lock:
+                    stream_state["confirmation_decision"] = "approved"
                 local_settings = dict(settings)
                 # A local path cannot identify the matching YouTube video.
                 # The stream-finish worker applies these chapters once the
@@ -2332,6 +2469,13 @@ def _obs_make_stream_pipeline_callbacks(
                             local_outcome = candidate_outcome
                         elif candidate_outcome is not None:
                             local_outcome = candidate_outcome
+                        if getattr(local_outcome, "skipped", False):
+                            with state_lock:
+                                state["completed_epochs"].add(epoch)
+                            _obs_append_status(
+                                "確認されなかったため、この配信の自動生成をスキップしました"
+                            )
+                            return
                         use_recording = bool(
                             local_outcome is not None
                             and getattr(local_outcome, "success", False)
@@ -2350,6 +2494,33 @@ def _obs_make_stream_pipeline_callbacks(
                             "配信終了後60秒以内に安定したOBS録画を検知できなかったため、"
                             "YouTube完成アーカイブへフォールバックします"
                         )
+
+                with state_lock:
+                    confirmation_decision = stream_state.get(
+                        "confirmation_decision"
+                    )
+                if confirmation_decision == "skipped":
+                    with state_lock:
+                        state["completed_epochs"].add(epoch)
+                    _obs_append_status(
+                        "確認されなかったため、この配信の自動生成をスキップしました"
+                    )
+                    return
+                if confirmation_decision != "approved":
+                    if not _obs_confirm_before_auto_process(
+                        settings,
+                        "YouTube完成アーカイブ",
+                        _is_current,
+                    ):
+                        if _is_current():
+                            with state_lock:
+                                state["completed_epochs"].add(epoch)
+                            _obs_append_status(
+                                "確認されなかったため、この配信の自動生成をスキップしました"
+                            )
+                        return
+                    with state_lock:
+                        stream_state["confirmation_decision"] = "approved"
 
                 while not archive_pipeline_lock.acquire(timeout=0.25):
                     if not _is_current():
@@ -2644,6 +2815,16 @@ def _obs_make_callback(
             try:
                 if not _is_current():
                     return
+                if not _obs_confirm_before_auto_process(
+                    settings,
+                    str(video_path),
+                    _is_current,
+                ):
+                    if _is_current():
+                        _obs_append_status(
+                            f"自動生成をスキップしました: {video_path}"
+                        )
+                    return
                 _obs_append_status(f"自動パイプライン開始: {video_path}")
                 outcome = _run_obs_auto_pipeline_outcome(video_path, settings)
                 _obs_append_status(outcome.log)
@@ -2673,6 +2854,7 @@ def _stop_obs_watch_impl() -> str:
         watcher = _obs_watcher
         _obs_watcher = None
         _obs_generation += 1
+    _obs_cancel_pending_confirmation()
     if watcher is None:
         msg = "OBS連携は停止中です"
         _obs_append_status(msg)
@@ -2963,6 +3145,7 @@ def start_obs_watch(
     obs_audio_fusion=None,
     obs_audio_alpha=None,
     obs_karaoke=None,
+    obs_confirm_before_auto_process=None,
 ) -> str:
     """Manually (re)start OBS integration from the Gradio controls.
 
@@ -2988,6 +3171,7 @@ def start_obs_watch(
             obs_audio_fusion,
             obs_audio_alpha,
             obs_karaoke,
+            obs_confirm_before_auto_process,
         )
     ):
         obs_processing_settings = _build_obs_processing_settings(
@@ -3008,6 +3192,7 @@ def start_obs_watch(
             obs_audio_fusion,
             obs_audio_alpha,
             obs_karaoke,
+            obs_confirm_before_auto_process,
         )
     with _obs_start_lock:
         return _start_obs_watch_impl(
@@ -4220,6 +4405,16 @@ def create_ui():
                                 value=obs_processing_defaults["auto_append_youtube"],
                                 info="配信アーカイブの概要欄へ生成したタイムスタンプを追加します",
                             )
+                            obs_confirm_before_auto_process = gr.Checkbox(
+                                label="プロンプト未入力時に自動生成前の確認を表示",
+                                value=obs_processing_defaults[
+                                    "confirm_before_auto_process"
+                                ],
+                                info=(
+                                    "ONの場合、プロンプトが空のときに生成開始前の確認を待ちます。"
+                                    "OFFなら検知後すぐに開始します"
+                                ),
+                            )
                         with gr.Column():
                             obs_num_clips = gr.Number(
                                 minimum=1,
@@ -4325,6 +4520,7 @@ def create_ui():
                             obs_audio_fusion,
                             obs_audio_alpha,
                             obs_karaoke,
+                            obs_confirm_before_auto_process,
                         ],
                         outputs=obs_save_processing_msg,
                     )
@@ -4341,6 +4537,18 @@ def create_ui():
                     value="",
                 )
 
+                with gr.Group(visible=False) as obs_confirmation_group:
+                    obs_confirmation_message = gr.Markdown("")
+                    with gr.Row():
+                        obs_confirm_btn = gr.Button(
+                            "はい、生成を開始",
+                            variant="primary",
+                        )
+                        obs_skip_btn = gr.Button(
+                            "今回はスキップ",
+                            variant="secondary",
+                        )
+
                 # Live status updates. gr.Timer exists in Gradio 6.x; fall back
                 # to the manual refresh button on older versions (signature
                 # inspection pattern, same as safe_launch_kwargs / theme split).
@@ -4352,6 +4560,10 @@ def create_ui():
                         _obs_timer = None
                 if _obs_timer is not None:
                     _obs_timer.tick(fn=_obs_status_poll, outputs=obs_status_box)
+                    _obs_timer.tick(
+                        fn=_obs_confirmation_poll,
+                        outputs=[obs_confirmation_group, obs_confirmation_message],
+                    )
 
             # --- Settings Tab ---
             with gr.Tab("Settings / 設定"):
@@ -4896,6 +5108,7 @@ def create_ui():
                 obs_audio_fusion,
                 obs_audio_alpha,
                 obs_karaoke,
+                obs_confirm_before_auto_process,
             ],
             outputs=obs_status_box,
         )
@@ -4908,6 +5121,21 @@ def create_ui():
             fn=_obs_status_poll,
             inputs=[],
             outputs=obs_status_box,
+        )
+        obs_refresh_btn.click(
+            fn=_obs_confirmation_poll,
+            inputs=[],
+            outputs=[obs_confirmation_group, obs_confirmation_message],
+        )
+        obs_confirm_btn.click(
+            fn=_obs_confirm_generation,
+            inputs=[],
+            outputs=[obs_confirmation_group, obs_confirmation_message, obs_status_box],
+        )
+        obs_skip_btn.click(
+            fn=_obs_skip_generation,
+            inputs=[],
+            outputs=[obs_confirmation_group, obs_confirmation_message, obs_status_box],
         )
         # Instructions
         with gr.Accordion("使い方 / How to Use", open=False):
