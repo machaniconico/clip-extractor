@@ -86,6 +86,67 @@ def test_roundtrip_shorts_fields(monkeypatch, tmp_path):
     assert loaded["shorts_title"] is False, loaded
 
 
+def test_obs_processing_profile_is_separate_from_archive_defaults(
+    monkeypatch, tmp_path
+):
+    loaded = _save_with(
+        monkeypatch,
+        tmp_path,
+        num_clips=3,
+        min_duration=20,
+        max_duration=45,
+        generate_shorts=False,
+    )
+    assert loaded["num_clips"] == 3
+    assert "obs_processing" not in loaded
+
+    result = web_app.save_obs_processing_defaults(
+        True,
+        "OBS only",
+        True,
+        "OBS chapters",
+        True,
+        11,
+        55,
+        120,
+        "individual",
+        True,
+        "blur",
+        "left",
+        False,
+        True,
+        True,
+        0.8,
+        True,
+    )
+
+    assert "OBS" in result
+    separated = web_app.load_defaults()
+    assert separated["num_clips"] == 3
+    assert separated["min_duration"] == 20
+    assert separated["max_duration"] == 45
+    assert separated["generate_shorts"] is False
+    assert separated["obs_processing"] == {
+        "enable_clips": True,
+        "clip_prompt": "OBS only",
+        "enable_chapters": True,
+        "chapter_prompt": "OBS chapters",
+        "auto_append_youtube": True,
+        "num_clips": 11,
+        "min_duration": 55,
+        "max_duration": 120,
+        "output_mode": "individual",
+        "generate_shorts": True,
+        "shorts_mode": "blur",
+        "shorts_crop": "left",
+        "shorts_title": False,
+        "generate_thumbnails": True,
+        "audio_fusion": True,
+        "audio_alpha": 0.8,
+        "karaoke": True,
+    }
+
+
 def test_roundtrip_preserves_defaults(monkeypatch, tmp_path):
     loaded = _save_with(monkeypatch, tmp_path)
     assert loaded["generate_shorts"] is False, loaded
