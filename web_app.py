@@ -1606,6 +1606,16 @@ def _run_obs_detect_render(
 
     try:
         s = dict(settings)  # shallow copy; we only read
+        clips_enabled = bool(s.get("enable_clips", True))
+        chapters_enabled = bool(s.get("enable_chapters", True))
+        s["enable_clips"] = clips_enabled
+        s["enable_chapters"] = chapters_enabled
+        if bool(s.get("auto_append_youtube", False)) and not chapters_enabled:
+            # A description can only receive generated timestamp text.  Keep
+            # the pipeline successful when a caller leaves auto-append on but
+            # turns timestamp generation off in the OBS profile.
+            log("[OBS] タイムスタンプ生成が無効のため概要欄への自動追加をスキップ")
+            s["auto_append_youtube"] = False
         progress = _DummyProgress()
 
         log(f"[OBS] Detect 開始: {source_label}")
@@ -1779,10 +1789,9 @@ def _run_obs_youtube_pipeline_outcome(
             success=False,
             error=error,
         )
-    archive_settings = dict(settings)
-    archive_settings["enable_clips"] = True
-    archive_settings["enable_chapters"] = True
-    return _run_obs_detect_render(video_url, None, video_url, archive_settings)
+    # Keep the OBS profile exactly as configured.  In particular, archive mode
+    # must respect independent clip and timestamp toggles.
+    return _run_obs_detect_render(video_url, None, video_url, dict(settings))
 
 
 def run_obs_youtube_pipeline(video_url: str, settings: dict) -> str:
@@ -2144,8 +2153,6 @@ def _obs_make_stream_pipeline_callbacks(
                 if not _is_current():
                     return
                 local_settings = dict(settings)
-                local_settings["enable_clips"] = True
-                local_settings["enable_chapters"] = True
                 # A local path cannot identify the matching YouTube video.
                 # The stream-finish worker applies these chapters once the
                 # broadcast ID is known.
@@ -2156,8 +2163,13 @@ def _obs_make_stream_pipeline_callbacks(
                 with state_lock:
                     stream_state["recording_outcome"] = outcome
                 if outcome.success:
+                    generated = []
+                    if bool(local_settings.get("enable_clips", True)):
+                        generated.append("切り抜き")
+                    if bool(local_settings.get("enable_chapters", True)):
+                        generated.append("タイムスタンプ")
                     _obs_append_status(
-                        "OBS録画から切り抜きとタイムスタンプを生成しました"
+                        "OBS録画から" + "と".join(generated) + "を生成しました"
                     )
                 else:
                     _obs_append_status(
@@ -2418,7 +2430,8 @@ def _obs_make_stream_pipeline_callbacks(
                     state["inflight_ids"].add(video_id)
                     owns_inflight = True
 
-                if use_recording:
+                chapters_enabled = bool(settings.get("enable_chapters", True))
+                if use_recording and chapters_enabled:
                     _obs_append_status(
                         "OBS録画から生成したタイムスタンプをYouTubeアーカイブへ"
                         f"反映します: {archive['url']}"
@@ -2458,11 +2471,27 @@ def _obs_make_stream_pipeline_callbacks(
                     )
                     return
 
+                if use_recording:
+                    with state_lock:
+                        state["processed_ids"].add(video_id)
+                        state["completed_epochs"].add(epoch)
+                    generated = []
+                    if bool(settings.get("enable_clips", True)):
+                        generated.append("切り抜き")
+                    if chapters_enabled:
+                        generated.append("タイムスタンプ")
+                    _obs_append_status(
+                        "OBS録画から"
+                        + "と".join(generated)
+                        + "を生成しました（タイムスタンプ無効のため概要欄更新なし）"
+                    )
+                    return
+
                 archive_settings = dict(settings)
-                archive_settings["enable_clips"] = True
-                archive_settings["enable_chapters"] = True
                 if recording_primary:
-                    archive_settings["auto_append_youtube"] = True
+                    archive_settings["auto_append_youtube"] = bool(
+                        archive_settings.get("enable_chapters", True)
+                    )
                 if not _is_current():
                     raise RuntimeError("OBS連携が停止されたためアーカイブ処理を中止しました")
                 if recording_primary:
@@ -2727,6 +2756,15 @@ def _start_obs_watch_impl(
             obs_processing_settings,
             defaults=settings,
         )
+    try:
+        GenerationModes(
+            enable_clips=bool(obs_profile.get("enable_clips", True)),
+            enable_chapters=bool(obs_profile.get("enable_chapters", True)),
+        ).validate()
+    except ValueError as mode_err:
+        msg = f"OBS自動処理設定エラー: {mode_err}"
+        _obs_append_status(msg)
+        return msg
     settings.update(obs_profile)
     settings["obs_processing"] = obs_profile
     try:
@@ -2758,19 +2796,24 @@ def _start_obs_watch_impl(
         "auto_append_youtube",
         auto_append_youtube,
     )
+    chapters_enabled = bool(obs_profile.get("enable_chapters", True))
     settings["auto_append_youtube"] = (
         True
-        if recording_primary_mode and auto_process
-        else bool(profile_auto_append)
+        if recording_primary_mode and auto_process and chapters_enabled
+        else bool(profile_auto_append) and chapters_enabled
         if archive_only_mode
         else False
     )
+    if (auto_append_youtube or bool(profile_auto_append)) and not chapters_enabled:
+        _obs_append_status(
+            "タイムスタンプ生成が無効のため、YouTube概要欄への自動追加を無効化しました"
+        )
     if auto_append_youtube and trigger_method == "folder":
         _obs_append_status(
             "フォルダ監視では配信を特定できないため、YouTube概要欄への"
             "自動追加を無効化しました"
         )
-    if recording_primary_mode and auto_process and not auto_append_youtube:
+    if recording_primary_mode and auto_process and chapters_enabled and not auto_append_youtube:
         _obs_append_status(
             "録画優先モードでは、生成したタイムスタンプを配信アーカイブへ"
             "反映する設定を自動的に有効化しました"
@@ -3999,9 +4042,9 @@ def create_ui():
                     open=False,
                 ):
                     gr.Markdown(
-                        "**OBS録画を既定の素材**としてすぐ切り抜き、録画を取得できなかった時だけ"
-                        "YouTubeの完成アーカイブを保険として使います。録画から処理できた場合も、"
-                        "生成したタイムスタンプを同じ配信のYouTube概要欄へ反映します。\n\n"
+                        "**OBS録画を既定の素材**としてすぐ処理し、録画を取得できなかった時だけ"
+                        "YouTubeの完成アーカイブを保険として使います。タイムスタンプ生成がONなら、"
+                        "録画から処理できた場合も同じ配信のYouTube概要欄へ反映します。\n\n"
                         "#### ① OBSで「配信と同時に録画」を設定（最初に1回）\n"
                         "1. OBSの **設定 → 出力** を開き、**出力モードを「詳細」** にする\n"
                         "2. **録画** タブで録画出力先を確認し、録画フォーマットを"
@@ -4040,8 +4083,8 @@ def create_ui():
                         "- 完成アーカイブ待機は最大6時間です。超えた場合は後日 **Input** "
                         "タブへ完成アーカイブURLを貼って生成できます\n"
                         "- 配信直後のpost-live DVR（再エンコード前映像）は使用しません\n"
-                        "- 自動処理ONの `record` ではタイムスタンプ反映を自動的に"
-                        "有効化します\n\n"
+                        "- 自動処理ONの `record` では、タイムスタンプ生成がONの場合に"
+                        "概要欄への反映を自動的に有効化します\n\n"
                         "#### フォルダ監視方式(WebSocket を使わない代替)\n"
                         "**検知方式** を `folder` にして OBS の録画出力先フォルダを指定すると、"
                         "新規動画ファイルの書き込み完了を検知して自動処理します"
@@ -4145,14 +4188,15 @@ def create_ui():
                     gr.Markdown(
                         "Inputタブのアーカイブ用設定とは別に保存されます。"
                         "OBS連携開始時に保存され、次回の起動時自動連携でも使われます。"
+                        "切り抜きとタイムスタンプは個別にON/OFFできます。"
+                        "どちらか一方はONにしてください。"
                     )
                     with gr.Row():
                         with gr.Column():
                             obs_enable_clips = gr.Checkbox(
-                                label="切り抜き動画を生成（OBSでは固定ON）",
-                                value=True,
-                                interactive=False,
-                                info="OBS自動処理は録画から切り抜きを必ず生成します",
+                                label="切り抜き動画を生成",
+                                value=obs_processing_defaults["enable_clips"],
+                                info="OBS録画から切り抜きを生成します",
                             )
                             obs_clip_prompt = gr.Textbox(
                                 label="切り抜き用プロンプト (任意)",
@@ -4161,10 +4205,9 @@ def create_ui():
                                 lines=2,
                             )
                             obs_enable_chapters = gr.Checkbox(
-                                label="タイムスタンプ(概要欄)を生成（OBSでは固定ON）",
-                                value=True,
-                                interactive=False,
-                                info="配信終了後にYouTube概要欄へ反映するため必ず生成します",
+                                label="タイムスタンプ(概要欄)を生成",
+                                value=obs_processing_defaults["enable_chapters"],
+                                info="配信終了後にYouTube概要欄へ反映します",
                             )
                             obs_chapter_prompt = gr.Textbox(
                                 label="タイムスタンプ用プロンプト (任意)",

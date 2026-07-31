@@ -212,7 +212,7 @@ def test_obs_auto_pipeline_empty_path_returns_error():
     assert "パス" in result  # "録画パスが空です"
 
 
-def test_obs_youtube_pipeline_uses_url_and_forces_clips_and_chapters(
+def test_obs_youtube_pipeline_uses_url_and_respects_generation_toggles(
     tmp_path, monkeypatch
 ):
     url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
@@ -247,14 +247,19 @@ def test_obs_youtube_pipeline_uses_url_and_forces_clips_and_chapters(
 
     result = web_app.run_obs_youtube_pipeline(
         url,
-        {"enable_clips": False, "enable_chapters": False},
+        {
+            "enable_clips": True,
+            "enable_chapters": False,
+            "auto_append_youtube": True,
+        },
     )
 
     detect_args = captured["detect_args"]
     assert detect_args[0] == url
     assert detect_args[1] is None
-    assert detect_args[2] is True  # enable_clips is mandatory for archive mode
-    assert detect_args[4] is True  # chapters/timestamps are mandatory too
+    assert detect_args[2] is True
+    assert detect_args[4] is False
+    assert captured["render_args"][8] is False
     assert "Render 完了" in result
 
 
@@ -306,14 +311,14 @@ def test_obs_archive_callback_runs_without_local_recording(monkeypatch):
 
     _started, finished = web_app._obs_make_archive_callbacks(
         auto_process=True,
-        settings={"enable_clips": False, "enable_chapters": False},
+        settings={"enable_clips": False, "enable_chapters": True},
     )
     finished()
 
     assert pipeline_called.wait(timeout=5), web_app._obs_status_text()
     assert captured["cached_broadcast"] is None
     assert captured["url"].endswith("dQw4w9WgXcQ")
-    assert captured["settings"]["enable_clips"] is True
+    assert captured["settings"]["enable_clips"] is False
     assert captured["settings"]["enable_chapters"] is True
     assert "配信終了を検知" in web_app._obs_status_text()
 
@@ -1034,7 +1039,10 @@ def test_recording_primary_uses_local_and_appends_chapters_without_download(
     )
 
     recorded, recording_stopped, _started, finished = (
-        web_app._obs_make_recording_primary_callbacks(True, {})
+        web_app._obs_make_recording_primary_callbacks(
+            True,
+            {"enable_clips": False, "enable_chapters": True},
+        )
     )
     recording_path = "C:/recordings/stream.mkv"
     recording_stopped(recording_path)
@@ -1043,7 +1051,7 @@ def test_recording_primary_uses_local_and_appends_chapters_without_download(
     finished()
 
     assert appended.wait(timeout=5), web_app._obs_status_text()
-    assert captured["local_settings"]["enable_clips"] is True
+    assert captured["local_settings"]["enable_clips"] is False
     assert captured["local_settings"]["enable_chapters"] is True
     assert captured["local_settings"]["auto_append_youtube"] is False
     assert captured["wait_for_processed"] is False
@@ -1105,7 +1113,10 @@ def test_recording_primary_waits_for_record_stop_after_stream_stop(monkeypatch):
     )
 
     recorded, recording_stopped, _started, finished = (
-        web_app._obs_make_recording_primary_callbacks(True, {})
+        web_app._obs_make_recording_primary_callbacks(
+            True,
+            {"enable_clips": False, "enable_chapters": True},
+        )
     )
     finished()
     recording_path = "C:/recordings/late.mkv"
@@ -1151,13 +1162,16 @@ def test_recording_primary_falls_back_when_recording_is_missing(monkeypatch):
     )
 
     _recorded, _recording_stopped, _started, finished = (
-        web_app._obs_make_recording_primary_callbacks(True, {})
+        web_app._obs_make_recording_primary_callbacks(
+            True,
+            {"enable_clips": False, "enable_chapters": True},
+        )
     )
     finished()
 
     assert fallback_done.wait(timeout=5), web_app._obs_status_text()
     assert captured["wait_for_processed"] is True
-    assert captured["archive_settings"]["enable_clips"] is True
+    assert captured["archive_settings"]["enable_clips"] is False
     assert captured["archive_settings"]["enable_chapters"] is True
     assert captured["archive_settings"]["auto_append_youtube"] is True
     assert "60秒以内に安定したOBS録画を検知できなかった" in web_app._obs_status_text()
@@ -1585,7 +1599,7 @@ def test_start_obs_websocket_watch_requires_youtube_auth(
     assert create_called is False
 
 
-def test_start_obs_record_watch_wires_primary_callbacks_and_forces_append(
+def test_start_obs_record_watch_wires_primary_callbacks_and_appends_timestamps(
     monkeypatch,
 ):
     import obs_integration
@@ -1662,6 +1676,18 @@ def test_start_obs_record_watch_wires_primary_callbacks_and_forces_append(
     assert captured["on_stream_finished"] is stream_finished
     assert captured["proactive"] is True
     web_app.stop_obs_watch()
+
+
+def test_start_obs_rejects_both_generation_outputs_disabled(monkeypatch):
+    status = web_app.start_obs_watch(
+        "folder", "localhost", 4455, "", False, "record", "C:/recordings",
+        True, False, 5, "combined", False, "gemini", "large-v3", "",
+        False, "", False, "", 30, 90, "crop", "center", True,
+        False, False, 0.35, False,
+    )
+
+    assert "OBS自動処理設定エラー" in status
+    assert "どちらか" in status
 
 
 def test_start_obs_folder_record_mode_remains_local_only(monkeypatch):
@@ -1879,8 +1905,8 @@ def test_obs_youtube_archive_generates_clip_chapters_and_auto_appends(
     monkeypatch.setattr(web_app.youtube_api, "update_video_description", fake_update)
 
     settings = _auto_settings(tmp_path)
-    settings["enable_clips"] = False
-    settings["enable_chapters"] = False
+    settings["enable_clips"] = True
+    settings["enable_chapters"] = True
     settings["auto_append_youtube"] = True
     outcome = web_app._run_obs_youtube_pipeline_outcome(url, settings)
     log = outcome.log

@@ -101,7 +101,7 @@ def test_obs_processing_profile_is_separate_from_archive_defaults(
     assert "obs_processing" not in loaded
 
     result = web_app.save_obs_processing_defaults(
-        True,
+        False,
         "OBS only",
         True,
         "OBS chapters",
@@ -127,7 +127,7 @@ def test_obs_processing_profile_is_separate_from_archive_defaults(
     assert separated["max_duration"] == 45
     assert separated["generate_shorts"] is False
     assert separated["obs_processing"] == {
-        "enable_clips": True,
+        "enable_clips": False,
         "clip_prompt": "OBS only",
         "enable_chapters": True,
         "chapter_prompt": "OBS chapters",
