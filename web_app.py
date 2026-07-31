@@ -176,6 +176,122 @@ OBS_CONNECTION_DEFAULTS = {
     "obs_auto_process": True,
 }
 
+# Processing controls are kept in a separate profile for OBS automation.  The
+# archive/Input profile remains the top-level settings profile so users can tune
+# both workflows independently.  Older settings files do not have this nested
+# profile; in that case OBS falls back to the existing archive values until the
+# user saves an OBS profile.
+OBS_PROCESSING_DEFAULTS = {
+    "enable_clips": True,
+    "clip_prompt": "",
+    "enable_chapters": True,
+    "chapter_prompt": "",
+    "auto_append_youtube": False,
+    "num_clips": 5,
+    "min_duration": 30,
+    "max_duration": 90,
+    "output_mode": "combined",
+    "generate_shorts": False,
+    "shorts_mode": "crop",
+    "shorts_crop": "center",
+    "shorts_title": True,
+    "generate_thumbnails": False,
+    "audio_fusion": False,
+    "audio_alpha": 0.35,
+    "karaoke": False,
+}
+
+
+def _obs_processing_settings_from_defaults(defaults: dict | None = None) -> dict:
+    """Return the OBS processing profile with legacy top-level fallbacks."""
+    source = defaults if defaults is not None else load_defaults()
+    saved_profile = source.get("obs_processing")
+    if not isinstance(saved_profile, dict):
+        saved_profile = {}
+    return {
+        key: saved_profile.get(key, source.get(key, fallback))
+        for key, fallback in OBS_PROCESSING_DEFAULTS.items()
+    }
+
+
+def _normalise_obs_processing_settings(
+    values: dict | None,
+    defaults: dict | None = None,
+) -> dict:
+    """Merge live OBS controls into a complete, serialisable profile."""
+    base = _obs_processing_settings_from_defaults(defaults)
+    if values:
+        for key in OBS_PROCESSING_DEFAULTS:
+            value = values.get(key)
+            if value is not None:
+                base[key] = value
+
+    base["enable_clips"] = bool(base["enable_clips"])
+    base["enable_chapters"] = bool(base["enable_chapters"])
+    base["auto_append_youtube"] = bool(base["auto_append_youtube"])
+    base["generate_shorts"] = bool(base["generate_shorts"])
+    base["shorts_title"] = bool(base["shorts_title"])
+    base["generate_thumbnails"] = bool(base["generate_thumbnails"])
+    base["audio_fusion"] = bool(base["audio_fusion"])
+    base["karaoke"] = bool(base["karaoke"])
+    try:
+        base["num_clips"] = int(base["num_clips"])
+    except (TypeError, ValueError):
+        base["num_clips"] = OBS_PROCESSING_DEFAULTS["num_clips"]
+    for key in ("min_duration", "max_duration"):
+        try:
+            base[key] = int(base[key])
+        except (TypeError, ValueError):
+            base[key] = OBS_PROCESSING_DEFAULTS[key]
+    try:
+        base["audio_alpha"] = float(base["audio_alpha"])
+    except (TypeError, ValueError):
+        base["audio_alpha"] = OBS_PROCESSING_DEFAULTS["audio_alpha"]
+    return base
+
+
+def _build_obs_processing_settings(
+    enable_clips,
+    clip_prompt,
+    enable_chapters,
+    chapter_prompt,
+    auto_append_youtube,
+    num_clips,
+    min_duration,
+    max_duration,
+    output_mode,
+    generate_shorts,
+    shorts_mode,
+    shorts_crop,
+    shorts_title,
+    generate_thumbnails,
+    audio_fusion,
+    audio_alpha,
+    karaoke,
+) -> dict:
+    """Build the OBS profile from the dedicated controls in the UI."""
+    return _normalise_obs_processing_settings(
+        {
+            "enable_clips": enable_clips,
+            "clip_prompt": clip_prompt,
+            "enable_chapters": enable_chapters,
+            "chapter_prompt": chapter_prompt,
+            "auto_append_youtube": auto_append_youtube,
+            "num_clips": num_clips,
+            "min_duration": min_duration,
+            "max_duration": max_duration,
+            "output_mode": output_mode,
+            "generate_shorts": generate_shorts,
+            "shorts_mode": shorts_mode,
+            "shorts_crop": shorts_crop,
+            "shorts_title": shorts_title,
+            "generate_thumbnails": generate_thumbnails,
+            "audio_fusion": audio_fusion,
+            "audio_alpha": audio_alpha,
+            "karaoke": karaoke,
+        }
+    )
+
 
 def load_gemini_api_key(env_var: str = "GEMINI_API_KEY") -> str:
     """Return the Gemini API key.
@@ -301,6 +417,7 @@ def _save_obs_connection_defaults(
     stop_event: str,
     watch_folder: str,
     auto_process: bool,
+    processing_settings: dict | None = None,
 ) -> None:
     """Persist OBS controls while keeping the password out of tracked JSON."""
     data = load_defaults()
@@ -315,6 +432,11 @@ def _save_obs_connection_defaults(
             "obs_auto_process": bool(auto_process),
         }
     )
+    if processing_settings is not None:
+        data["obs_processing"] = _normalise_obs_processing_settings(
+            processing_settings,
+            defaults=data,
+        )
     SETTINGS_FILE.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -338,11 +460,13 @@ def save_defaults(ai_provider, ai_model,
                   obs_executable_path="",
                   obs_auto_connect_on_startup=True):
     """Save current settings as defaults."""
+    loaded_defaults = load_defaults()
     saved_obs = {
         key: value
-        for key, value in load_defaults().items()
+        for key, value in loaded_defaults.items()
         if key in OBS_CONNECTION_DEFAULTS
     }
+    saved_obs_processing = loaded_defaults.get("obs_processing")
     data = {
         "ai_provider": ai_provider, "ai_model": ai_model,
         "enable_clips": bool(enable_clips), "enable_chapters": bool(enable_chapters),
@@ -367,8 +491,58 @@ def save_defaults(ai_provider, ai_model,
         "obs_executable_path": (obs_executable_path or "").strip(),
     }
     data.update(saved_obs)
+    if isinstance(saved_obs_processing, dict):
+        data["obs_processing"] = dict(saved_obs_processing)
     SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return "Settings saved as default!"
+
+
+def save_obs_processing_defaults(
+    enable_clips,
+    clip_prompt,
+    enable_chapters,
+    chapter_prompt,
+    auto_append_youtube,
+    num_clips,
+    min_duration,
+    max_duration,
+    output_mode,
+    generate_shorts,
+    shorts_mode,
+    shorts_crop,
+    shorts_title,
+    generate_thumbnails,
+    audio_fusion,
+    audio_alpha,
+    karaoke,
+):
+    """Persist the dedicated OBS processing profile without changing Input."""
+    data = load_defaults()
+    data.pop("obs_password", None)
+    data["obs_processing"] = _build_obs_processing_settings(
+        enable_clips,
+        clip_prompt,
+        enable_chapters,
+        chapter_prompt,
+        auto_append_youtube,
+        num_clips,
+        min_duration,
+        max_duration,
+        output_mode,
+        generate_shorts,
+        shorts_mode,
+        shorts_crop,
+        shorts_title,
+        generate_thumbnails,
+        audio_fusion,
+        audio_alpha,
+        karaoke,
+    )
+    SETTINGS_FILE.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return "OBS用の切り抜き設定を保存しました"
 
 
 def resolve_output_base(user_text: str) -> Path:
@@ -2507,6 +2681,7 @@ def _start_obs_watch_impl(
     ai_provider: str,
     whisper_model: str,
     output_base_dir: str,
+    obs_processing_settings: dict | None = None,
 ) -> str:
     """Implementation shared by manual and automatic OBS connection starts."""
     global _obs_watcher, _obs_generation
@@ -2539,26 +2714,54 @@ def _start_obs_watch_impl(
     archive_only_mode = trigger_method == "websocket" and source_mode == "stream"
     youtube_linked_mode = recording_primary_mode or archive_only_mode
 
-    # Build the settings dict: saved defaults overlaid with the live UI values
-    # the user is most likely to tweak per-run.
+    # Build the settings dict from the dedicated OBS profile.  The profile is
+    # separate from the Input/archive values, while old settings files still
+    # fall back to those values until an OBS profile is saved.
     settings = load_defaults()
+    has_saved_obs_profile = isinstance(settings.get("obs_processing"), dict) and bool(
+        settings.get("obs_processing")
+    )
+    obs_profile = _obs_processing_settings_from_defaults(settings)
+    if obs_processing_settings is not None:
+        obs_profile = _normalise_obs_processing_settings(
+            obs_processing_settings,
+            defaults=settings,
+        )
+    settings.update(obs_profile)
+    settings["obs_processing"] = obs_profile
     try:
-        settings["num_clips"] = int(num_clips)
+        # These legacy arguments remain part of the public start signature for
+        # compatibility with callers outside the UI.  The dedicated profile
+        # wins when provided; otherwise they preserve the previous behavior.
+        if obs_processing_settings is None and not has_saved_obs_profile:
+            settings["num_clips"] = int(num_clips)
+            if output_mode:
+                settings["output_mode"] = output_mode
+            settings["generate_shorts"] = bool(generate_shorts)
+            obs_profile.update(
+                {
+                    "num_clips": settings["num_clips"],
+                    "output_mode": settings["output_mode"],
+                    "generate_shorts": settings["generate_shorts"],
+                }
+            )
+            settings["obs_processing"] = obs_profile
     except (TypeError, ValueError):
         pass
-    if output_mode:
-        settings["output_mode"] = output_mode
-    settings["generate_shorts"] = bool(generate_shorts)
     if ai_provider:
         settings["ai_provider"] = ai_provider
     if whisper_model:
         settings["whisper_model"] = whisper_model
     if output_base_dir is not None:
         settings["output_base_dir"] = output_base_dir
+    profile_auto_append = obs_profile.get(
+        "auto_append_youtube",
+        auto_append_youtube,
+    )
     settings["auto_append_youtube"] = (
         True
         if recording_primary_mode and auto_process
-        else bool(auto_append_youtube)
+        else bool(profile_auto_append)
         if archive_only_mode
         else False
     )
@@ -2597,6 +2800,7 @@ def _start_obs_watch_impl(
             source_mode,
             config["watch_folder"],
             bool(auto_process),
+            processing_settings=obs_profile,
         )
     except Exception as exc:
         msg = f"OBS連携設定の保存に失敗しました: {exc}"
@@ -2703,6 +2907,19 @@ def start_obs_watch(
     ai_provider: str,
     whisper_model: str,
     output_base_dir: str,
+    obs_enable_clips=None,
+    obs_clip_prompt=None,
+    obs_enable_chapters=None,
+    obs_chapter_prompt=None,
+    obs_min_duration=None,
+    obs_max_duration=None,
+    obs_shorts_mode=None,
+    obs_shorts_crop=None,
+    obs_shorts_title=None,
+    obs_generate_thumbnails=None,
+    obs_audio_fusion=None,
+    obs_audio_alpha=None,
+    obs_karaoke=None,
 ) -> str:
     """Manually (re)start OBS integration from the Gradio controls.
 
@@ -2711,6 +2928,44 @@ def start_obs_watch(
     never overwrite settings the user just selected.
     """
     _obs_auto_connect_cancel.set()
+    obs_processing_settings = None
+    if any(
+        value is not None
+        for value in (
+            obs_enable_clips,
+            obs_clip_prompt,
+            obs_enable_chapters,
+            obs_chapter_prompt,
+            obs_min_duration,
+            obs_max_duration,
+            obs_shorts_mode,
+            obs_shorts_crop,
+            obs_shorts_title,
+            obs_generate_thumbnails,
+            obs_audio_fusion,
+            obs_audio_alpha,
+            obs_karaoke,
+        )
+    ):
+        obs_processing_settings = _build_obs_processing_settings(
+            obs_enable_clips,
+            obs_clip_prompt,
+            obs_enable_chapters,
+            obs_chapter_prompt,
+            auto_append_youtube,
+            num_clips,
+            obs_min_duration,
+            obs_max_duration,
+            output_mode,
+            generate_shorts,
+            obs_shorts_mode,
+            obs_shorts_crop,
+            obs_shorts_title,
+            obs_generate_thumbnails,
+            obs_audio_fusion,
+            obs_audio_alpha,
+            obs_karaoke,
+        )
     with _obs_start_lock:
         return _start_obs_watch_impl(
             method=method,
@@ -2728,6 +2983,7 @@ def start_obs_watch(
             ai_provider=ai_provider,
             whisper_model=whisper_model,
             output_base_dir=output_base_dir,
+            obs_processing_settings=obs_processing_settings,
         )
 
 
@@ -3471,6 +3727,7 @@ def _startup_auth_status_for_ui() -> str:
 def create_ui():
     """Create the Gradio web interface."""
     defaults = load_defaults()
+    obs_processing_defaults = _obs_processing_settings_from_defaults(defaults)
 
     with gr.Blocks(
         title="Clip Extractor - 配信切り抜き自動生成",
@@ -3485,7 +3742,7 @@ def create_ui():
             with gr.Tab("Input / 入力"):
                 # Generation-mode selector: users can keep both on, or run just
                 # one side. When both are on, the clip-side prompt wins.
-                gr.HTML("<h3>生成モード / Generation Modes</h3>")
+                gr.HTML("<h3>生成モード / Generation Modes（アーカイブ入力用）</h3>")
                 gr.HTML(
                     "<p style='color:#666; margin-top:-0.5em; margin-bottom:0.5em;'>"
                     "どちらか少なくとも 1 つは有効にしてください。両方有効の場合、"
@@ -3770,6 +4027,8 @@ def create_ui():
                         "下の **Host / Port / Password** を OBS の接続情報と同じ値にして、"
                         "**「OBS連携 開始」** を押してください"
                         "(同じ PC なら Host は `localhost` のまま、Port は `4455`)。\n\n"
+                        "切り抜き数・長さ・ショート動画の設定は、下の"
+                        " **OBS自動処理用の切り抜き設定** で Input とは別に指定できます。\n\n"
                         "- **record（既定）**: OBS録画をすぐ処理。配信終了後60秒以内に"
                         "安定した録画が見つからない、または録画処理が失敗した時だけ、"
                         "再エンコード完了後のYouTubeアーカイブをDLして処理します\n"
@@ -3878,6 +4137,154 @@ def create_ui():
                             inputs=obs_watch_folder,
                             outputs=obs_watch_folder,
                         )
+
+                with gr.Accordion(
+                    "OBS自動処理用の切り抜き設定",
+                    open=True,
+                ):
+                    gr.Markdown(
+                        "Inputタブのアーカイブ用設定とは別に保存されます。"
+                        "OBS連携開始時に保存され、次回の起動時自動連携でも使われます。"
+                    )
+                    with gr.Row():
+                        with gr.Column():
+                            obs_enable_clips = gr.Checkbox(
+                                label="切り抜き動画を生成（OBSでは固定ON）",
+                                value=True,
+                                interactive=False,
+                                info="OBS自動処理は録画から切り抜きを必ず生成します",
+                            )
+                            obs_clip_prompt = gr.Textbox(
+                                label="切り抜き用プロンプト (任意)",
+                                value=obs_processing_defaults["clip_prompt"],
+                                placeholder="例: 面白いシーンだけ選んで、ゲーム実況の名場面を中心に",
+                                lines=2,
+                            )
+                            obs_enable_chapters = gr.Checkbox(
+                                label="タイムスタンプ(概要欄)を生成（OBSでは固定ON）",
+                                value=True,
+                                interactive=False,
+                                info="配信終了後にYouTube概要欄へ反映するため必ず生成します",
+                            )
+                            obs_chapter_prompt = gr.Textbox(
+                                label="タイムスタンプ用プロンプト (任意)",
+                                value=obs_processing_defaults["chapter_prompt"],
+                                placeholder="例: 話題が切り替わる節目だけを抜き出して",
+                                lines=2,
+                            )
+                            obs_auto_append_youtube = gr.Checkbox(
+                                label="概要欄に自動追加 (YouTube)",
+                                value=obs_processing_defaults["auto_append_youtube"],
+                                info="配信アーカイブの概要欄へ生成したタイムスタンプを追加します",
+                            )
+                        with gr.Column():
+                            obs_num_clips = gr.Number(
+                                minimum=1,
+                                maximum=50,
+                                value=obs_processing_defaults["num_clips"],
+                                precision=0,
+                                label="クリップ数",
+                                info="OBS自動処理で生成する個数（1〜50）",
+                            )
+                            with gr.Row():
+                                obs_min_duration = gr.Number(
+                                    label="最小クリップ長 (秒)",
+                                    value=obs_processing_defaults["min_duration"],
+                                    precision=0,
+                                )
+                                obs_max_duration = gr.Number(
+                                    label="最大クリップ長 (秒)",
+                                    value=obs_processing_defaults["max_duration"],
+                                    precision=0,
+                                )
+                            obs_output_mode = gr.Radio(
+                                choices=["combined", "individual"],
+                                value=obs_processing_defaults["output_mode"],
+                                label="出力モード",
+                                info="combined: 1つのXMLに全シーケンス / individual: クリップごとに別XML",
+                            )
+
+                    with gr.Row():
+                        with gr.Column():
+                            obs_generate_shorts = gr.Checkbox(
+                                label="ショート動画 (9:16) も生成",
+                                value=obs_processing_defaults["generate_shorts"],
+                                info="字幕を焼き込んだ縦型クリップを shorts/ に出力",
+                            )
+                            obs_shorts_mode = gr.Radio(
+                                choices=["crop", "blur", "pad"],
+                                value=obs_processing_defaults["shorts_mode"],
+                                label="ショート動画の変換モード",
+                                info="crop: 縦型に切り抜き / blur: ぼかし背景 / pad: 黒帯で全体表示",
+                            )
+                            obs_shorts_crop = gr.Radio(
+                                choices=["center", "left", "right"],
+                                value=obs_processing_defaults["shorts_crop"],
+                                label="ショート動画のクロップ位置",
+                                info="cropモードでの横位置。center=中央 / left=左 / right=右",
+                            )
+                            obs_shorts_title = gr.Checkbox(
+                                label="ショート冒頭にタイトルを表示",
+                                value=obs_processing_defaults["shorts_title"],
+                                info="各ショートの最初の4秒だけタイトルを焼き込みます",
+                            )
+                        with gr.Column():
+                            obs_generate_thumbnails = gr.Checkbox(
+                                label="サムネイル候補を生成",
+                                value=obs_processing_defaults["generate_thumbnails"],
+                                info="各クリップから代表フレーム画像を生成します",
+                            )
+                            obs_audio_fusion = gr.Checkbox(
+                                label="音声盛り上がり融合",
+                                value=obs_processing_defaults["audio_fusion"],
+                                info="音量や急な盛り上がりを使ってクリップ順位を再調整します",
+                            )
+                            obs_audio_alpha = gr.Slider(
+                                0.0,
+                                1.0,
+                                value=obs_processing_defaults["audio_alpha"],
+                                step=0.05,
+                                label="音声重み alpha",
+                            )
+                            obs_karaoke = gr.Checkbox(
+                                label="ワード単位カラオケ字幕",
+                                value=obs_processing_defaults["karaoke"],
+                                info="ショート動画の字幕を単語ごとにハイライトします",
+                            )
+
+                    with gr.Row():
+                        obs_save_processing_btn = gr.Button(
+                            "OBS用設定を保存",
+                            variant="secondary",
+                        )
+                        obs_save_processing_msg = gr.Textbox(
+                            label="",
+                            show_label=False,
+                            interactive=False,
+                        )
+                    obs_save_processing_btn.click(
+                        fn=save_obs_processing_defaults,
+                        inputs=[
+                            obs_enable_clips,
+                            obs_clip_prompt,
+                            obs_enable_chapters,
+                            obs_chapter_prompt,
+                            obs_auto_append_youtube,
+                            obs_num_clips,
+                            obs_min_duration,
+                            obs_max_duration,
+                            obs_output_mode,
+                            obs_generate_shorts,
+                            obs_shorts_mode,
+                            obs_shorts_crop,
+                            obs_shorts_title,
+                            obs_generate_thumbnails,
+                            obs_audio_fusion,
+                            obs_audio_alpha,
+                            obs_karaoke,
+                        ],
+                        outputs=obs_save_processing_msg,
+                    )
 
                 with gr.Row():
                     obs_start_btn = gr.Button("OBS連携 開始", variant="primary")
@@ -4426,13 +4833,26 @@ def create_ui():
                 obs_stop_event_radio,
                 obs_watch_folder,
                 obs_auto_process,
-                auto_append_youtube,
-                num_clips,
-                output_mode,
-                generate_shorts,
+                obs_auto_append_youtube,
+                obs_num_clips,
+                obs_output_mode,
+                obs_generate_shorts,
                 ai_provider,
                 whisper_model,
                 output_base_dir,
+                obs_enable_clips,
+                obs_clip_prompt,
+                obs_enable_chapters,
+                obs_chapter_prompt,
+                obs_min_duration,
+                obs_max_duration,
+                obs_shorts_mode,
+                obs_shorts_crop,
+                obs_shorts_title,
+                obs_generate_thumbnails,
+                obs_audio_fusion,
+                obs_audio_alpha,
+                obs_karaoke,
             ],
             outputs=obs_status_box,
         )

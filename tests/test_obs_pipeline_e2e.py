@@ -1641,11 +1641,21 @@ def test_start_obs_record_watch_wires_primary_callbacks_and_forces_append(
 
     status = web_app.start_obs_watch(
         "websocket", "localhost", 4455, "pw", False, "record", "", True, False,
-        5, "combined", False, "gemini", "large-v3", "",
+        11, "individual", True, "gemini", "large-v3", "",
+        True, "OBS only", True, "OBS chapters", 55, 120,
+        "blur", "left", False, True, True, 0.8, True,
     )
 
     assert status == "connected"
     assert captured["settings"]["auto_append_youtube"] is True
+    assert captured["settings"]["num_clips"] == 11
+    assert captured["settings"]["min_duration"] == 55
+    assert captured["settings"]["max_duration"] == 120
+    assert captured["settings"]["output_mode"] == "individual"
+    assert captured["settings"]["generate_shorts"] is True
+    assert captured["settings"]["shorts_mode"] == "blur"
+    assert captured["settings"]["shorts_crop"] == "left"
+    assert captured["settings"]["shorts_title"] is False
     assert captured["recording_callback"] is recording_finished
     assert captured["on_recording_stopped"] is recording_stopped
     assert captured["on_stream_started"] is stream_started
@@ -1708,6 +1718,70 @@ def test_start_obs_folder_record_mode_remains_local_only(monkeypatch):
     assert captured["on_stream_started"] is None
     assert captured["on_stream_finished"] is None
     assert captured["settings"]["auto_append_youtube"] is False
+    web_app.stop_obs_watch()
+
+
+def test_start_obs_legacy_call_uses_saved_obs_processing_profile(monkeypatch):
+    import obs_integration
+
+    settings = web_app.load_defaults()
+    settings.update(
+        {
+            "num_clips": 2,
+            "min_duration": 20,
+            "max_duration": 40,
+            "generate_shorts": False,
+        }
+    )
+    settings["obs_processing"] = {
+        "num_clips": 13,
+        "min_duration": 44,
+        "max_duration": 88,
+        "generate_shorts": True,
+        "shorts_mode": "blur",
+        "shorts_crop": "right",
+        "shorts_title": False,
+    }
+    web_app.SETTINGS_FILE.write_text(
+        json.dumps(settings, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    captured = {}
+
+    class FakeWatcher:
+        status = "watching"
+
+        def start(self):
+            pass
+
+        def stop(self):
+            self.status = "stopped"
+
+    def fake_make_callback(_auto_process, profile, _generation):
+        captured["settings"] = profile
+        return lambda _path: None
+
+    monkeypatch.setattr(web_app, "_obs_make_callback", fake_make_callback)
+    monkeypatch.setattr(
+        obs_integration,
+        "create_watcher",
+        lambda *_args, **_kwargs: FakeWatcher(),
+    )
+
+    status = web_app.start_obs_watch(
+        "folder", "localhost", 4455, "", False, "record", "C:/recordings",
+        False, False, 2, "combined", False, "gemini", "large-v3", "",
+    )
+
+    assert status == "watching"
+    assert captured["settings"]["num_clips"] == 13
+    assert captured["settings"]["min_duration"] == 44
+    assert captured["settings"]["max_duration"] == 88
+    assert captured["settings"]["generate_shorts"] is True
+    assert captured["settings"]["shorts_mode"] == "blur"
+    assert captured["settings"]["shorts_crop"] == "right"
+    assert captured["settings"]["shorts_title"] is False
     web_app.stop_obs_watch()
 
 

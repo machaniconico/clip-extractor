@@ -262,20 +262,29 @@ def test_launcher_schedules_saved_obs_auto_connect_setting():
     assert "schedule_obs_auto_connect()" in source
 
 
-def test_obs_start_signature_matches_inputs_and_passes_auto_append():
+def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
     module = _module()
     args = _function_args(module, "start_obs_watch")
     assert args == [
         "method", "host", "port", "password", "save_password", "stop_event",
         "watch_folder", "auto_process", "auto_append_youtube", "num_clips",
         "output_mode", "generate_shorts", "ai_provider", "whisper_model",
-        "output_base_dir",
+        "output_base_dir", "obs_enable_clips", "obs_clip_prompt",
+        "obs_enable_chapters", "obs_chapter_prompt", "obs_min_duration",
+        "obs_max_duration", "obs_shorts_mode", "obs_shorts_crop",
+        "obs_shorts_title", "obs_generate_thumbnails", "obs_audio_fusion",
+        "obs_audio_alpha", "obs_karaoke",
     ]
     assert _click_input_names(module, "obs_start_btn") == [
         "obs_trigger_radio", "obs_host", "obs_port", "obs_password",
         "obs_save_password", "obs_stop_event_radio", "obs_watch_folder",
-        "obs_auto_process", "auto_append_youtube", "num_clips", "output_mode",
-        "generate_shorts", "ai_provider", "whisper_model", "output_base_dir",
+        "obs_auto_process", "obs_auto_append_youtube", "obs_num_clips", "obs_output_mode",
+        "obs_generate_shorts", "ai_provider", "whisper_model", "output_base_dir",
+        "obs_enable_clips", "obs_clip_prompt", "obs_enable_chapters",
+        "obs_chapter_prompt", "obs_min_duration", "obs_max_duration",
+        "obs_shorts_mode", "obs_shorts_crop", "obs_shorts_title",
+        "obs_generate_thumbnails", "obs_audio_fusion", "obs_audio_alpha",
+        "obs_karaoke",
     ]
 
 
