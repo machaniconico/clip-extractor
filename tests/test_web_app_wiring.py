@@ -225,6 +225,18 @@ def test_obs_recording_folder_picker_updates_the_watch_folder_textbox():
     ) == ["obs_watch_folder"]
 
 
+def test_obs_generation_checkboxes_are_independent_and_profile_backed():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert 'label="切り抜き動画を生成（OBSでは固定ON）"' not in source
+    assert 'label="タイムスタンプ(概要欄)を生成（OBSでは固定ON）"' not in source
+    assert 'value=obs_processing_defaults["enable_clips"]' in source
+    assert 'value=obs_processing_defaults["enable_chapters"]' in source
+    assert 'info="OBS録画から切り抜きを生成します"' in source
+    assert 'info="配信終了後にYouTube概要欄へ反映します"' in source
+    assert "どちらか一方はONにしてください" in source
+
+
 def test_premiere_button_and_render_state_are_wired():
     module = _module()
     source = WEB_APP.read_text(encoding="utf-8")
