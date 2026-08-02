@@ -168,7 +168,7 @@ def _shorts_crop_filter(crop_x: str = "center") -> str:
     return f"crop={w}:ih:{x}:0,scale=1080:1920"
 
 
-def _shorts_base_vf(mode: str = "crop", crop_x: str = "center") -> str:
+def _shorts_base_vf(mode: str = "blur", crop_x: str = "center") -> str:
     """Return the base 9:16 Shorts vf chain for crop/blur/pad modes."""
     if mode == "crop":
         return _shorts_crop_filter(crop_x)
@@ -176,8 +176,8 @@ def _shorts_base_vf(mode: str = "crop", crop_x: str = "center") -> str:
         return _SHORTS_PAD_FILTER
     if mode == "blur":
         return _SHORTS_BLUR_FILTER
-    logger.warning("Unknown shorts_mode=%r; falling back to crop", mode)
-    return _shorts_crop_filter(crop_x)
+    logger.warning("Unknown shorts_mode=%r; falling back to blur", mode)
+    return _SHORTS_BLUR_FILTER
 
 
 def _title_char_width(ch: str) -> int:
@@ -540,7 +540,7 @@ def extract_clip(
     srt_path: Path | None = None,
     font_config: "FontConfig | None" = None,
     crop_x: str = "center",
-    shorts_mode: str = "crop",
+    shorts_mode: str = "blur",
     shorts_title: bool = True,
     title: str = "",
     karaoke: bool = False,
@@ -583,7 +583,7 @@ def generate_thumbnail(
     *,
     vertical: bool = False,
     crop_x: str = "center",
-    shorts_mode: str = "crop",
+    shorts_mode: str = "blur",
     title: str = "",
     font_config: "FontConfig | None" = None,
     strategy: str = "midpoint",
@@ -686,7 +686,7 @@ def generate_thumbnails(
     *,
     vertical: bool = False,
     crop_x: str = "center",
-    shorts_mode: str = "crop",
+    shorts_mode: str = "blur",
     font_config: "FontConfig | None" = None,
     img_format: str = "png",
     strategy: str = "midpoint",
@@ -727,7 +727,7 @@ def extract_clips(
     srt_paths: list[Path] | None = None,
     font_config: "FontConfig | None" = None,
     crop_x: str = "center",
-    shorts_mode: str = "crop",
+    shorts_mode: str = "blur",
     shorts_title: bool = True,
     karaoke: bool = False,
     ass_paths: list[Path] | None = None,

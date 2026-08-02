@@ -56,7 +56,7 @@ class AppConfig:
     output_mode: str = "combined"  # "combined" or "individual"
     shorts: bool = False
     shorts_crop: str = "center"  # "center" | "left" | "right"
-    shorts_mode: str = "crop"  # "crop" | "blur" | "pad"
+    shorts_mode: str = "blur"  # "crop" | "blur" | "pad"
     shorts_title: bool = True
     generate_thumbnails: bool = False
     audio_fusion: bool = False
