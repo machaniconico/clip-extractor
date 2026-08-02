@@ -118,7 +118,7 @@ def test_obs_processing_profile_is_separate_from_archive_defaults(
         True,
         0.8,
         True,
-        False,
+        auto_start_without_prompt_confirmation=True,
     )
 
     assert "OBS" in result
