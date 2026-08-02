@@ -675,7 +675,7 @@ def open_output_folder(current_base: str) -> None:
 
 
 from chapters import generate_chapter_text, write_chapter_file
-from downloader import download_video
+from downloader import download_video, get_url_source
 from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
 from audio_energy import fuse_audio_energy
@@ -943,6 +943,15 @@ def detect_phase(
         logs.append(msg)
 
     try:
+        input_value = str(input_url or "").strip()
+        source_kind = "local" if input_file is not None else (
+            get_url_source(input_value) or ("url" if input_value else "local")
+        )
+        if source_kind == "twitch":
+            # Twitch processing is clip-only by design; there is no Twitch
+            # description target for the generated chapter text.
+            enable_chapters = False
+            chapter_prompt = ""
         modes = GenerationModes(
             enable_clips=bool(enable_clips),
             enable_chapters=bool(enable_chapters),
@@ -954,14 +963,16 @@ def detect_phase(
         except ValueError as mode_err:
             return {}, f"Error: {mode_err}", gr.update(visible=False)
         log(f"Modes: clips={modes.enable_clips}, chapters={modes.enable_chapters}")
+        if source_kind == "twitch":
+            log("Twitch入力: タイムスタンプ生成とYouTube概要欄への追記をスキップ")
 
         base_dir = resolve_output_base(output_base_dir)
         output_dir = _create_output_dir(base_dir)
         log(f"Output base: {base_dir}")
 
         youtube_video_id: str | None = None
-        if input_url and input_url.strip():
-            youtube_video_id = youtube_api.extract_video_id(input_url.strip())
+        if source_kind == "youtube":
+            youtube_video_id = youtube_api.extract_video_id(input_value)
             if youtube_video_id:
                 log(f"YouTube video id: {youtube_video_id}")
 
@@ -978,9 +989,9 @@ def detect_phase(
                 video_path = safe_dir / safe_name
                 shutil.copy2(original_path, video_path)
                 log(f"Copied to safe path: {video_path}")
-        elif input_url and input_url.strip():
+        elif input_value:
             progress(0.05, desc="Downloading video...")
-            video_path = download_video(input_url.strip(), output_dir / "source")
+            video_path = download_video(input_value, output_dir / "source")
             log(f"Downloaded: {video_path.name}")
         else:
             return (
@@ -1037,6 +1048,7 @@ def detect_phase(
             "video_info": video_info,
             "segments": segments,
             "highlights": highlights,
+            "source_kind": source_kind,
             "youtube_video_id": youtube_video_id,
             "enable_clips": modes.enable_clips,
             "enable_chapters": modes.enable_chapters,
@@ -1118,10 +1130,16 @@ def render_phase(
         segments = session["segments"]
         highlights = session["highlights"]
         youtube_video_id = session.get("youtube_video_id")
+        source_kind = str(session.get("source_kind") or "local")
         mode_data = session.get("modes") or {}
+        chapters_enabled = bool(
+            mode_data.get("enable_chapters", session.get("enable_chapters", True))
+        )
+        if source_kind == "twitch":
+            chapters_enabled = False
         modes = GenerationModes(
             enable_clips=bool(mode_data.get("enable_clips", session.get("enable_clips", True))),
-            enable_chapters=bool(mode_data.get("enable_chapters", session.get("enable_chapters", True))),
+            enable_chapters=chapters_enabled,
             clip_prompt=mode_data.get("clip_prompt", ""),
             chapter_prompt=mode_data.get("chapter_prompt", ""),
         )
@@ -1129,6 +1147,10 @@ def render_phase(
             modes.validate()
         except ValueError as mode_err:
             return ProcessResult(log=f"Error: {mode_err}").as_gradio_outputs()
+
+        if source_kind == "twitch" and auto_append_youtube:
+            log("Twitch入力ではタイムスタンプとYouTube概要欄への追記をスキップ")
+            auto_append_youtube = False
 
         obs_render_outcome = {
             "clip_paths": [],
@@ -3441,6 +3463,13 @@ def _legacy_one_shot_handler(
         logs.append(msg)
 
     try:
+        input_value = str(input_url or "").strip()
+        source_kind = "local" if input_file is not None else (
+            get_url_source(input_value) or ("url" if input_value else "local")
+        )
+        if source_kind == "twitch":
+            enable_chapters = False
+            chapter_prompt = ""
         # Validate generation modes — at least one must be enabled
         modes = GenerationModes(
             enable_clips=bool(enable_clips),
@@ -3453,11 +3482,13 @@ def _legacy_one_shot_handler(
         except ValueError as mode_err:
             return ProcessResult(log=f"Error: {mode_err}").as_gradio_outputs()
         log(f"Modes: clips={modes.enable_clips}, chapters={modes.enable_chapters}")
+        if source_kind == "twitch":
+            log("Twitch入力: タイムスタンプ生成とYouTube概要欄への追記をスキップ")
 
         # Pre-validate YouTube auth before starting the heavy pipeline.
         # We only want to discover an auth problem AFTER download/transcribe
         # when the user explicitly asked for the auto-append step.
-        if auto_append_youtube:
+        if auto_append_youtube and source_kind != "twitch":
             yt_status = youtube_api.check_auth_status()
             if not yt_status["configured"]:
                 return ProcessResult(
@@ -3492,8 +3523,8 @@ def _legacy_one_shot_handler(
         # Capture the source video ID (only meaningful for YouTube URL input).
         # We use this later for the optional auto-append-to-YouTube step.
         youtube_video_id: str | None = None
-        if input_url and input_url.strip():
-            youtube_video_id = youtube_api.extract_video_id(input_url.strip())
+        if source_kind == "youtube":
+            youtube_video_id = youtube_api.extract_video_id(input_value)
             if youtube_video_id:
                 log(f"YouTube video id: {youtube_video_id}")
 
@@ -3512,9 +3543,9 @@ def _legacy_one_shot_handler(
                 video_path = safe_dir / safe_name
                 shutil.copy2(original_path, video_path)
                 log(f"Copied to safe path: {video_path}")
-        elif input_url and input_url.strip():
+        elif input_value:
             progress(0.05, desc="Downloading video...")
-            video_path = download_video(input_url.strip(), output_dir / "source")
+            video_path = download_video(input_value, output_dir / "source")
             log(f"Downloaded: {video_path.name}")
         else:
             return ProcessResult(
@@ -3708,12 +3739,17 @@ def _legacy_one_shot_handler(
             except Exception as ch_err:
                 log(f"Chapter generation failed: {ch_err}")
         else:
-            log("[Skip chapters] タイムスタンプ (概要欄) 生成を無効化")
+            reason = (
+                "Twitch入力ではタイムスタンプを生成しません"
+                if source_kind == "twitch"
+                else "タイムスタンプ (概要欄) 生成を無効化"
+            )
+            log(f"[Skip chapters] {reason}")
 
         # Auto-append to YouTube video description.
         # Only runs when: chapters generated AND user enabled it AND we have a
         # video id (URL input, not a local file upload).
-        if auto_append_youtube and modes.enable_chapters and chapters_text:
+        if auto_append_youtube and source_kind == "youtube" and modes.enable_chapters and chapters_text:
             if not youtube_video_id:
                 log("[Skip auto-append] URL 入力ではないため YouTube 概要欄への自動追記はスキップ")
             elif not youtube_api.is_configured():
@@ -3961,7 +3997,7 @@ def create_ui():
         **BLOCKS_THEME_KWARGS,
     ) as app:
         gr.HTML("<h1 class='main-title'>Clip Extractor</h1>")
-        gr.HTML("<p class='subtitle'>YouTube配信アーカイブから切り抜きショート動画を自動生成</p>")
+        gr.HTML("<p class='subtitle'>YouTube / Twitch配信アーカイブから切り抜きショート動画を自動生成</p>")
 
         with gr.Tabs():
             # --- Input Tab ---
@@ -4037,9 +4073,9 @@ def create_ui():
                 with gr.Row():
                     with gr.Column(scale=2):
                         input_url = gr.Textbox(
-                            label="YouTube URL",
-                            placeholder="https://youtube.com/watch?v=...",
-                            info="URLを貼り付けると自動でダウンロードします",
+                            label="動画URL（YouTube / Twitch）",
+                            placeholder="https://youtube.com/... または https://twitch.tv/videos/...",
+                            info="YouTube/TwitchのURLを貼り付けると自動でダウンロードします。Twitch入力ではタイムスタンプを生成しません",
                         )
                         gr.HTML("<p style='text-align:center; color:#999;'>または</p>")
                         input_file = gr.File(
@@ -5139,7 +5175,7 @@ def create_ui():
         with gr.Accordion("使い方 / How to Use", open=False):
             gr.Markdown("""
 ### 基本的な使い方
-1. **Input** タブでYouTube URLを貼り付けるか、動画ファイルをアップロード
+1. **Input** タブでYouTube/Twitch URLを貼り付けるか、動画ファイルをアップロード
 2. クリップ数や出力モードを設定
 3. **STEP 1：AIがおすすめ箇所を抽出** → 内容を確認
 4. **STEP 2：クリップを書き出し** をクリック

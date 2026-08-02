@@ -1,6 +1,6 @@
 # Clip Extractor
 
-YouTube 配信アーカイブ（または手元の動画ファイル）から、AI でハイライトを検出して**切り抜き動画・縦型ショート・サムネ・概要欄タイムスタンプ**を自動生成するツールです。Premiere Pro 用の XML 書き出しと、ブラウザで使える Web UI の両方に対応します。
+YouTube / Twitch 配信アーカイブ（または手元の動画ファイル）から、AI でハイライトを検出して**切り抜き動画・縦型ショート・サムネ・概要欄タイムスタンプ**を自動生成するツールです。Premiere Pro 用の XML 書き出しと、ブラウザで使える Web UI の両方に対応します。Twitch入力では配信のダウンロードと切り抜きに対応し、タイムスタンプ生成は自動的にスキップします。
 
 ---
 
@@ -22,7 +22,7 @@ YouTube 配信アーカイブ（または手元の動画ファイル）から、
 ## 処理の流れ
 
 ```
-入力（YouTube URL / 動画ファイル）
+入力（YouTube / Twitch URL / 動画ファイル）
   └─ ダウンロード（yt-dlp）           ※URL のとき
   └─ 文字起こし（faster-whisper）
   └─ ハイライト検出（Claude / OpenAI / Gemini）
@@ -31,7 +31,7 @@ YouTube 配信アーカイブ（または手元の動画ファイル）から、
         ├─ 縦型ショート（--shorts）＋タイトル焼き込み
         ├─ カラオケ字幕（--karaoke）
         └─ サムネ候補（--thumbnails）
-  └─ 概要欄タイムスタンプ生成（+ 任意で YouTube へ追記）
+  └─ 概要欄タイムスタンプ生成（YouTube入力時。+ 任意で YouTube へ追記）
   └─ Premiere Proへ直接送信（または XML 書き出し）
 ```
 
@@ -158,6 +158,9 @@ Premiere Proの File → Import から読み込めます。
 # YouTube URL から
 python main.py https://youtube.com/watch?v=xxxxx
 
+# Twitch VOD / 配信URLから（タイムスタンプは自動スキップ）
+python main.py https://www.twitch.tv/videos/123456789
+
 # 手元の動画から、縦型ショートも生成
 python main.py ./archive.mp4 --shorts
 
@@ -179,7 +182,7 @@ python main.py ./archive.mp4 --shorts --karaoke --thumbnails --audio-fusion
 
 | オプション | 説明 | 既定値 |
 |---|---|---|
-| `input` | YouTube URL または動画ファイルパス | — |
+| `input` | YouTube/Twitch URL または動画ファイルパス | — |
 | `-o, --output` | 出力ディレクトリ | 自動生成 |
 | `-n, --clips` | 切り抜き本数 | 5 |
 | `-m, --mode` | `combined` / `individual` | combined |
@@ -209,6 +212,12 @@ python main.py ./archive.mp4 --shorts --karaoke --thumbnails --audio-fusion
 | `--drive-setup` / `--drive-status` / `--drive-revoke` | Google Drive OAuth の認証 / 状態確認 / 解除 |
 
 YouTube / Drive 連携のセットアップ手順は `CREDENTIALS_SETUP.txt` を参照してください（初心者向けの図解版は `SETUP_GUIDE.html`）。
+
+### Twitch入力について
+
+Inputタブまたは `main.py` に Twitch のVOD URL（例: `https://www.twitch.tv/videos/123456789`）を指定すると、`yt-dlp` で動画をダウンロードして、YouTube入力と同じ文字起こし・AIハイライト検出・切り抜き生成を実行します。TwitchにはYouTube概要欄の追記先がないため、タイムスタンプ（概要欄）生成とYouTube概要欄への自動追記はスキップします。
+
+Twitch側でVOD保存が有効になっており、VODが公開されている必要があります。VODの保持期間は配信者の種別や設定によって異なるため、ダウンロードできない場合はTwitch側でVODの公開状態・保存期間を確認してください。
 
 ---
 
