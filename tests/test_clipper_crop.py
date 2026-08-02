@@ -5,6 +5,9 @@ imports cleanly without ffmpeg present. Guard with importorskip anyway in
 case an import-time dependency is ever introduced.
 """
 
+import re
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,7 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 clipper = pytest.importorskip("clipper")
-from config import FontConfig
+from config import FontConfig  # noqa: E402 - imported after the local path setup
 
 
 _shorts_crop_filter = clipper._shorts_crop_filter
@@ -190,6 +193,30 @@ def test_title_drawtext_supports_three_positions(monkeypatch, position, expected
     assert expected_y in f
 
 
+@pytest.mark.parametrize(
+    ("position", "expected_box_y", "expected_text_y"),
+    [
+        ("top", "y=116", "y=116+24+0"),
+        ("bottom", "y=ih-336-", "y=h-336-"),
+        ("overlay", "y=(ih-", "y=(h-"),
+    ],
+)
+def test_multiline_title_band_supports_three_positions(
+    position,
+    expected_box_y,
+    expected_text_y,
+):
+    font_config = type("FontConfig", (), {"font_name": "Noto Sans JP"})()
+    title = "【パワポケ】ついにJKとホテルへ！？配信者も驚愕の展開"
+
+    f = clipper._build_thumbnail_drawtext(title, font_config, position=position)
+
+    assert f.startswith("drawbox=x=32:")
+    assert expected_box_y in f.split(",", 1)[0]
+    assert expected_text_y in f
+    assert f.count("drawtext=") == 2
+
+
 def test_title_wraps_long_japanese_with_real_newline(monkeypatch):
     monkeypatch.setattr(clipper, "_resolve_title_fontfile", lambda font_name: None)
     font_config = type("FontConfig", (), {"font_name": "Noto Sans JP"})()
@@ -201,10 +228,59 @@ def test_title_wraps_long_japanese_with_real_newline(monkeypatch):
         assert sum(clipper._title_char_width(ch) for ch in line) <= 28
 
     f = clipper._build_title_drawtext(title, font_config)
-    # drawtext breaks lines on an actual newline (0x0A). The literal sequence
-    # "\n" would render a stray "n" instead of wrapping, so it must NOT appear.
-    assert "\n" in f
+    # Each line uses its own drawtext filter. On current FFmpeg builds, putting
+    # an actual newline in one drawtext value also paints a missing-glyph box.
+    assert f.count("drawtext=") == 2
+    assert "drawbox=" in f
+    assert "\n" not in f
     assert r"\n" not in f
+
+
+def test_title_auto_fits_inside_shorts_frame_with_real_ffmpeg():
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        pytest.skip("ffmpeg is required for the drawtext bounds regression test")
+
+    title = "【パワポケ】ついにJKとホテルへ！？配信者も驚愕の展開"
+    font_config = type("FontConfig", (), {"font_name": "Noto Sans JP"})()
+    drawtext = clipper._build_thumbnail_drawtext(title, font_config)
+    measured_filter = drawtext.replace(
+        "x=(w-text_w)/2",
+        "x=print(text_w)",
+    )
+    result = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "info",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=white:s=1080x1920:d=0.04",
+            "-vf",
+            measured_filter,
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+    widths = re.findall(r"\[Eval @ [^]]+\]\s+([0-9]+(?:\.[0-9]+)?)", result.stderr)
+
+    assert widths, result.stderr
+    text_width = max(float(width) for width in widths)
+    # 24px drawtext box padding plus a 32px safe margin on both sides.
+    assert text_width + (24 * 2) <= 1080 - (32 * 2)
+    assert "fontsize=80" not in drawtext
+    assert drawtext.count("drawtext=") == 2
+    assert "drawbox=" in drawtext
+    assert "\n" not in drawtext
 
 
 def test_title_cluster_width_handles_zero_advance_components():
