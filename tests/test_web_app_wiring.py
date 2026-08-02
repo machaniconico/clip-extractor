@@ -238,15 +238,34 @@ def test_obs_generation_checkboxes_are_independent_and_profile_backed():
 
 
 def test_obs_prompt_confirmation_is_wired_to_saved_setting_and_actions():
+    module = _module()
     source = WEB_APP.read_text(encoding="utf-8")
 
-    assert 'label="プロンプト未入力時に自動生成前の確認を表示"' in source
+    assert 'label="プロンプトの入力を確認しないで自動で生成開始"' in source
     assert "confirm_before_auto_process" in source
     assert "_obs_confirmation_poll" in source
     assert "_obs_confirm_generation" in source
+    assert "_obs_confirm_generation_with_prompt" in source
     assert "_obs_skip_generation" in source
-    assert '"はい、生成を開始"' in source
-    assert '"今回はスキップ"' in source
+    assert '"そのまま生成開始"' in source
+    assert '"プロンプトを入力して開始"' in source
+    assert '"今回は生成しない"' in source
+    assert 'label="今回の生成プロンプト"' in source
+    assert "未入力ならLLMにお任せします" in source
+    assert _event_input_names(module, "_obs_confirmation_poll", "tick") == [
+        "obs_confirmation_request_token"
+    ]
+    assert _event_output_names(module, "_obs_confirmation_poll", "tick") == [
+        "obs_confirmation_group",
+        "obs_confirmation_message",
+        "obs_confirmation_prompt",
+        "obs_confirmation_request_token",
+    ]
+    assert _event_input_names(
+        module,
+        "_obs_confirm_generation_with_prompt",
+        "click",
+    ) == ["obs_confirmation_prompt"]
 
 
 def test_input_accepts_youtube_and_twitch_urls():
@@ -305,7 +324,8 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_enable_chapters", "obs_chapter_prompt", "obs_min_duration",
         "obs_max_duration", "obs_shorts_mode", "obs_shorts_crop",
         "obs_shorts_title", "obs_generate_thumbnails", "obs_audio_fusion",
-        "obs_audio_alpha", "obs_karaoke", "obs_confirm_before_auto_process",
+        "obs_audio_alpha", "obs_karaoke",
+        "obs_auto_start_without_prompt_confirmation",
     ]
     assert _click_input_names(module, "obs_start_btn") == [
         "obs_trigger_radio", "obs_host", "obs_port", "obs_password",
@@ -316,7 +336,7 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_chapter_prompt", "obs_min_duration", "obs_max_duration",
         "obs_shorts_mode", "obs_shorts_crop", "obs_shorts_title",
         "obs_generate_thumbnails", "obs_audio_fusion", "obs_audio_alpha",
-        "obs_karaoke", "obs_confirm_before_auto_process",
+        "obs_karaoke", "obs_auto_start_without_prompt_confirmation",
     ]
 
 
@@ -347,7 +367,7 @@ def test_obs_help_explains_recording_primary_setup_and_archive_fallback():
     assert "アーカイブへの" in source
     assert "フォールバックとYouTube概要欄への自動反映は行いません" in source
     assert 'defaults.get("obs_stop_event", "record")' in source
-    assert "プロンプト未入力時に自動生成前の確認を表示" in source
+    assert "プロンプトの入力を確認しないで自動で生成開始" in source
 
 
 def test_obs_tab_is_second_in_top_navigation():
