@@ -17,15 +17,26 @@ _SHORTS_PAD_FILTER = (
     "scale=1080:1920:force_original_aspect_ratio=decrease,"
     "pad=1080:1920:(ow-iw)/2:(oh-ih)/2"
 )
-_SHORTS_BLUR_FILTER = (
+_DEFAULT_SHORTS_BLUR_STRENGTH = 20.0
+_MIN_SHORTS_BLUR_STRENGTH = 0.0
+_MAX_SHORTS_BLUR_STRENGTH = 50.0
+_SHORTS_BLUR_FILTER_TEMPLATE = (
     "split=2[bg][fg];"
     "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
-    "crop=1080:1920,boxblur=20[bgblur];"
+    "crop=1080:1920,boxblur={blur_strength}[bgblur];"
     "[fg]scale=1080:1920:force_original_aspect_ratio=decrease[fgscaled];"
     "[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2"
 )
+_SHORTS_FRAME_HEIGHT = 1920
+_FFMPEG_SRT_PLAY_RES_Y = 288
 _TITLE_FONT_SIZE = 80
 _TITLE_WRAP_FULLWIDTH_CHARS = 14
+_TITLE_Y_BY_POSITION = {
+    "top": "140",
+    # Leave the bottom 300px clear for the archive/speech captions.
+    "bottom": "h-text_h-360",
+    "overlay": "(h-text_h)/2",
+}
 _WINDOWS_FILENAME_MAX_UTF16_UNITS = 255
 _ZERO_WIDTH_JOINER = "\u200d"
 _EMOJI_VARIATION_SELECTOR = "\ufe0f"
@@ -54,16 +65,19 @@ _JAPANESE_FONT_KEYWORDS = (
     "vl gothic",
 )
 
-# Bundled subtitle font shipped in fonts/ so Shorts captions render in a heavy
-# gothic (Noto Sans JP Black / 源ノ角ゴシック Heavy 相当) even on machines where
-# no Japanese font is installed. The internal family name is "Noto Sans JP Black"
-# (verified via fc-scan); libass needs that exact name plus a fontsdir pointing
-# at the bundle, while drawtext just loads the file by path.
+# Bundled subtitle font shipped in fonts/ so Shorts captions render in a bold
+# gothic (Noto Sans JP Bold, weight 700) even on machines where
+# no Japanese font is installed. Its internal family is "Noto Sans JP" with
+# Bold style; libass gets the family plus Bold=-1 and a fontsdir, while drawtext
+# loads the exact file path.
 _BUNDLED_FONTS_DIR = Path(__file__).resolve().parent / "fonts"
-_BUNDLED_DEFAULT_FONT_FILE = _BUNDLED_FONTS_DIR / "NotoSansJP-Black.ttf"
-_BUNDLED_DEFAULT_FONT_FAMILY = "Noto Sans JP Black"
-# Requests that should resolve straight to the bundled heavy font file.
+_BUNDLED_DEFAULT_FONT_FILE = _BUNDLED_FONTS_DIR / "NotoSansJP-Bold.otf"
+_BUNDLED_DEFAULT_FONT_FAMILY = "Noto Sans JP"
+# Requests that should resolve straight to the bundled bold font file.
 _BUNDLED_FONT_ALIASES = frozenset({
+    "noto sans jp",
+    "noto sans jp bold",
+    "noto sans cjk jp bold",
     "noto sans jp black",
     "源ノ角ゴシック heavy",
     "源ノ角ゴシック",
@@ -77,6 +91,10 @@ def _bundled_default_fontfile() -> str | None:
 
 class _DefaultTitleFontConfig:
     font_name = _BUNDLED_DEFAULT_FONT_FAMILY
+
+
+def _is_bundled_default_font_name(font_name: str) -> bool:
+    return str(font_name or "").strip().lower() in _BUNDLED_FONT_ALIASES
 
 
 def get_video_info(video_path: Path) -> dict:
@@ -129,19 +147,35 @@ def _bundled_fontsdir_option() -> str:
     return ""
 
 
+def _srt_style_scale(value: float) -> float:
+    """Convert a 1080x1920 pixel setting to FFmpeg's implicit SRT PlayRes."""
+    return float(value) * _FFMPEG_SRT_PLAY_RES_Y / _SHORTS_FRAME_HEIGHT
+
+
+def _format_style_number(value: float) -> str:
+    return f"{value:g}"
+
+
 def _build_force_style(font_config: "FontConfig") -> str:
-    """font_config から ffmpeg subtitles filter の force_style 文字列を構築。"""
+    """Build body-caption style for FFmpeg's implicit 384x288 SRT canvas."""
     alignment = 8 if getattr(font_config, "position", "bottom") == "top" else 2
+    font_size = _format_style_number(_srt_style_scale(font_config.font_size))
+    outline_width = _format_style_number(
+        _srt_style_scale(font_config.outline_width)
+    )
+    margin_v = round(_srt_style_scale(font_config.margin_bottom))
     parts = [
         f"FontName={font_config.font_name}",
-        f"FontSize={font_config.font_size}",
+        f"FontSize={font_size}",
         f"PrimaryColour={_hex_to_ass_color(font_config.font_color)}",
         f"OutlineColour={_hex_to_ass_color(font_config.outline_color)}",
-        f"Outline={font_config.outline_width}",
+        f"Outline={outline_width}",
         f"Alignment={alignment}",
-        f"MarginV={font_config.margin_bottom}",
+        f"MarginV={margin_v}",
         "BorderStyle=1",
     ]
+    if _is_bundled_default_font_name(font_config.font_name):
+        parts.append("Bold=-1")
     return ",".join(parts)
 
 
@@ -168,16 +202,42 @@ def _shorts_crop_filter(crop_x: str = "center") -> str:
     return f"crop={w}:ih:{x}:0,scale=1080:1920"
 
 
-def _shorts_base_vf(mode: str = "blur", crop_x: str = "center") -> str:
+def _coerce_shorts_blur_strength(value) -> float:
+    """Return a finite blur radius clamped to the range exposed by the UI."""
+    try:
+        strength = float(value)
+    except (TypeError, ValueError):
+        strength = _DEFAULT_SHORTS_BLUR_STRENGTH
+    if strength != strength:  # NaN
+        strength = _DEFAULT_SHORTS_BLUR_STRENGTH
+    return min(
+        _MAX_SHORTS_BLUR_STRENGTH,
+        max(_MIN_SHORTS_BLUR_STRENGTH, strength),
+    )
+
+
+def _shorts_blur_filter(blur_strength=_DEFAULT_SHORTS_BLUR_STRENGTH) -> str:
+    strength = _format_style_number(_coerce_shorts_blur_strength(blur_strength))
+    return _SHORTS_BLUR_FILTER_TEMPLATE.format(blur_strength=strength)
+
+
+_SHORTS_BLUR_FILTER = _shorts_blur_filter()
+
+
+def _shorts_base_vf(
+    mode: str = "pad",
+    crop_x: str = "center",
+    blur_strength=_DEFAULT_SHORTS_BLUR_STRENGTH,
+) -> str:
     """Return the base 9:16 Shorts vf chain for crop/blur/pad modes."""
     if mode == "crop":
         return _shorts_crop_filter(crop_x)
     if mode == "pad":
         return _SHORTS_PAD_FILTER
     if mode == "blur":
-        return _SHORTS_BLUR_FILTER
-    logger.warning("Unknown shorts_mode=%r; falling back to blur", mode)
-    return _SHORTS_BLUR_FILTER
+        return _shorts_blur_filter(blur_strength)
+    logger.warning("Unknown shorts_mode=%r; falling back to pad", mode)
+    return _SHORTS_PAD_FILTER
 
 
 def _title_char_width(ch: str) -> int:
@@ -402,7 +462,11 @@ def _resolve_title_fontfile(font_name: str) -> str | None:
     return None
 
 
-def _title_drawtext_parts(title: str, font_config: "FontConfig") -> list[str]:
+def _title_drawtext_parts(
+    title: str,
+    font_config: "FontConfig",
+    position: str = "top",
+) -> list[str]:
     """Build shared drawtext options for title overlays."""
     wrapped_title = _wrap_title_text(title)
     if not wrapped_title:
@@ -415,13 +479,14 @@ def _title_drawtext_parts(title: str, font_config: "FontConfig") -> list[str]:
     ]
     if fontfile:
         parts.append(f"fontfile='{_escape_drawtext_path(fontfile)}'")
+    title_y = _TITLE_Y_BY_POSITION.get(position, _TITLE_Y_BY_POSITION["top"])
     parts.extend([
         f"text='{_escape_drawtext_text(wrapped_title)}'",
         "expansion=none",
         "fontcolor=white",
         f"fontsize={_TITLE_FONT_SIZE}",
         "x=(w-text_w)/2",
-        "y=140",
+        f"y={title_y}",
         "box=1",
         "boxcolor=black@0.5",
         "boxborderw=24",
@@ -429,9 +494,13 @@ def _title_drawtext_parts(title: str, font_config: "FontConfig") -> list[str]:
     return parts
 
 
-def _build_title_drawtext(title: str, font_config: "FontConfig") -> str:
+def _build_title_drawtext(
+    title: str,
+    font_config: "FontConfig",
+    position: str = "top",
+) -> str:
     """Build a drawtext filter that shows the clip title for the first 4 seconds."""
-    parts = _title_drawtext_parts(title, font_config)
+    parts = _title_drawtext_parts(title, font_config, position)
     if not parts:
         return ""
 
@@ -439,9 +508,13 @@ def _build_title_drawtext(title: str, font_config: "FontConfig") -> str:
     return "drawtext=" + ":".join(parts)
 
 
-def _build_thumbnail_drawtext(title: str, font_config: "FontConfig") -> str:
+def _build_thumbnail_drawtext(
+    title: str,
+    font_config: "FontConfig",
+    position: str = "top",
+) -> str:
     """Build a drawtext filter for a still thumbnail title overlay."""
-    parts = _title_drawtext_parts(title, font_config)
+    parts = _title_drawtext_parts(title, font_config, position)
     if not parts:
         return ""
 
@@ -540,11 +613,13 @@ def extract_clip(
     srt_path: Path | None = None,
     font_config: "FontConfig | None" = None,
     crop_x: str = "center",
-    shorts_mode: str = "blur",
+    shorts_mode: str = "pad",
     shorts_title: bool = True,
     title: str = "",
     karaoke: bool = False,
     ass_path: Path | None = None,
+    shorts_blur_strength=_DEFAULT_SHORTS_BLUR_STRENGTH,
+    shorts_title_position: str = "top",
 ) -> Path:
     """Extract a clip from the video."""
     duration = end_sec - start_sec
@@ -560,9 +635,17 @@ def extract_clip(
 
     vf_filters = []
     if shorts:
-        vf_filters.append(_shorts_base_vf(shorts_mode, crop_x))
+        vf_filters.append(
+            _shorts_base_vf(shorts_mode, crop_x, shorts_blur_strength)
+        )
     if shorts and shorts_title and title:
-        vf_filters.append(_build_title_drawtext(title, font_config or _DefaultTitleFontConfig()))
+        vf_filters.append(
+            _build_title_drawtext(
+                title,
+                font_config or _DefaultTitleFontConfig(),
+                shorts_title_position,
+            )
+        )
     if shorts and karaoke and ass_path is not None:
         vf_filters.append(_build_ass_subtitles_filter(ass_path))
     elif shorts and srt_path is not None and font_config is not None:
@@ -583,7 +666,9 @@ def generate_thumbnail(
     *,
     vertical: bool = False,
     crop_x: str = "center",
-    shorts_mode: str = "blur",
+    shorts_mode: str = "pad",
+    shorts_blur_strength=_DEFAULT_SHORTS_BLUR_STRENGTH,
+    shorts_title_position: str = "top",
     title: str = "",
     font_config: "FontConfig | None" = None,
     strategy: str = "midpoint",
@@ -610,11 +695,14 @@ def generate_thumbnail(
 
     vf_filters: list[str] = []
     if vertical:
-        vf_filters.append(_shorts_base_vf(shorts_mode, crop_x))
+        vf_filters.append(
+            _shorts_base_vf(shorts_mode, crop_x, shorts_blur_strength)
+        )
 
     drawtext = _build_thumbnail_drawtext(
         title,
         font_config or _DefaultTitleFontConfig(),
+        shorts_title_position,
     )
     if drawtext:
         vf_filters.append(drawtext)
@@ -665,18 +753,27 @@ def _truncate_title_utf16(title: str, max_units: int) -> str:
     return "".join(kept).rstrip(" ._")
 
 
-def _build_clip_filename(range_str: str, title: str, shorts: bool) -> str:
+def _build_clip_filename(
+    range_str: str,
+    title: str,
+    shorts: bool,
+    *,
+    asset_suffix: str = "",
+    extension: str = ".mp4",
+) -> str:
     suffix = "_short" if shorts else ""
+    if not extension.startswith("."):
+        extension = f".{extension}"
     safe_title = _sanitize_filename_title(title)
     if safe_title:
-        fixed_parts = f"{range_str}_{suffix}.mp4"
+        fixed_parts = f"{range_str}_{suffix}{asset_suffix}{extension}"
         available_units = max(
             0,
             _WINDOWS_FILENAME_MAX_UTF16_UNITS - _utf16_units(fixed_parts),
         )
         safe_title = _truncate_title_utf16(safe_title, available_units)
     title_suffix = f"_{safe_title}" if safe_title else ""
-    return f"{range_str}{title_suffix}{suffix}.mp4"
+    return f"{range_str}{title_suffix}{suffix}{asset_suffix}{extension}"
 
 
 def generate_thumbnails(
@@ -686,7 +783,9 @@ def generate_thumbnails(
     *,
     vertical: bool = False,
     crop_x: str = "center",
-    shorts_mode: str = "blur",
+    shorts_mode: str = "pad",
+    shorts_blur_strength=_DEFAULT_SHORTS_BLUR_STRENGTH,
+    shorts_title_position: str = "top",
     font_config: "FontConfig | None" = None,
     img_format: str = "png",
     strategy: str = "midpoint",
@@ -710,6 +809,8 @@ def generate_thumbnails(
             vertical=vertical,
             crop_x=crop_x,
             shorts_mode=shorts_mode,
+            shorts_blur_strength=shorts_blur_strength,
+            shorts_title_position=shorts_title_position,
             title=h.get("title", ""),
             font_config=font_config,
             strategy=strategy,
@@ -727,10 +828,12 @@ def extract_clips(
     srt_paths: list[Path] | None = None,
     font_config: "FontConfig | None" = None,
     crop_x: str = "center",
-    shorts_mode: str = "blur",
+    shorts_mode: str = "pad",
     shorts_title: bool = True,
     karaoke: bool = False,
     ass_paths: list[Path] | None = None,
+    shorts_blur_strength=_DEFAULT_SHORTS_BLUR_STRENGTH,
+    shorts_title_position: str = "top",
 ) -> list[Path]:
     """Extract all highlight clips."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -759,6 +862,8 @@ def extract_clips(
             title=h.get("title", ""),
             karaoke=karaoke,
             ass_path=ass_path,
+            shorts_blur_strength=shorts_blur_strength,
+            shorts_title_position=shorts_title_position,
         )
         clip_paths.append(clip_path)
 
@@ -786,9 +891,9 @@ if __name__ == "__main__":
                     outline_color="#000000", outline_width=3, position="bottom",
                     margin_bottom=60)
     style = _build_force_style(fc)
-    for expected in ["FontName=Noto Sans JP", "FontSize=96",
+    for expected in ["FontName=Noto Sans JP", "FontSize=14.4",
                      "PrimaryColour=&HFFFFFF&", "OutlineColour=&H000000&",
-                     "Alignment=2", "MarginV=60"]:
+                     "Outline=0.45", "Alignment=2", "MarginV=9"]:
         assert expected in style, f"missing: {expected} in {style}"
 
     from pathlib import Path

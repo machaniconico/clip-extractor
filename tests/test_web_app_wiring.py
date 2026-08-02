@@ -209,7 +209,14 @@ def test_render_phase_signature_matches_render_inputs():
     assert args[0] == "session"
     assert render_inputs[0] == "session_state"
     assert args[1:] == render_inputs[1:]
-    assert args[-2:] == ["generate_thumbnails", "karaoke"]
+    assert args[-4:] == [
+        "generate_thumbnails",
+        "karaoke",
+        "shorts_blur_strength",
+        "shorts_title_position",
+    ]
+    assert "shorts_blur_strength" in args
+    assert "shorts_title_position" in args
 
 
 def test_save_defaults_signature_matches_save_button_inputs():
@@ -221,6 +228,29 @@ def test_save_defaults_signature_matches_save_button_inputs():
         "obs_executable_path",
         "obs_auto_connect_on_startup",
     ]
+    assert "shorts_blur_strength" in args
+    assert "shorts_title_position" in args
+
+
+def test_shorts_visual_controls_are_available_for_input_and_obs():
+    module = _module()
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert source.count('label="背景のぼかし強度"') == 2
+    assert source.count('label="タイトルの配置"') == 2
+    assert source.count("fn=shorts_blur_visibility") == 2
+    for event_name in ("render_phase", "maybe_render_phase"):
+        event_inputs = _event_input_names(module, event_name, "then")
+        assert "shorts_blur_strength" in event_inputs
+        assert "shorts_title_position" in event_inputs
+    for button in ("save_defaults_btn", "input_save_defaults_btn"):
+        click_inputs = _click_input_names(module, button)
+        assert "shorts_blur_strength" in click_inputs
+        assert "shorts_title_position" in click_inputs
+    for button in ("obs_save_processing_btn", "obs_start_btn"):
+        click_inputs = _click_input_names(module, button)
+        assert "obs_shorts_blur_strength" in click_inputs
+        assert "obs_shorts_title_position" in click_inputs
 
 
 def test_input_tab_exposes_default_save_button_with_same_settings():
@@ -392,6 +422,7 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_shorts_title", "obs_generate_thumbnails", "obs_audio_fusion",
         "obs_audio_alpha", "obs_karaoke",
         "obs_auto_start_without_prompt_confirmation",
+        "obs_shorts_blur_strength", "obs_shorts_title_position",
     ]
     assert _click_input_names(module, "obs_start_btn") == [
         "obs_trigger_radio", "obs_host", "obs_port", "obs_password",
@@ -403,6 +434,7 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_shorts_mode", "obs_shorts_crop", "obs_shorts_title",
         "obs_generate_thumbnails", "obs_audio_fusion", "obs_audio_alpha",
         "obs_karaoke", "obs_auto_start_without_prompt_confirmation",
+        "obs_shorts_blur_strength", "obs_shorts_title_position",
     ]
 
 
