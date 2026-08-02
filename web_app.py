@@ -1444,7 +1444,6 @@ _obs_status_lock = threading.Lock()
 _obs_confirmation_lock = threading.Lock()
 _obs_pending_confirmation: dict | None = None
 _OBS_STATUS_MAX = 80
-_OBS_CONFIRMATION_TIMEOUT = 15 * 60
 _OBS_ARCHIVE_DISCOVERY_TIMEOUT = 15 * 60
 _OBS_ARCHIVE_READY_TIMEOUT = 6 * 60 * 60
 _OBS_RECORDING_EVENT_TIMEOUT = 60
@@ -1627,7 +1626,8 @@ def _obs_confirm_before_auto_process(
 
     The watcher runs outside a Gradio request, so confirmation is represented by
     a small shared request that the UI timer renders and the two buttons resolve.
-    A timeout or watcher stop is fail-closed and skips generation.
+    A watcher stop is fail-closed and skips generation. User confirmation has
+    no deadline; the short event wait only keeps cancellation responsive.
     """
     if not bool(settings.get("confirm_before_auto_process", False)):
         return True
@@ -1651,8 +1651,7 @@ def _obs_confirm_before_auto_process(
         _obs_pending_confirmation = request
     _obs_append_status("プロンプト未入力のため、自動生成の確認を待っています")
 
-    deadline = time.monotonic() + _OBS_CONFIRMATION_TIMEOUT
-    while is_current() and time.monotonic() < deadline:
+    while is_current():
         if request["event"].wait(timeout=0.25):
             break
 
@@ -1667,7 +1666,6 @@ def _obs_confirm_before_auto_process(
         return True
     if decision is False:
         return False
-    _obs_append_status("自動生成の確認がタイムアウトしたため、今回はスキップしました")
     return False
 
 
