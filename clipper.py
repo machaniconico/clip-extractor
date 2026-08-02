@@ -28,9 +28,13 @@ _SHORTS_BLUR_FILTER_TEMPLATE = (
     "[bgblur][fgscaled]overlay=(W-w)/2:(H-h)/2"
 )
 _SHORTS_FRAME_HEIGHT = 1920
+_SHORTS_FRAME_WIDTH = 1080
 _FFMPEG_SRT_PLAY_RES_Y = 288
 _TITLE_FONT_SIZE = 80
+_TITLE_MIN_FONT_SIZE = 32
 _TITLE_WRAP_FULLWIDTH_CHARS = 14
+_TITLE_BOX_BORDER = 24
+_TITLE_SAFE_EDGE_MARGIN = 32
 _TITLE_Y_BY_POSITION = {
     "top": "140",
     # Leave the bottom 300px clear for the archive/speech captions.
@@ -352,6 +356,59 @@ def _wrap_title_text(title: str, fullwidth_chars: int = _TITLE_WRAP_FULLWIDTH_CH
     return "\n".join(line for line in lines if line)
 
 
+@lru_cache(maxsize=256)
+def _measure_title_width(
+    wrapped_title: str,
+    fontfile: str | None,
+    font_size: int,
+) -> float:
+    """Estimate FFmpeg drawtext width using the same font at the target size."""
+    lines = wrapped_title.splitlines() or [wrapped_title]
+
+    if fontfile:
+        try:
+            from PIL import ImageFont
+
+            font = ImageFont.truetype(fontfile, font_size)
+            measured = max(float(font.getlength(line)) for line in lines)
+            return measured + 2.0  # Allow for renderer rounding/hinting.
+        except (ImportError, OSError, ValueError) as exc:
+            logger.warning(
+                "Could not measure title with fontfile %r; using a conservative fallback: %s",
+                fontfile,
+                exc,
+            )
+
+    max_units = max(
+        sum(_title_cluster_width(cluster) for cluster in _title_grapheme_clusters(line))
+        for line in lines
+    )
+    measured = (max_units / 2) * font_size * 1.1
+    return measured + 2.0
+
+
+def _fit_title_font_size(wrapped_title: str, fontfile: str | None) -> int:
+    """Return the largest title size whose box stays inside the Shorts frame."""
+    available_text_width = (
+        _SHORTS_FRAME_WIDTH
+        - 2 * _TITLE_SAFE_EDGE_MARGIN
+        - 2 * _TITLE_BOX_BORDER
+    )
+    low = _TITLE_MIN_FONT_SIZE
+    high = _TITLE_FONT_SIZE
+    best = _TITLE_MIN_FONT_SIZE
+
+    while low <= high:
+        candidate = (low + high) // 2
+        if _measure_title_width(wrapped_title, fontfile, candidate) <= available_text_width:
+            best = candidate
+            low = candidate + 1
+        else:
+            high = candidate - 1
+
+    return best
+
+
 def _escape_drawtext_text(value: str) -> str:
     """Escape text for ffmpeg drawtext option syntax."""
     escaped: list[str] = []
@@ -474,6 +531,7 @@ def _title_drawtext_parts(
 
     font_name = getattr(font_config, "font_name", _BUNDLED_DEFAULT_FONT_FAMILY) or _BUNDLED_DEFAULT_FONT_FAMILY
     fontfile = _resolve_title_fontfile(font_name)
+    title_font_size = _fit_title_font_size(wrapped_title, fontfile)
     parts = [
         f"font='{_escape_drawtext_text(font_name)}'",
     ]
@@ -484,14 +542,75 @@ def _title_drawtext_parts(
         f"text='{_escape_drawtext_text(wrapped_title)}'",
         "expansion=none",
         "fontcolor=white",
-        f"fontsize={_TITLE_FONT_SIZE}",
+        f"fontsize={title_font_size}",
         "x=(w-text_w)/2",
         f"y={title_y}",
+        "fix_bounds=1",
         "box=1",
         "boxcolor=black@0.5",
-        "boxborderw=24",
+        f"boxborderw={_TITLE_BOX_BORDER}",
     ])
     return parts
+
+
+def _build_multiline_title_drawtext(
+    title: str,
+    font_config: "FontConfig",
+    position: str,
+    *,
+    timed: bool,
+) -> str:
+    """Draw wrapped title lines separately so newlines never render as tofu."""
+    wrapped_title = _wrap_title_text(title)
+    lines = wrapped_title.splitlines()
+    if len(lines) < 2:
+        return ""
+
+    font_name = getattr(font_config, "font_name", _BUNDLED_DEFAULT_FONT_FAMILY) or _BUNDLED_DEFAULT_FONT_FAMILY
+    fontfile = _resolve_title_fontfile(font_name)
+    title_font_size = _fit_title_font_size(wrapped_title, fontfile)
+    line_height = round(title_font_size * 1.2)
+    box_height = (line_height * len(lines)) + (2 * _TITLE_BOX_BORDER)
+
+    if position == "bottom":
+        box_y = f"ih-336-{box_height}"
+        first_line_y = f"h-336-{box_height}+{_TITLE_BOX_BORDER}"
+    elif position == "overlay":
+        box_y = f"(ih-{box_height})/2"
+        first_line_y = f"(h-{box_height})/2+{_TITLE_BOX_BORDER}"
+    else:
+        box_y = str(140 - _TITLE_BOX_BORDER)
+        first_line_y = f"{box_y}+{_TITLE_BOX_BORDER}"
+
+    enable = ":enable='lt(t\\,4)'" if timed else ""
+    filters = [
+        "drawbox="
+        f"x={_TITLE_SAFE_EDGE_MARGIN}:"
+        f"y={box_y}:"
+        f"w=iw-{2 * _TITLE_SAFE_EDGE_MARGIN}:"
+        f"h={box_height}:"
+        "color=black@0.5:t=fill"
+        f"{enable}"
+    ]
+
+    for index, line in enumerate(lines):
+        parts = [f"font='{_escape_drawtext_text(font_name)}'"]
+        if fontfile:
+            parts.append(f"fontfile='{_escape_drawtext_path(fontfile)}'")
+        parts.extend([
+            f"text='{_escape_drawtext_text(line)}'",
+            "expansion=none",
+            "fontcolor=white",
+            f"fontsize={title_font_size}",
+            "x=(w-text_w)/2",
+            f"y={first_line_y}+{index * line_height}",
+            "fix_bounds=1",
+        ])
+        if timed:
+            parts.append("enable='lt(t\\,4)'")
+        filters.append("drawtext=" + ":".join(parts))
+
+    return ",".join(filters)
 
 
 def _build_title_drawtext(
@@ -500,6 +619,15 @@ def _build_title_drawtext(
     position: str = "top",
 ) -> str:
     """Build a drawtext filter that shows the clip title for the first 4 seconds."""
+    multiline = _build_multiline_title_drawtext(
+        title,
+        font_config,
+        position,
+        timed=True,
+    )
+    if multiline:
+        return multiline
+
     parts = _title_drawtext_parts(title, font_config, position)
     if not parts:
         return ""
@@ -514,6 +642,15 @@ def _build_thumbnail_drawtext(
     position: str = "top",
 ) -> str:
     """Build a drawtext filter for a still thumbnail title overlay."""
+    multiline = _build_multiline_title_drawtext(
+        title,
+        font_config,
+        position,
+        timed=False,
+    )
+    if multiline:
+        return multiline
+
     parts = _title_drawtext_parts(title, font_config, position)
     if not parts:
         return ""
@@ -931,24 +1068,28 @@ if __name__ == "__main__":
     title_text = "A:B's 50% C\\D あいうえおかきくけこさしすせそ"
     title_f = _build_title_drawtext(title_text, fc)
     for expected in [
-        "drawtext=", "font='Noto Sans JP'", "text='A\\:B\\'s 50\\% C\\\\D",
-        "fontsize=80", "fontcolor=white", "box=1", "boxcolor=black@0.5",
-        "boxborderw=24", "x=(w-text_w)/2", "y=140", "enable='lt(t\\,4)'",
+        "drawbox=x=32:y=116:w=iw-64", "font='Noto Sans JP'",
+        "text='A\\:B\\'s 50\\% C\\\\D", "fontcolor=white",
+        "x=(w-text_w)/2", "enable='lt(t\\,4)'",
     ]:
         assert expected in title_f, f"missing: {expected} in {title_f}"
-    assert "\n" in title_f, f"title should wrap long text: {title_f}"
-    assert r"\n" not in title_f, f"newline must be a real 0x0A, not literal: {title_f}"
+    assert title_f.count("drawtext=") == 2, f"title should wrap into filters: {title_f}"
+    assert "fontsize=80" not in title_f, f"long title should auto-fit: {title_f}"
+    assert "\n" not in title_f, f"newline must not reach drawtext: {title_f}"
+    assert r"\n" not in title_f, f"literal newline escape must not render: {title_f}"
 
     thumb_f = _build_thumbnail_drawtext(title_text, fc)
-    assert thumb_f.startswith("drawtext="), f"thumbnail drawtext missing: {thumb_f}"
+    assert thumb_f.startswith("drawbox="), f"thumbnail title band missing: {thumb_f}"
     assert "enable=" not in thumb_f, f"thumbnail drawtext must not use enable: {thumb_f}"
     for expected in [
         "font='Noto Sans JP'", "text='A\\:B\\'s 50\\% C\\\\D",
-        "fontsize=80", "fontcolor=white", "box=1", "boxcolor=black@0.5",
-        "boxborderw=24", "x=(w-text_w)/2", "y=140",
+        "fontcolor=white", "x=(w-text_w)/2",
     ]:
         assert expected in thumb_f, f"missing thumbnail part: {expected} in {thumb_f}"
-    assert title_f == f"{thumb_f}:enable='lt(t\\,4)'", "title/thumbnail style diverged"
+    short_title = "タイトル"
+    short_video_f = _build_title_drawtext(short_title, fc)
+    short_thumb_f = _build_thumbnail_drawtext(short_title, fc)
+    assert short_video_f == f"{short_thumb_f}:enable='lt(t\\,4)'", "single-line style diverged"
     assert _build_thumbnail_drawtext("   \n", fc) == "", "empty thumbnail title should skip drawtext"
 
     print("clipper.py self-test: all assertions passed")

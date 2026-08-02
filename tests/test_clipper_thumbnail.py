@@ -66,7 +66,9 @@ def test_thumbnail_title_wraps_with_real_newline(monkeypatch):
 
     f = clipper._build_thumbnail_drawtext(title, _font_config())
 
-    assert "\n" in f
+    assert f.count("drawtext=") == 2
+    assert "drawbox=" in f
+    assert "\n" not in f
     assert r"\n" not in f
 
 
