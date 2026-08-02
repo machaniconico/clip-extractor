@@ -1267,48 +1267,47 @@ def render_phase(
             progress(0.85, desc="[Step 6/6] Exporting XML...")
             log("[Step 6/6] Exporting Premiere Pro XML...")
             if output_mode == "combined":
-                if clip_paths:
-                    xml_paths.append(
-                        generate_combined_xml(
-                            clip_paths, highlights, video_info,
-                            output_dir / "project.xml",
-                            project_name=video_path.stem,
-                        )
+                xml_paths.append(
+                    generate_combined_xml(
+                        clip_paths,
+                        highlights,
+                        video_info,
+                        output_dir / "project.xml",
+                        project_name=video_path.stem,
+                        source_video_path=video_path,
+                        shorts_paths=shorts_paths,
                     )
-                if shorts_paths:
-                    shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                    xml_paths.append(
-                        generate_combined_xml(
-                            shorts_paths, highlights, shorts_video_info,
-                            output_dir / "project_shorts.xml",
-                            project_name=f"{video_path.stem}_shorts",
-                        )
-                    )
+                )
                 log("  Premiere Pro XML (combined mode) exported")
             else:
-                if clip_paths:
-                    xml_paths.extend(
-                        generate_individual_xmls(
-                            clip_paths, highlights, video_info, clips_dir,
-                        )
+                xml_paths.extend(
+                    generate_individual_xmls(
+                        clip_paths,
+                        highlights,
+                        video_info,
+                        clips_dir if clip_paths else shorts_dir,
+                        source_video_path=video_path,
+                        shorts_paths=shorts_paths,
                     )
-                if shorts_paths:
-                    shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                    xml_paths.extend(
-                        generate_individual_xmls(
-                            shorts_paths, highlights,
-                            shorts_video_info, output_dir / "shorts",
-                        )
-                    )
+                )
                 log("  Premiere Pro XML (individual mode) exported")
 
             premiere_output = {
                 "output_dir": str(output_dir.resolve()),
                 "project_name": video_path.stem,
+                "source_path": str(video_path.resolve()),
                 "clip_paths": [str(path.resolve()) for path in clip_paths],
                 "shorts_paths": [str(path.resolve()) for path in shorts_paths],
                 "srt_paths": [str(path.resolve()) for path in srt_paths],
                 "xml_paths": [str(path.resolve()) for path in xml_paths],
+                "highlights": [
+                    {
+                        "title": str(highlight.get("title") or ""),
+                        "start_sec": float(highlight["start_sec"]),
+                        "end_sec": float(highlight["end_sec"]),
+                    }
+                    for highlight in highlights
+                ],
             }
             session["_premiere_output"] = premiere_output
         elif not modes.enable_clips and not modes.enable_shorts:
@@ -3785,31 +3784,25 @@ def _legacy_one_shot_handler(
             progress(0.85, desc="[Step 6/6] Exporting XML...")
             log("[Step 6/6] Exporting Premiere Pro XML...")
             if output_mode == "combined":
-                if clip_paths:
-                    generate_combined_xml(
-                        clip_paths, highlights, video_info,
-                        output_dir / "project.xml",
-                        project_name=video_path.stem,
-                    )
-                if shorts_paths:
-                    shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                    generate_combined_xml(
-                        shorts_paths, highlights, shorts_video_info,
-                        output_dir / "project_shorts.xml",
-                        project_name=f"{video_path.stem}_shorts",
-                    )
+                generate_combined_xml(
+                    clip_paths,
+                    highlights,
+                    video_info,
+                    output_dir / "project.xml",
+                    project_name=video_path.stem,
+                    source_video_path=video_path,
+                    shorts_paths=shorts_paths,
+                )
                 log("  Premiere Pro XML (combined mode) exported")
             else:
-                if clip_paths:
-                    generate_individual_xmls(
-                        clip_paths, highlights, video_info, clips_dir,
-                    )
-                if shorts_paths:
-                    shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                    generate_individual_xmls(
-                        shorts_paths, highlights,
-                        shorts_video_info, output_dir / "shorts",
-                    )
+                generate_individual_xmls(
+                    clip_paths,
+                    highlights,
+                    video_info,
+                    clips_dir if clip_paths else shorts_dir,
+                    source_video_path=video_path,
+                    shorts_paths=shorts_paths,
+                )
                 log("  Premiere Pro XML (individual mode) exported")
         elif not modes.enable_clips and not modes.enable_shorts:
             log("[Skip 4-6] Video generation disabled — chapters-only run")
@@ -5096,7 +5089,8 @@ def create_ui():
                     gr.Markdown(
                         "### Adobe Premiere Proへ送る\n"
                         "書き出した動画を現在のプロジェクトへ読み込み、"
-                        "各クリップのシーケンスを自動作成します。初回だけ連携プラグインを導入してください。"
+                        "元動画をV1、通常切り抜きをV2、同時生成したショートをV3へ"
+                        "元の時刻に合わせて配置します。初回だけ連携プラグインを導入してください。"
                     )
                     with gr.Row():
                         premiere_edit_btn = gr.Button(

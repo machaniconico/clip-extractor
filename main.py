@@ -324,29 +324,17 @@ def main():
             generate_combined_xml(
                 clip_paths, highlights, video_info, xml_path,
                 project_name=video_path.stem,
+                source_video_path=video_path,
+                shorts_paths=shorts_paths,
             )
             print(f"Combined XML: {xml_path}")
-
-            if args.shorts and shorts_paths:
-                shorts_xml_path = output_dir / "project_shorts.xml"
-                shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                generate_combined_xml(
-                    shorts_paths, highlights, shorts_video_info,
-                    shorts_xml_path, project_name=f"{video_path.stem}_shorts",
-                )
-                print(f"Shorts XML: {shorts_xml_path}")
         else:
             xml_paths = generate_individual_xmls(
                 clip_paths, highlights, video_info, clips_dir,
+                source_video_path=video_path,
+                shorts_paths=shorts_paths,
             )
             print(f"Individual XMLs: {len(xml_paths)} files")
-
-            if args.shorts and shorts_paths:
-                shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                generate_individual_xmls(
-                    shorts_paths, highlights,
-                    shorts_video_info, output_dir / "shorts",
-                )
 
     # Step 9: Generate YouTube chapter description text (auto-chapter on upload)
     chapters_text = ""

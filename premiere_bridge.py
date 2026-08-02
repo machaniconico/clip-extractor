@@ -31,7 +31,7 @@ from urllib.parse import urlsplit
 
 logger = logging.getLogger("clip-extractor.premiere")
 
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 DEFAULT_PORTS = (43127, 43128, 43129)
 PLUGIN_DIR = Path(__file__).resolve().parent / "premiere_uxp"
 _PLUGIN_FILES = ("manifest.json", "index.js", "README.md")
@@ -57,6 +57,11 @@ def _safe_project_stem(value: str) -> str:
 def _safe_sequence_name(value: str) -> str:
     name = re.sub(r'[\x00-\x1f]', "_", (value or "").strip()).rstrip(" .")
     return (name or "Clip Extractor")[:120]
+
+
+def _plugin_supports_timeline(version: str) -> bool:
+    numbers = tuple(int(value) for value in re.findall(r"\d+", version or "")[:3])
+    return numbers >= (1, 1, 0)
 
 
 def _resolved_existing_files(paths: Iterable[str | os.PathLike]) -> list[Path]:
@@ -88,7 +93,7 @@ def _available_project_path(output_dir: Path, project_name: str) -> Path:
 
 
 def build_edit_job(render_state: dict, include_shorts: bool = True) -> dict:
-    """Build and validate one UXP import job from a completed render state."""
+    """Build one V1 source + aligned V2/V3 overlay job for Premiere."""
     if not isinstance(render_state, dict):
         raise ValueError("先に切り抜きを書き出してください")
 
@@ -96,22 +101,52 @@ def build_edit_job(render_state: dict, include_shorts: bool = True) -> dict:
     if not isinstance(output, dict):
         output = render_state
 
-    clip_paths = output.get("clip_paths") or []
-    if not clip_paths:
-        raise ValueError("先に切り抜きを書き出してください")
-
-    clips = _resolved_existing_files(clip_paths)
+    clips = _resolved_existing_files(output.get("clip_paths") or [])
     shorts = (
         _resolved_existing_files(output.get("shorts_paths") or [])
         if include_shorts
         else []
     )
+    if not clips and not shorts:
+        raise ValueError("先に切り抜きを書き出してください")
+
+    raw_source_path = output.get("source_path") or render_state.get("video_path")
+    if not raw_source_path:
+        raise ValueError("Premiereへ配置する元動画の情報がありません。再度書き出してください")
+    source = _resolved_existing_files([raw_source_path])[0]
+
+    raw_highlights = output.get("highlights") or render_state.get("highlights")
+    if not isinstance(raw_highlights, list) or not raw_highlights:
+        raise ValueError("Premiereへ配置する切り抜き時刻の情報がありません。再度書き出してください")
+    if clips and len(clips) != len(raw_highlights):
+        raise ValueError("通常切り抜きと切り抜き時刻の件数が一致しません")
+    if shorts and len(shorts) != len(raw_highlights):
+        raise ValueError("ショート動画と切り抜き時刻の件数が一致しません")
+
+    highlights: list[dict] = []
+    for index, raw_highlight in enumerate(raw_highlights, 1):
+        if not isinstance(raw_highlight, dict):
+            raise ValueError(f"切り抜き{index}の時刻情報が不正です")
+        try:
+            start_seconds = float(raw_highlight["start_sec"])
+            end_seconds = float(raw_highlight["end_sec"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"切り抜き{index}の時刻情報が不正です") from exc
+        if start_seconds < 0 or end_seconds <= start_seconds:
+            raise ValueError(f"切り抜き{index}の時刻範囲が不正です")
+        highlights.append(
+            {
+                "title": str(raw_highlight.get("title") or f"Highlight {index}"),
+                "start_seconds": start_seconds,
+                "end_seconds": end_seconds,
+            }
+        )
 
     raw_output_dir = output.get("output_dir") or render_state.get("output_dir")
     if raw_output_dir:
         output_dir = Path(raw_output_dir).expanduser().resolve()
     else:
-        output_dir = clips[0].parent.parent
+        output_dir = (clips or shorts)[0].parent.parent
     if not output_dir.is_dir():
         raise ValueError(f"出力フォルダが見つかりません: {output_dir}")
 
@@ -119,27 +154,45 @@ def build_edit_job(render_state: dict, include_shorts: bool = True) -> dict:
     project_path = _available_project_path(output_dir, project_name)
     sequence_scope = _safe_project_stem(output_dir.name)[:48]
 
-    media: list[dict] = []
-    for kind, paths in (("clip", clips), ("short", shorts)):
-        for path in paths:
-            sequence_name = _safe_sequence_name(
-                f"ClipExtractor_{sequence_scope}_{kind}_{path.stem}"
-            )
-            media.append(
+    media: list[dict] = [{"path": str(source), "kind": "source"}]
+    overlays: list[dict] = []
+    for kind, paths, video_track_index in (
+        ("clip", clips, 1),
+        ("short", shorts, 2 if clips else 1),
+    ):
+        for path, highlight in zip(paths, highlights):
+            media.append({"path": str(path), "kind": kind})
+            overlays.append(
                 {
                     "path": str(path),
                     "kind": kind,
-                    "sequence_name": sequence_name,
+                    "title": highlight["title"],
+                    "start_seconds": highlight["start_seconds"],
+                    "end_seconds": highlight["end_seconds"],
+                    "video_track_index": video_track_index,
+                    # Overwrite A1 instead of creating duplicate audio layers.
+                    "audio_track_index": 0,
                 }
             )
 
+    sequence_name = _safe_sequence_name(
+        f"ClipExtractor_{sequence_scope}_{project_name}"
+    )
+
     return {
-        "action": "import_clips",
-        "protocol_version": 1,
+        "action": "create_timeline",
+        "protocol_version": 2,
         "project_name": project_name,
         "project_path": str(project_path),
         "output_dir": str(output_dir),
         "media": media,
+        "timelines": [
+            {
+                "sequence_name": sequence_name,
+                "source_path": str(source),
+                "overlays": overlays,
+            }
+        ],
         "open_first_sequence": True,
     }
 
@@ -235,7 +288,7 @@ class PremiereBridgeServer:
             thread.join(timeout=2)
 
     def enqueue(self, payload: dict) -> str:
-        if not isinstance(payload, dict) or payload.get("action") != "import_clips":
+        if not isinstance(payload, dict) or payload.get("action") != "create_timeline":
             raise ValueError("unsupported Premiere bridge job")
 
         job_id = uuid.uuid4().hex
@@ -782,7 +835,16 @@ def request_premiere_edit(
     if bridge is None:  # defensive; get_bridge(start=True) always returns one
         raise RuntimeError("Premiere連携サーバーを起動できません")
 
-    if bridge.status_snapshot().get("plugin_connected"):
+    snapshot = bridge.status_snapshot()
+    if snapshot.get("plugin_connected") and not _plugin_supports_timeline(
+        str(snapshot.get("plugin_version") or "")
+    ):
+        return (
+            "Premiere連携プラグインの更新が必要です。"
+            f"バージョン {PLUGIN_VERSION} をインストールしてPremiere Proを再起動してください。"
+        )
+
+    if snapshot.get("plugin_connected"):
         launch = PremiereLaunchResult(
             True,
             "起動中のPremiere Proへジョブを送ります。",

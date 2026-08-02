@@ -13,52 +13,46 @@ def generate_combined_xml(
     video_info: dict,
     output_path: Path,
     project_name: str = "ClipExtractor Project",
+    *,
+    source_video_path: Path,
+    shorts_paths: list[Path] | None = None,
 ) -> Path:
-    """Generate a single FCP XML with multiple sequences (one per clip).
+    """Generate one source-length Premiere timeline as FCP XML.
 
-    SRT captions are NOT embedded in this XML — users import them
-    separately via Premiere Pro's `File > Import > *.srt` flow. The
-    `srt_paths` parameter was removed from this function's signature
-    because it was never referenced in the body; keeping a dead
-    parameter obscured the intentional "XML + separate SRT" workflow.
+    The original source is placed on V1. Normal clips are placed on V2 at
+    their original source times. When normal clips and Shorts are both
+    present, Shorts are placed on V3; for a Shorts-only export they use V2.
+    SRT captions remain separate Premiere imports.
     """
+    clip_paths = [Path(path) for path in clip_paths]
+    shorts_paths = [Path(path) for path in (shorts_paths or [])]
+    _validate_timeline_inputs(clip_paths, shorts_paths, highlights, video_info)
+
     xmeml = _create_xmeml()
     project = ET.SubElement(xmeml, "project")
     ET.SubElement(project, "name").text = project_name
     children = ET.SubElement(project, "children")
 
-    # Add bin for media files
-    media_bin = ET.SubElement(children, "bin")
-    ET.SubElement(media_bin, "name").text = "Media"
-    bin_children = ET.SubElement(media_bin, "children")
-
-    for i, (clip_path, highlight) in enumerate(zip(clip_paths, highlights), 1):
-        duration = highlight["end_sec"] - highlight["start_sec"]
-        fps = video_info["fps"]
-        frame_duration = int(duration * fps)
-
-        # Determine resolution
-        width = video_info["width"]
-        height = video_info["height"]
-
-        # Add clip file reference to bin
-        file_id = f"file-{i}"
-        clip_elem = ET.SubElement(bin_children, "clip", id=f"masterclip-{i}")
-        ET.SubElement(clip_elem, "name").text = highlight["title"]
-        _add_file_element(clip_elem, file_id, clip_path, width, height, fps, frame_duration)
-
-        # Create sequence for this clip
-        seq = _create_sequence(
-            parent=children,
-            name=highlight["title"],
-            clip_path=clip_path,
-            file_id=file_id,
-            width=width,
-            height=height,
-            fps=fps,
-            frame_duration=frame_duration,
-            seq_index=i,
-        )
+    source_path = Path(source_video_path)
+    file_ids = _add_media_bin(
+        children,
+        source_path,
+        clip_paths,
+        shorts_paths,
+        highlights,
+        video_info,
+    )
+    _create_timeline_sequence(
+        parent=children,
+        name=project_name,
+        source_path=source_path,
+        clip_paths=clip_paths,
+        shorts_paths=shorts_paths,
+        highlights=highlights,
+        video_info=video_info,
+        file_ids=file_ids,
+        seq_index=1,
+    )
 
     _write_xml(xmeml, output_path)
     return output_path
@@ -69,37 +63,45 @@ def generate_individual_xmls(
     highlights: list[dict],
     video_info: dict,
     output_dir: Path,
+    *,
+    source_video_path: Path,
+    shorts_paths: list[Path] | None = None,
 ) -> list[Path]:
-    """Generate individual FCP XML files, one per clip.
+    """Generate one source-length layered FCP XML per highlight."""
+    clip_paths = [Path(path) for path in clip_paths]
+    shorts_paths = [Path(path) for path in (shorts_paths or [])]
+    _validate_timeline_inputs(clip_paths, shorts_paths, highlights, video_info)
 
-    SRT captions are imported separately in Premiere (see
-    generate_combined_xml docstring for rationale on the dropped
-    srt_paths parameter).
-    """
     xml_paths = []
+    source_path = Path(source_video_path)
 
-    for i, (clip_path, highlight) in enumerate(zip(clip_paths, highlights), 1):
-        duration = highlight["end_sec"] - highlight["start_sec"]
-        fps = video_info["fps"]
-        frame_duration = int(duration * fps)
-        width = video_info["width"]
-        height = video_info["height"]
-
+    for index, highlight in enumerate(highlights):
+        selected_clips = [clip_paths[index]] if clip_paths else []
+        selected_shorts = [shorts_paths[index]] if shorts_paths else []
+        selected_highlights = [highlight]
         xmeml = _create_xmeml()
         project = ET.SubElement(xmeml, "project")
-        ET.SubElement(project, "name").text = highlight["title"]
+        title = str(highlight.get("title") or f"Highlight {index + 1}")
+        ET.SubElement(project, "name").text = title
         children = ET.SubElement(project, "children")
 
-        file_id = "file-1"
-        _create_sequence(
+        file_ids = _add_media_bin(
+            children,
+            source_path,
+            selected_clips,
+            selected_shorts,
+            selected_highlights,
+            video_info,
+        )
+        _create_timeline_sequence(
             parent=children,
-            name=highlight["title"],
-            clip_path=clip_path,
-            file_id=file_id,
-            width=width,
-            height=height,
-            fps=fps,
-            frame_duration=frame_duration,
+            name=title,
+            source_path=source_path,
+            clip_paths=selected_clips,
+            shorts_paths=selected_shorts,
+            highlights=selected_highlights,
+            video_info=video_info,
+            file_ids=file_ids,
             seq_index=1,
         )
 
@@ -116,21 +118,143 @@ def _create_xmeml() -> ET.Element:
     return ET.Element("xmeml", version="4")
 
 
-def _create_sequence(
+def _validate_timeline_inputs(
+    clip_paths: list[Path],
+    shorts_paths: list[Path],
+    highlights: list[dict],
+    video_info: dict,
+) -> None:
+    if not clip_paths and not shorts_paths:
+        raise ValueError("Premiere XMLに配置する切り抜きがありません")
+    expected = len(highlights)
+    if expected == 0:
+        raise ValueError("Premiere XMLに配置するハイライトがありません")
+    if clip_paths and len(clip_paths) != expected:
+        raise ValueError("通常切り抜きとハイライトの件数が一致しません")
+    if shorts_paths and len(shorts_paths) != expected:
+        raise ValueError("ショート動画とハイライトの件数が一致しません")
+    if float(video_info.get("fps") or 0) <= 0:
+        raise ValueError("元動画のFPSが不正です")
+    if float(video_info.get("duration") or 0) <= 0:
+        raise ValueError("元動画の長さが不正です")
+
+
+def _highlight_frames(highlight: dict, fps: float, source_frames: int) -> tuple[int, int]:
+    start = max(0, round(float(highlight["start_sec"]) * fps))
+    end = max(start + 1, round(float(highlight["end_sec"]) * fps))
+    start = min(start, source_frames - 1)
+    end = min(max(start + 1, end), source_frames)
+    return start, end
+
+
+def _add_media_bin(
     parent: ET.Element,
-    name: str,
-    clip_path: Path,
+    source_path: Path,
+    clip_paths: list[Path],
+    shorts_paths: list[Path],
+    highlights: list[dict],
+    video_info: dict,
+) -> dict[str, list[str] | str]:
+    media_bin = ET.SubElement(parent, "bin")
+    ET.SubElement(media_bin, "name").text = "Media"
+    bin_children = ET.SubElement(media_bin, "children")
+
+    fps = float(video_info["fps"])
+    source_frames = max(1, round(float(video_info["duration"]) * fps))
+    source_id = "file-source"
+    _add_master_clip(
+        bin_children,
+        "masterclip-source",
+        source_id,
+        source_path,
+        source_path.stem,
+        int(video_info["width"]),
+        int(video_info["height"]),
+        fps,
+        source_frames,
+    )
+
+    clip_ids: list[str] = []
+    for index, (path, highlight) in enumerate(zip(clip_paths, highlights), 1):
+        file_id = f"file-clip-{index}"
+        clip_ids.append(file_id)
+        start, end = _highlight_frames(highlight, fps, source_frames)
+        _add_master_clip(
+            bin_children,
+            f"masterclip-clip-{index}",
+            file_id,
+            path,
+            str(highlight.get("title") or path.stem),
+            int(video_info["width"]),
+            int(video_info["height"]),
+            fps,
+            end - start,
+        )
+
+    short_ids: list[str] = []
+    for index, (path, highlight) in enumerate(zip(shorts_paths, highlights), 1):
+        file_id = f"file-short-{index}"
+        short_ids.append(file_id)
+        start, end = _highlight_frames(highlight, fps, source_frames)
+        _add_master_clip(
+            bin_children,
+            f"masterclip-short-{index}",
+            file_id,
+            path,
+            f"{highlight.get('title') or path.stem} (Short)",
+            1080,
+            1920,
+            fps,
+            end - start,
+        )
+
+    return {"source": source_id, "clips": clip_ids, "shorts": short_ids}
+
+
+def _add_master_clip(
+    parent: ET.Element,
+    master_id: str,
     file_id: str,
+    path: Path,
+    name: str,
     width: int,
     height: int,
     fps: float,
     frame_duration: int,
+) -> None:
+    clip_elem = ET.SubElement(parent, "clip", id=master_id)
+    ET.SubElement(clip_elem, "name").text = name
+    _add_file_element(
+        clip_elem,
+        file_id,
+        path,
+        width,
+        height,
+        fps,
+        frame_duration,
+    )
+
+
+def _create_timeline_sequence(
+    parent: ET.Element,
+    name: str,
+    source_path: Path,
+    clip_paths: list[Path],
+    shorts_paths: list[Path],
+    highlights: list[dict],
+    video_info: dict,
+    file_ids: dict[str, list[str] | str],
     seq_index: int,
 ) -> ET.Element:
-    """Create a sequence element with video and audio tracks."""
+    """Create V1 source, V2 normal clips, and optional V3 Shorts."""
+    fps = float(video_info["fps"])
+    width = int(video_info["width"])
+    height = int(video_info["height"])
+    source_frames = max(1, round(float(video_info["duration"]) * fps))
+
     seq = ET.SubElement(parent, "sequence", id=f"sequence-{seq_index}")
     ET.SubElement(seq, "name").text = name
-    ET.SubElement(seq, "duration").text = str(frame_duration)
+    ET.SubElement(seq, "duration").text = str(source_frames)
 
     rate = ET.SubElement(seq, "rate")
     ET.SubElement(rate, "timebase").text = str(round(fps))
@@ -150,35 +274,112 @@ def _create_sequence(
     # Video track
     video = ET.SubElement(media, "video")
     _add_format(video, width, height, fps)
-    track = ET.SubElement(video, "track")
+    source_track = ET.SubElement(video, "track")
+    _add_video_clipitem(
+        source_track,
+        f"clipitem-v1-{seq_index}",
+        source_path.stem,
+        str(file_ids["source"]),
+        0,
+        source_frames,
+    )
 
-    clipitem = ET.SubElement(track, "clipitem", id=f"clipitem-v-{seq_index}")
-    ET.SubElement(clipitem, "name").text = name
-    ET.SubElement(clipitem, "start").text = "0"
-    ET.SubElement(clipitem, "end").text = str(frame_duration)
-    ET.SubElement(clipitem, "in").text = "0"
-    ET.SubElement(clipitem, "out").text = str(frame_duration)
+    if clip_paths:
+        clip_track = ET.SubElement(video, "track")
+        _add_overlay_clipitems(
+            clip_track,
+            "v2",
+            clip_paths,
+            highlights,
+            list(file_ids["clips"]),
+            fps,
+            source_frames,
+            short=False,
+        )
 
-    _add_file_element(clipitem, file_id, clip_path, width, height, fps, frame_duration)
+    if shorts_paths:
+        short_track = ET.SubElement(video, "track")
+        layer = "v3" if clip_paths else "v2"
+        _add_overlay_clipitems(
+            short_track,
+            layer,
+            shorts_paths,
+            highlights,
+            list(file_ids["shorts"]),
+            fps,
+            source_frames,
+            short=True,
+        )
 
-    # Audio tracks (stereo = 2 tracks)
+    # Keep only the original source audio to prevent doubled/tripled playback.
     audio = ET.SubElement(media, "audio")
     for ch in range(1, 3):
         a_track = ET.SubElement(audio, "track")
-        a_clipitem = ET.SubElement(a_track, "clipitem", id=f"clipitem-a{ch}-{seq_index}")
-        ET.SubElement(a_clipitem, "name").text = name
+        a_clipitem = ET.SubElement(
+            a_track,
+            "clipitem",
+            id=f"clipitem-a{ch}-{seq_index}",
+        )
+        ET.SubElement(a_clipitem, "name").text = source_path.stem
         ET.SubElement(a_clipitem, "start").text = "0"
-        ET.SubElement(a_clipitem, "end").text = str(frame_duration)
+        ET.SubElement(a_clipitem, "end").text = str(source_frames)
         ET.SubElement(a_clipitem, "in").text = "0"
-        ET.SubElement(a_clipitem, "out").text = str(frame_duration)
+        ET.SubElement(a_clipitem, "out").text = str(source_frames)
 
-        file_ref = ET.SubElement(a_clipitem, "file", id=file_id)
+        ET.SubElement(a_clipitem, "file", id=str(file_ids["source"]))
 
-        source_track = ET.SubElement(a_clipitem, "sourcetrack")
-        ET.SubElement(source_track, "mediatype").text = "audio"
-        ET.SubElement(source_track, "trackindex").text = str(ch)
+        source_audio = ET.SubElement(a_clipitem, "sourcetrack")
+        ET.SubElement(source_audio, "mediatype").text = "audio"
+        ET.SubElement(source_audio, "trackindex").text = str(ch)
 
     return seq
+
+
+def _add_overlay_clipitems(
+    track: ET.Element,
+    layer: str,
+    paths: list[Path],
+    highlights: list[dict],
+    file_ids: list[str],
+    fps: float,
+    source_frames: int,
+    *,
+    short: bool,
+) -> None:
+    for index, (path, highlight, file_id) in enumerate(
+        zip(paths, highlights, file_ids),
+        1,
+    ):
+        start, end = _highlight_frames(highlight, fps, source_frames)
+        title = str(highlight.get("title") or path.stem)
+        if short:
+            title += " (Short)"
+        _add_video_clipitem(
+            track,
+            f"clipitem-{layer}-{index}",
+            title,
+            file_id,
+            start,
+            end,
+        )
+
+
+def _add_video_clipitem(
+    track: ET.Element,
+    item_id: str,
+    name: str,
+    file_id: str,
+    start: int,
+    end: int,
+) -> None:
+    duration = end - start
+    clipitem = ET.SubElement(track, "clipitem", id=item_id)
+    ET.SubElement(clipitem, "name").text = name
+    ET.SubElement(clipitem, "start").text = str(start)
+    ET.SubElement(clipitem, "end").text = str(end)
+    ET.SubElement(clipitem, "in").text = "0"
+    ET.SubElement(clipitem, "out").text = str(duration)
+    ET.SubElement(clipitem, "file", id=file_id)
 
 
 def _add_file_element(
