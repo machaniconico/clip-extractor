@@ -69,6 +69,7 @@ class ObsPipelineOutcome:
     error: str = ""
     output_dir: str = ""
     clip_paths: tuple[str, ...] = ()
+    shorts_paths: tuple[str, ...] = ()
     chapters_path: str = ""
     chapters_text: str = ""
     youtube_appended: bool | None = None
@@ -549,7 +550,7 @@ def save_obs_processing_defaults(
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    return "OBS用の切り抜き設定を保存しました"
+    return "OBS用の生成設定を保存しました"
 
 
 def resolve_output_base(user_text: str) -> Path:
@@ -933,6 +934,7 @@ def detect_phase(
     audio_fusion: bool,
     audio_alpha: float,
     output_base_dir: str,
+    generate_shorts: bool = False,
     progress=gr.Progress(),
 ):
     """Detection phase: validate, resolve input, transcribe, and find highlights."""
@@ -948,12 +950,13 @@ def detect_phase(
             get_url_source(input_value) or ("url" if input_value else "local")
         )
         if source_kind == "twitch":
-            # Twitch processing is clip-only by design; there is no Twitch
+            # Twitch processing is video-output-only by design; there is no Twitch
             # description target for the generated chapter text.
             enable_chapters = False
             chapter_prompt = ""
         modes = GenerationModes(
             enable_clips=bool(enable_clips),
+            enable_shorts=bool(generate_shorts),
             enable_chapters=bool(enable_chapters),
             clip_prompt=clip_prompt or "",
             chapter_prompt=chapter_prompt or "",
@@ -962,7 +965,10 @@ def detect_phase(
             modes.validate()
         except ValueError as mode_err:
             return {}, f"Error: {mode_err}", gr.update(visible=False)
-        log(f"Modes: clips={modes.enable_clips}, chapters={modes.enable_chapters}")
+        log(
+            f"Modes: clips={modes.enable_clips}, shorts={modes.enable_shorts}, "
+            f"chapters={modes.enable_chapters}"
+        )
         if source_kind == "twitch":
             log("Twitch入力: タイムスタンプ生成とYouTube概要欄への追記をスキップ")
 
@@ -1051,9 +1057,11 @@ def detect_phase(
             "source_kind": source_kind,
             "youtube_video_id": youtube_video_id,
             "enable_clips": modes.enable_clips,
+            "enable_shorts": modes.enable_shorts,
             "enable_chapters": modes.enable_chapters,
             "modes": {
                 "enable_clips": modes.enable_clips,
+                "enable_shorts": modes.enable_shorts,
                 "enable_chapters": modes.enable_chapters,
                 "clip_prompt": modes.clip_prompt,
                 "chapter_prompt": modes.chapter_prompt,
@@ -1139,6 +1147,7 @@ def render_phase(
             chapters_enabled = False
         modes = GenerationModes(
             enable_clips=bool(mode_data.get("enable_clips", session.get("enable_clips", True))),
+            enable_shorts=bool(generate_shorts),
             enable_chapters=chapters_enabled,
             clip_prompt=mode_data.get("clip_prompt", ""),
             chapter_prompt=mode_data.get("chapter_prompt", ""),
@@ -1154,6 +1163,7 @@ def render_phase(
 
         obs_render_outcome = {
             "clip_paths": [],
+            "shorts_paths": [],
             "chapters_path": "",
             "chapters_text": "",
             "youtube_append_requested": bool(auto_append_youtube),
@@ -1196,10 +1206,12 @@ def render_phase(
         thumbnail_paths: list[Path] = []
         xml_paths: list[Path] = []
 
+        clips_dir = output_dir / "clips"
+        shorts_dir = output_dir / "shorts"
+
         if modes.enable_clips:
             progress(0.6, desc="[Step 4/6] Extracting clips...")
             log("[Step 4/6] Extracting clips...")
-            clips_dir = output_dir / "clips"
             clip_paths = extract_clips(video_path, highlights, clips_dir)
             obs_render_outcome["clip_paths"] = [str(path) for path in clip_paths]
             log(f"  Extracted {len(clip_paths)} clips")
@@ -1209,60 +1221,61 @@ def render_phase(
             srt_paths = generate_all_srts(segments, highlights, clips_dir)
             log(f"  Generated {len(srt_paths)} SRT files")
 
-            if generate_shorts:
-                progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
-                shorts_dir = output_dir / "shorts"
-                shorts_dir.mkdir(parents=True, exist_ok=True)
-                if karaoke:
-                    shorts_ass_paths = generate_all_karaoke_ass(
-                        segments, highlights, shorts_dir, font_config,
-                    )
-                else:
-                    shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
-                shorts_paths = extract_clips(
+        if modes.enable_shorts:
+            progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
+            shorts_dir.mkdir(parents=True, exist_ok=True)
+            if karaoke:
+                shorts_ass_paths = generate_all_karaoke_ass(
+                    segments, highlights, shorts_dir, font_config,
+                )
+            else:
+                shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
+            shorts_paths = extract_clips(
+                video_path, highlights, shorts_dir,
+                shorts=True,
+                srt_paths=shorts_srt_paths,
+                karaoke=bool(karaoke),
+                ass_paths=shorts_ass_paths,
+                font_config=font_config,
+                crop_x=shorts_crop,
+                shorts_mode=shorts_mode,
+                shorts_title=shorts_title,
+            )
+            obs_render_outcome["shorts_paths"] = [str(path) for path in shorts_paths]
+            subtitle_kind = "ASS karaoke" if karaoke else "SRT"
+            log(f"  Generated {len(shorts_paths)} shorts with {subtitle_kind} subtitles ({font_config.font_name} @ {font_config.font_size}pt)")
+
+        if generate_thumbnails and (modes.enable_clips or modes.enable_shorts):
+            progress(0.8, desc="Generating thumbnail candidates...")
+            if modes.enable_shorts:
+                thumbnail_paths = generate_thumbnail_candidates(
                     video_path, highlights, shorts_dir,
-                    shorts=True,
-                    srt_paths=shorts_srt_paths,
-                    karaoke=bool(karaoke),
-                    ass_paths=shorts_ass_paths,
-                    font_config=font_config,
+                    vertical=True,
                     crop_x=shorts_crop,
                     shorts_mode=shorts_mode,
-                    shorts_title=shorts_title,
+                    font_config=font_config,
                 )
-                subtitle_kind = "ASS karaoke" if karaoke else "SRT"
-                log(f"  Generated {len(shorts_paths)} shorts with {subtitle_kind} subtitles ({font_config.font_name} @ {font_config.font_size}pt)")
+                log(f"  Generated {len(thumbnail_paths)} vertical thumbnail candidates")
+            else:
+                thumbnail_paths = generate_thumbnail_candidates(
+                    video_path, highlights, clips_dir,
+                    font_config=font_config,
+                )
+                log(f"  Generated {len(thumbnail_paths)} thumbnail candidates")
 
-            if generate_thumbnails:
-                progress(0.8, desc="Generating thumbnail candidates...")
-                if generate_shorts:
-                    thumbnail_dir = output_dir / "shorts"
-                    thumbnail_paths = generate_thumbnail_candidates(
-                        video_path, highlights, thumbnail_dir,
-                        vertical=True,
-                        crop_x=shorts_crop,
-                        shorts_mode=shorts_mode,
-                        font_config=font_config,
-                    )
-                    log(f"  Generated {len(thumbnail_paths)} vertical thumbnail candidates")
-                else:
-                    thumbnail_paths = generate_thumbnail_candidates(
-                        video_path, highlights, clips_dir,
-                        font_config=font_config,
-                    )
-                    log(f"  Generated {len(thumbnail_paths)} thumbnail candidates")
-
+        if clip_paths or shorts_paths:
             progress(0.85, desc="[Step 6/6] Exporting XML...")
             log("[Step 6/6] Exporting Premiere Pro XML...")
             if output_mode == "combined":
-                xml_path = output_dir / "project.xml"
-                xml_paths.append(
-                    generate_combined_xml(
-                        clip_paths, highlights, video_info, xml_path,
-                        project_name=video_path.stem,
+                if clip_paths:
+                    xml_paths.append(
+                        generate_combined_xml(
+                            clip_paths, highlights, video_info,
+                            output_dir / "project.xml",
+                            project_name=video_path.stem,
+                        )
                     )
-                )
-                if generate_shorts and shorts_paths:
+                if shorts_paths:
                     shorts_video_info = {**video_info, "width": 1080, "height": 1920}
                     xml_paths.append(
                         generate_combined_xml(
@@ -1273,12 +1286,13 @@ def render_phase(
                     )
                 log("  Premiere Pro XML (combined mode) exported")
             else:
-                xml_paths.extend(
-                    generate_individual_xmls(
-                        clip_paths, highlights, video_info, clips_dir,
+                if clip_paths:
+                    xml_paths.extend(
+                        generate_individual_xmls(
+                            clip_paths, highlights, video_info, clips_dir,
+                        )
                     )
-                )
-                if generate_shorts and shorts_paths:
+                if shorts_paths:
                     shorts_video_info = {**video_info, "width": 1080, "height": 1920}
                     xml_paths.extend(
                         generate_individual_xmls(
@@ -1288,18 +1302,17 @@ def render_phase(
                     )
                 log("  Premiere Pro XML (individual mode) exported")
 
-            if clip_paths:
-                premiere_output = {
-                    "output_dir": str(output_dir.resolve()),
-                    "project_name": video_path.stem,
-                    "clip_paths": [str(path.resolve()) for path in clip_paths],
-                    "shorts_paths": [str(path.resolve()) for path in shorts_paths],
-                    "srt_paths": [str(path.resolve()) for path in srt_paths],
-                    "xml_paths": [str(path.resolve()) for path in xml_paths],
-                }
-                session["_premiere_output"] = premiere_output
-        else:
-            log("[Skip 4-6] Clip generation disabled — chapters-only run")
+            premiere_output = {
+                "output_dir": str(output_dir.resolve()),
+                "project_name": video_path.stem,
+                "clip_paths": [str(path.resolve()) for path in clip_paths],
+                "shorts_paths": [str(path.resolve()) for path in shorts_paths],
+                "srt_paths": [str(path.resolve()) for path in srt_paths],
+                "xml_paths": [str(path.resolve()) for path in xml_paths],
+            }
+            session["_premiere_output"] = premiere_output
+        elif not modes.enable_clips and not modes.enable_shorts:
+            log("[Skip 4-6] Video generation disabled — chapters-only run")
 
         drive_link = ""
         if upload_to_drive:
@@ -1809,8 +1822,10 @@ def _run_obs_detect_render(
     try:
         s = dict(settings)  # shallow copy; we only read
         clips_enabled = bool(s.get("enable_clips", True))
+        shorts_enabled = bool(s.get("generate_shorts", False))
         chapters_enabled = bool(s.get("enable_chapters", True))
         s["enable_clips"] = clips_enabled
+        s["generate_shorts"] = shorts_enabled
         s["enable_chapters"] = chapters_enabled
         if bool(s.get("auto_append_youtube", False)) and not chapters_enabled:
             # A description can only receive generated timestamp text.  Keep
@@ -1839,6 +1854,7 @@ def _run_obs_detect_render(
             bool(s.get("audio_fusion", False)),
             _coerce_float(s.get("audio_alpha", 0.35), 0.35),
             s.get("output_base_dir", ""),
+            bool(s.get("generate_shorts", False)),
             progress=progress,
         )
         # detect_phase returns (session, status_md, review_panel_update)
@@ -1885,6 +1901,7 @@ def _run_obs_detect_render(
 
         render_outcome = session.get("_obs_render_outcome") or {}
         clip_paths = tuple(str(path) for path in render_outcome.get("clip_paths", []))
+        shorts_paths = tuple(str(path) for path in render_outcome.get("shorts_paths", []))
         chapters_path = str(render_outcome.get("chapters_path", ""))
         chapters_text = str(
             render_outcome.get("chapters_text", "")
@@ -1903,6 +1920,14 @@ def _run_obs_detect_render(
                 for path in clip_files
             ):
                 output_errors.append("切り抜きファイルを確認できませんでした")
+
+        if bool(s.get("generate_shorts", False)):
+            short_files = [Path(path) for path in shorts_paths]
+            if not short_files or any(
+                not path.is_file() or path.stat().st_size <= 0
+                for path in short_files
+            ):
+                output_errors.append("ショート動画ファイルを確認できませんでした")
 
         if bool(s.get("enable_chapters", True)):
             chapter_file = Path(chapters_path) if chapters_path else None
@@ -1926,6 +1951,7 @@ def _run_obs_detect_render(
                 error=error,
                 output_dir=str(session.get("output_dir", "")),
                 clip_paths=clip_paths,
+                shorts_paths=shorts_paths,
                 chapters_path=chapters_path,
                 chapters_text=chapters_text,
                 youtube_appended=youtube_appended,
@@ -1937,6 +1963,7 @@ def _run_obs_detect_render(
             success=True,
             output_dir=str(session.get("output_dir", "")),
             clip_paths=clip_paths,
+            shorts_paths=shorts_paths,
             chapters_path=chapters_path,
             chapters_text=chapters_text,
             youtube_appended=youtube_appended,
@@ -3034,6 +3061,7 @@ def _start_obs_watch_impl(
     try:
         GenerationModes(
             enable_clips=bool(obs_profile.get("enable_clips", True)),
+            enable_shorts=bool(obs_profile.get("generate_shorts", False)),
             enable_chapters=bool(obs_profile.get("enable_chapters", True)),
         ).validate()
     except ValueError as mode_err:
@@ -3546,6 +3574,7 @@ def _legacy_one_shot_handler(
         # Validate generation modes — at least one must be enabled
         modes = GenerationModes(
             enable_clips=bool(enable_clips),
+            enable_shorts=bool(generate_shorts),
             enable_chapters=bool(enable_chapters),
             clip_prompt=clip_prompt or "",
             chapter_prompt=chapter_prompt or "",
@@ -3554,7 +3583,10 @@ def _legacy_one_shot_handler(
             modes.validate()
         except ValueError as mode_err:
             return ProcessResult(log=f"Error: {mode_err}").as_gradio_outputs()
-        log(f"Modes: clips={modes.enable_clips}, chapters={modes.enable_chapters}")
+        log(
+            f"Modes: clips={modes.enable_clips}, shorts={modes.enable_shorts}, "
+            f"chapters={modes.enable_chapters}"
+        )
         if source_kind == "twitch":
             log("Twitch入力: タイムスタンプ生成とYouTube概要欄への追記をスキップ")
 
@@ -3681,9 +3713,8 @@ def _legacy_one_shot_handler(
 
         log(f"  Found {len(highlights)} highlights")
 
-        # Steps 4–6 are the clip pipeline (extract → SRT → Shorts → XML).
-        # When clip generation is disabled, we still keep the earlier highlight
-        # detection result so Step 7 (chapters) can use it.
+        # Steps 4–6 produce normal clips and Shorts independently, then XML.
+        # A chapters-only run still keeps the earlier highlight detection result.
         clip_paths: list[Path] = []
         srt_paths: list[Path] = []
         shorts_paths: list[Path] = []
@@ -3691,11 +3722,13 @@ def _legacy_one_shot_handler(
         shorts_ass_paths: list[Path] = []
         thumbnail_paths: list[Path] = []
 
+        clips_dir = output_dir / "clips"
+        shorts_dir = output_dir / "shorts"
+
         if modes.enable_clips:
             # Step 4: Extract clips (normal landscape, no burn-in — Premiere edits SRT separately)
             progress(0.6, desc="[Step 4/6] Extracting clips...")
             log("[Step 4/6] Extracting clips...")
-            clips_dir = output_dir / "clips"
             clip_paths = extract_clips(video_path, highlights, clips_dir)
             log(f"  Extracted {len(clip_paths)} clips")
 
@@ -3705,60 +3738,60 @@ def _legacy_one_shot_handler(
             srt_paths = generate_all_srts(segments, highlights, clips_dir)
             log(f"  Generated {len(srt_paths)} SRT files")
 
-            # Shorts (9:16) — generate subtitle assets first, then burn in.
-            if generate_shorts:
-                progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
-                shorts_dir = output_dir / "shorts"
-                shorts_dir.mkdir(parents=True, exist_ok=True)
-                if karaoke:
-                    shorts_ass_paths = generate_all_karaoke_ass(
-                        segments, highlights, shorts_dir, font_config,
-                    )
-                else:
-                    shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
-                shorts_paths = extract_clips(
+        # Shorts (9:16) are independent from normal clip output.
+        if modes.enable_shorts:
+            progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
+            shorts_dir.mkdir(parents=True, exist_ok=True)
+            if karaoke:
+                shorts_ass_paths = generate_all_karaoke_ass(
+                    segments, highlights, shorts_dir, font_config,
+                )
+            else:
+                shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
+            shorts_paths = extract_clips(
+                video_path, highlights, shorts_dir,
+                shorts=True,
+                srt_paths=shorts_srt_paths,
+                karaoke=bool(karaoke),
+                ass_paths=shorts_ass_paths,
+                font_config=font_config,
+                crop_x=shorts_crop,
+                shorts_mode=shorts_mode,
+                shorts_title=shorts_title,
+            )
+            subtitle_kind = "ASS karaoke" if karaoke else "SRT"
+            log(f"  Generated {len(shorts_paths)} shorts with {subtitle_kind} subtitles ({font_config.font_name} @ {font_config.font_size}pt)")
+
+        if generate_thumbnails and (modes.enable_clips or modes.enable_shorts):
+            progress(0.8, desc="Generating thumbnail candidates...")
+            if modes.enable_shorts:
+                thumbnail_paths = generate_thumbnail_candidates(
                     video_path, highlights, shorts_dir,
-                    shorts=True,
-                    srt_paths=shorts_srt_paths,
-                    karaoke=bool(karaoke),
-                    ass_paths=shorts_ass_paths,
-                    font_config=font_config,
+                    vertical=True,
                     crop_x=shorts_crop,
                     shorts_mode=shorts_mode,
-                    shorts_title=shorts_title,
+                    font_config=font_config,
                 )
-                subtitle_kind = "ASS karaoke" if karaoke else "SRT"
-                log(f"  Generated {len(shorts_paths)} shorts with {subtitle_kind} subtitles ({font_config.font_name} @ {font_config.font_size}pt)")
+                log(f"  Generated {len(thumbnail_paths)} vertical thumbnail candidates")
+            else:
+                thumbnail_paths = generate_thumbnail_candidates(
+                    video_path, highlights, clips_dir,
+                    font_config=font_config,
+                )
+                log(f"  Generated {len(thumbnail_paths)} thumbnail candidates")
 
-            if generate_thumbnails:
-                progress(0.8, desc="Generating thumbnail candidates...")
-                if generate_shorts:
-                    thumbnail_dir = output_dir / "shorts"
-                    thumbnail_paths = generate_thumbnail_candidates(
-                        video_path, highlights, thumbnail_dir,
-                        vertical=True,
-                        crop_x=shorts_crop,
-                        shorts_mode=shorts_mode,
-                        font_config=font_config,
-                    )
-                    log(f"  Generated {len(thumbnail_paths)} vertical thumbnail candidates")
-                else:
-                    thumbnail_paths = generate_thumbnail_candidates(
-                        video_path, highlights, clips_dir,
-                        font_config=font_config,
-                    )
-                    log(f"  Generated {len(thumbnail_paths)} thumbnail candidates")
-
+        if clip_paths or shorts_paths:
             # Step 6: Premiere Pro XML
             progress(0.85, desc="[Step 6/6] Exporting XML...")
             log("[Step 6/6] Exporting Premiere Pro XML...")
             if output_mode == "combined":
-                xml_path = output_dir / "project.xml"
-                generate_combined_xml(
-                    clip_paths, highlights, video_info, xml_path,
-                    project_name=video_path.stem,
-                )
-                if generate_shorts and shorts_paths:
+                if clip_paths:
+                    generate_combined_xml(
+                        clip_paths, highlights, video_info,
+                        output_dir / "project.xml",
+                        project_name=video_path.stem,
+                    )
+                if shorts_paths:
                     shorts_video_info = {**video_info, "width": 1080, "height": 1920}
                     generate_combined_xml(
                         shorts_paths, highlights, shorts_video_info,
@@ -3767,18 +3800,19 @@ def _legacy_one_shot_handler(
                     )
                 log("  Premiere Pro XML (combined mode) exported")
             else:
-                generate_individual_xmls(
-                    clip_paths, highlights, video_info, clips_dir,
-                )
-                if generate_shorts and shorts_paths:
+                if clip_paths:
+                    generate_individual_xmls(
+                        clip_paths, highlights, video_info, clips_dir,
+                    )
+                if shorts_paths:
                     shorts_video_info = {**video_info, "width": 1080, "height": 1920}
                     generate_individual_xmls(
                         shorts_paths, highlights,
                         shorts_video_info, output_dir / "shorts",
                     )
                 log("  Premiere Pro XML (individual mode) exported")
-        else:
-            log("[Skip 4-6] Clip generation disabled — chapters-only run")
+        elif not modes.enable_clips and not modes.enable_shorts:
+            log("[Skip 4-6] Video generation disabled — chapters-only run")
 
         # Google Drive upload
         drive_link = ""
@@ -4075,13 +4109,14 @@ def create_ui():
         with gr.Tabs():
             # --- Input Tab ---
             with gr.Tab("Input / 入力"):
-                # Generation-mode selector: users can keep both on, or run just
-                # one side. When both are on, the clip-side prompt wins.
+                # Normal clips, Shorts, and timestamps are independent outputs.
+                # Any video output uses the clip-side prompt for detection.
                 gr.HTML("<h3>生成モード / Generation Modes（アーカイブ入力用）</h3>")
                 gr.HTML(
                     "<p style='color:#666; margin-top:-0.5em; margin-bottom:0.5em;'>"
-                    "どちらか少なくとも 1 つは有効にしてください。両方有効の場合、"
-                    "切り抜き側のプロンプトだけが使われます。</p>"
+                    "切り抜き動画・ショート動画・タイムスタンプのうち少なくとも1つを"
+                    "有効にしてください。動画を生成する場合は切り抜き用プロンプトが"
+                    "使われます。</p>"
                 )
                 with gr.Row():
                     with gr.Column():
@@ -4107,7 +4142,7 @@ def create_ui():
                             value=defaults.get("chapter_prompt", ""),
                             placeholder="例: 話題が切り替わる節目だけを抜き出して",
                             lines=2,
-                            info="切り抜きが無効のときだけ使われます",
+                            info="切り抜き動画とショート動画が両方無効のときだけ使われます",
                         )
                         auto_append_youtube = gr.Checkbox(
                             label="概要欄に自動追加 (YouTube)",
@@ -4171,9 +4206,9 @@ def create_ui():
                             info="combined: 1つのXMLに全シーケンス / individual: クリップごとに別XML",
                         )
                         generate_shorts = gr.Checkbox(
-                            label="ショート動画 (9:16) も生成",
+                            label="ショート動画 (9:16) を生成",
                             value=defaults.get("generate_shorts", False),
-                            info="字幕を焼き込んだ縦型クリップを shorts/ に追加出力。下の『デフォルトに設定』で保存されます",
+                            info="通常の切り抜きがOFFでも生成できます。字幕入り縦型クリップを shorts/ に出力します",
                         )
                         shorts_mode = gr.Radio(
                             choices=["crop", "blur", "pad"],
@@ -4474,14 +4509,14 @@ def create_ui():
                         )
 
                 with gr.Accordion(
-                    "OBS自動処理用の切り抜き設定",
+                    "OBS自動処理の生成設定",
                     open=True,
                 ):
                     gr.Markdown(
                         "Inputタブのアーカイブ用設定とは別に保存されます。"
                         "OBS連携開始時に保存され、次回の起動時自動連携でも使われます。"
-                        "切り抜きとタイムスタンプは個別にON/OFFできます。"
-                        "どちらか一方はONにしてください。"
+                        "切り抜き・ショート・タイムスタンプは個別にON/OFFできます。"
+                        "3つのうち少なくとも1つはONにしてください。"
                     )
                     with gr.Row():
                         with gr.Column():
@@ -4506,6 +4541,7 @@ def create_ui():
                                 value=obs_processing_defaults["chapter_prompt"],
                                 placeholder="例: 話題が切り替わる節目だけを抜き出して",
                                 lines=2,
+                                info="切り抜き動画とショート動画が両方無効のときだけ使われます",
                             )
                             obs_auto_append_youtube = gr.Checkbox(
                                 label="概要欄に自動追加 (YouTube)",
@@ -4554,9 +4590,9 @@ def create_ui():
                     with gr.Row():
                         with gr.Column():
                             obs_generate_shorts = gr.Checkbox(
-                                label="ショート動画 (9:16) も生成",
+                                label="ショート動画 (9:16) を生成",
                                 value=obs_processing_defaults["generate_shorts"],
-                                info="字幕を焼き込んだ縦型クリップを shorts/ に出力",
+                                info="通常の切り抜きがOFFでも生成できます。字幕入り縦型クリップを shorts/ に出力します",
                             )
                             obs_shorts_mode = gr.Radio(
                                 choices=["crop", "blur", "pad"],
@@ -5131,6 +5167,7 @@ def create_ui():
                 whisper_model, language,
                 audio_fusion, audio_alpha,
                 output_base_dir,
+                generate_shorts,
             ],
             outputs=[session_state, status, review_panel],
             concurrency_limit=1,
@@ -5343,7 +5380,7 @@ Premiere Pro → File → Import → `project.xml` で手動読み込みでき�
 
 ### ショート動画のフォント設定（9:16 出力のみ）
 1. Settings タブの Font Settings でフォント名・サイズ・色を選択
-2. 「ショート動画 (9:16) も生成」をチェックして Generate
+2. 「ショート動画 (9:16) を生成」をチェックして Generate
 3. 出力された Shorts には字幕が焼き込まれ、そのまま YouTube Shorts / TikTok にアップロード可能
 4. 通常の横クリップ（landscape）は字幕が焼き込まれず、Premiere Pro で SRT キャプションを自由に調整できる状態のまま
 

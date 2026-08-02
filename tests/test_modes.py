@@ -28,6 +28,19 @@ def test_clips_only_uses_clip_prompt():
     )
 
 
+def test_shorts_only_uses_clip_prompt():
+    m = GenerationModes(
+        enable_clips=False,
+        enable_shorts=True,
+        enable_chapters=False,
+        clip_prompt="shorts only",
+        chapter_prompt="unused",
+    )
+    assert m.active_prompt == "shorts only", (
+        f"shorts-only should pick clip prompt, got {m.active_prompt!r}"
+    )
+
+
 def test_chapters_only_uses_chapter_prompt():
     m = GenerationModes(
         enable_clips=False, enable_chapters=True,
@@ -60,6 +73,7 @@ def test_both_disabled_raises_on_active_prompt():
 def test_default_both_enabled():
     m = GenerationModes()
     assert m.enable_clips is True
+    assert m.enable_shorts is False
     assert m.enable_chapters is True
     assert m.clip_prompt == ""
     assert m.chapter_prompt == ""
@@ -78,6 +92,7 @@ def test_empty_prompts_are_valid():
 def run_all():
     test_both_enabled_uses_clip_prompt()
     test_clips_only_uses_clip_prompt()
+    test_shorts_only_uses_clip_prompt()
     test_chapters_only_uses_chapter_prompt()
     test_both_disabled_raises_validate()
     test_both_disabled_raises_on_active_prompt()

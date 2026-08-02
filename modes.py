@@ -1,8 +1,8 @@
 """Generation mode selection for clip-extractor.
 
-Users can toggle clip extraction and chapter text generation independently.
-When both modes are enabled, the clip-side prompt wins and feeds the single
-detect_highlights call; when only one is enabled, that mode's prompt is used.
+Users can toggle normal clips, Shorts, and chapter text independently. When a
+video output is enabled, the clip-side prompt feeds the single
+detect_highlights call; a chapters-only run uses the chapter prompt.
 """
 
 from dataclasses import dataclass
@@ -13,25 +13,33 @@ class GenerationModes:
     """Which outputs to produce, and which prompts to use for each mode."""
 
     enable_clips: bool = True
+    enable_shorts: bool = False
     enable_chapters: bool = True
     clip_prompt: str = ""
     chapter_prompt: str = ""
 
     def validate(self) -> None:
-        """Ensure at least one mode is enabled."""
-        if not self.enable_clips and not self.enable_chapters:
+        """Ensure at least one output is enabled."""
+        if (
+            not self.enable_clips
+            and not self.enable_shorts
+            and not self.enable_chapters
+        ):
             raise ValueError(
-                "切り抜きまたは概要欄のどちらかは有効にしてください "
-                "(at least one of clip/chapter generation must be enabled)"
+                "切り抜き・ショート・タイムスタンプの少なくとも1つは有効にしてください "
+                "(at least one of clip/short/chapter generation must be enabled)"
             )
 
     @property
     def active_prompt(self) -> str:
         """Prompt passed to detect_highlights.
 
-        Precedence rule: when clip generation is enabled, its prompt is used —
-        even if chapter generation is also enabled. Only a chapters-only run
-        uses the chapter prompt.
+        Precedence rule: when normal clip or Shorts generation is enabled, the
+        clip prompt is used. Only a chapters-only run uses the chapter prompt.
         """
         self.validate()
-        return self.clip_prompt if self.enable_clips else self.chapter_prompt
+        return (
+            self.clip_prompt
+            if self.enable_clips or self.enable_shorts
+            else self.chapter_prompt
+        )
