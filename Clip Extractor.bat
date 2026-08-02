@@ -27,10 +27,8 @@ echo Clip Extractor を起動しています...
 echo ブラウザが自動で開きます。閉じるにはこのウィンドウを閉じてください。
 echo.
 
-:: launcher.py starts the server and polls the port, opening the browser as
-:: soon as it accepts connections (falling back to opening anyway after 30s),
-:: which avoids the "connection refused" flash that happened when we fired
-:: `start http://localhost:8080` before the Gradio server bound the port.
+:: launcher.py replaces an old Clip Extractor process on port 7860, then opens
+:: the browser as soon as the new server is ready.
 %PYTHON_CMD% launcher.py %*
 
 pause
