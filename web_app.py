@@ -178,6 +178,27 @@ OBS_CONNECTION_DEFAULTS = {
     "obs_auto_process": True,
 }
 
+
+def _normalise_shorts_blur_strength(value) -> float:
+    try:
+        strength = float(value)
+    except (TypeError, ValueError):
+        strength = 20.0
+    if strength != strength:  # NaN
+        strength = 20.0
+    return min(50.0, max(0.0, strength))
+
+
+def _normalise_shorts_title_position(value) -> str:
+    position = str(value or "top")
+    return position if position in {"top", "bottom", "overlay"} else "top"
+
+
+def shorts_blur_visibility(mode: str):
+    """Only show blur strength when the blur background mode is selected."""
+    return gr.update(visible=mode == "blur")
+
+
 # Processing controls are kept in a separate profile for OBS automation.  The
 # archive/Input profile remains the top-level settings profile so users can tune
 # both workflows independently.  Older settings files do not have this nested
@@ -195,9 +216,11 @@ OBS_PROCESSING_DEFAULTS = {
     "max_duration": 90,
     "output_mode": "combined",
     "generate_shorts": False,
-    "shorts_mode": "blur",
+    "shorts_mode": "pad",
+    "shorts_blur_strength": 20,
     "shorts_crop": "center",
     "shorts_title": True,
+    "shorts_title_position": "top",
     "generate_thumbnails": False,
     "audio_fusion": False,
     "audio_alpha": 0.35,
@@ -251,6 +274,12 @@ def _normalise_obs_processing_settings(
         base["audio_alpha"] = float(base["audio_alpha"])
     except (TypeError, ValueError):
         base["audio_alpha"] = OBS_PROCESSING_DEFAULTS["audio_alpha"]
+    base["shorts_blur_strength"] = _normalise_shorts_blur_strength(
+        base["shorts_blur_strength"]
+    )
+    base["shorts_title_position"] = _normalise_shorts_title_position(
+        base["shorts_title_position"]
+    )
     return base
 
 
@@ -273,6 +302,8 @@ def _build_obs_processing_settings(
     audio_alpha,
     karaoke,
     confirm_before_auto_process=True,
+    shorts_blur_strength=20,
+    shorts_title_position="top",
 ) -> dict:
     """Build the OBS profile from the dedicated controls in the UI."""
     return _normalise_obs_processing_settings(
@@ -289,8 +320,10 @@ def _build_obs_processing_settings(
             "output_mode": output_mode,
             "generate_shorts": generate_shorts,
             "shorts_mode": shorts_mode,
+            "shorts_blur_strength": shorts_blur_strength,
             "shorts_crop": shorts_crop,
             "shorts_title": shorts_title,
+            "shorts_title_position": shorts_title_position,
             "generate_thumbnails": generate_thumbnails,
             "audio_fusion": audio_fusion,
             "audio_alpha": audio_alpha,
@@ -389,12 +422,14 @@ def load_defaults() -> dict:
         "auto_append_youtube": False,
         "num_clips": 5, "min_duration": 30, "max_duration": 90,
         "output_mode": "combined", "generate_shorts": False,
-        "shorts_mode": "blur", "shorts_crop": "center",
-        "shorts_title": True, "generate_thumbnails": False,
+        "shorts_mode": "pad", "shorts_crop": "center",
+        "shorts_blur_strength": 20,
+        "shorts_title": True, "shorts_title_position": "top",
+        "generate_thumbnails": False,
         "audio_fusion": False, "audio_alpha": 0.35,
         "karaoke": False,
         "whisper_model": "large-v3", "language": "ja",
-        "font_name": "Noto Sans JP Black", "font_size": 96, "font_color": "#FFFFFF",
+        "font_name": "Noto Sans JP", "font_size": 96, "font_color": "#FFFFFF",
         "output_base_dir": "",
         "premiere_executable_path": "",
         "obs_launch_on_startup": False,
@@ -408,6 +443,12 @@ def load_defaults() -> dict:
             defaults.update(saved)
         except Exception:
             pass
+    defaults["shorts_blur_strength"] = _normalise_shorts_blur_strength(
+        defaults.get("shorts_blur_strength", 20)
+    )
+    defaults["shorts_title_position"] = _normalise_shorts_title_position(
+        defaults.get("shorts_title_position", "top")
+    )
     # Secrets are loaded only inside start_obs_watch(). Returning one here can
     # expose it in Gradio's component configuration when the app is LAN-bound.
     defaults.pop("obs_password", None)
@@ -461,6 +502,8 @@ def save_defaults(ai_provider, ai_model,
                   generate_thumbnails=False,
                   audio_fusion=False, audio_alpha=0.35,
                   karaoke=False,
+                  shorts_blur_strength=20,
+                  shorts_title_position="top",
                   premiere_executable_path="",
                   obs_launch_on_startup=False,
                   obs_executable_path="",
@@ -481,7 +524,13 @@ def save_defaults(ai_provider, ai_model,
         "num_clips": int(num_clips),
         "output_mode": output_mode, "generate_shorts": bool(generate_shorts),
         "shorts_mode": shorts_mode, "shorts_crop": shorts_crop,
+        "shorts_blur_strength": _normalise_shorts_blur_strength(
+            shorts_blur_strength
+        ),
         "shorts_title": bool(shorts_title),
+        "shorts_title_position": _normalise_shorts_title_position(
+            shorts_title_position
+        ),
         "min_duration": int(min_duration), "max_duration": int(max_duration),
         "whisper_model": whisper_model, "language": language,
         "font_name": font_name, "font_size": int(font_size),
@@ -522,6 +571,8 @@ def save_obs_processing_defaults(
     audio_alpha,
     karaoke,
     auto_start_without_prompt_confirmation=False,
+    shorts_blur_strength=20,
+    shorts_title_position="top",
 ):
     """Persist the dedicated OBS processing profile without changing Input."""
     data = load_defaults()
@@ -545,6 +596,8 @@ def save_obs_processing_defaults(
         audio_alpha,
         karaoke,
         not bool(auto_start_without_prompt_confirmation),
+        shorts_blur_strength=shorts_blur_strength,
+        shorts_title_position=shorts_title_position,
     )
     SETTINGS_FILE.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
@@ -682,7 +735,11 @@ from highlighter import detect_highlights
 from audio_energy import fuse_audio_energy
 import clipper
 from clipper import extract_clips, generate_thumbnails as generate_thumbnail_candidates, get_video_info
-from subtitles import generate_all_karaoke_ass, generate_all_srts
+from subtitles import (
+    generate_all_karaoke_ass,
+    generate_all_short_title_srts,
+    generate_all_srts,
+)
 from premiere_xml import generate_combined_xml, generate_individual_xmls
 from premiere_bridge import (
     get_bridge_status_text,
@@ -1113,6 +1170,8 @@ def render_phase(
     font_color: str,
     generate_thumbnails: bool,
     karaoke: bool,
+    shorts_blur_strength=20,
+    shorts_title_position: str = "top",
     progress=gr.Progress(),
 ):
     """Render phase: replay downstream output generation with edited highlights."""
@@ -1202,6 +1261,7 @@ def render_phase(
         srt_paths: list[Path] = []
         shorts_paths: list[Path] = []
         shorts_srt_paths: list[Path] = []
+        shorts_title_srt_paths: list[Path] = []
         shorts_ass_paths: list[Path] = []
         thumbnail_paths: list[Path] = []
         xml_paths: list[Path] = []
@@ -1224,12 +1284,20 @@ def render_phase(
         if modes.enable_shorts:
             progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
             shorts_dir.mkdir(parents=True, exist_ok=True)
+            shorts_srt_paths = generate_all_srts(
+                segments,
+                highlights,
+                shorts_dir,
+                shorts=True,
+            )
+            shorts_title_srt_paths = generate_all_short_title_srts(
+                highlights,
+                shorts_dir,
+            )
             if karaoke:
                 shorts_ass_paths = generate_all_karaoke_ass(
                     segments, highlights, shorts_dir, font_config,
                 )
-            else:
-                shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
             shorts_paths = extract_clips(
                 video_path, highlights, shorts_dir,
                 shorts=True,
@@ -1239,11 +1307,24 @@ def render_phase(
                 font_config=font_config,
                 crop_x=shorts_crop,
                 shorts_mode=shorts_mode,
+                shorts_blur_strength=shorts_blur_strength,
                 shorts_title=shorts_title,
+                shorts_title_position=shorts_title_position,
             )
             obs_render_outcome["shorts_paths"] = [str(path) for path in shorts_paths]
+            obs_render_outcome["shorts_srt_paths"] = [
+                str(path) for path in shorts_srt_paths
+            ]
+            obs_render_outcome["shorts_title_srt_paths"] = [
+                str(path) for path in shorts_title_srt_paths
+            ]
             subtitle_kind = "ASS karaoke" if karaoke else "SRT"
             log(f"  Generated {len(shorts_paths)} shorts with {subtitle_kind} subtitles ({font_config.font_name} @ {font_config.font_size}pt)")
+            log(
+                "  Generated "
+                f"{len(shorts_srt_paths) + len(shorts_title_srt_paths)} "
+                "editable Short SRT files (archive + title)"
+            )
 
         if generate_thumbnails and (modes.enable_clips or modes.enable_shorts):
             progress(0.8, desc="Generating thumbnail candidates...")
@@ -1253,6 +1334,8 @@ def render_phase(
                     vertical=True,
                     crop_x=shorts_crop,
                     shorts_mode=shorts_mode,
+                    shorts_blur_strength=shorts_blur_strength,
+                    shorts_title_position=shorts_title_position,
                     font_config=font_config,
                 )
                 log(f"  Generated {len(thumbnail_paths)} vertical thumbnail candidates")
@@ -1299,6 +1382,12 @@ def render_phase(
                 "clip_paths": [str(path.resolve()) for path in clip_paths],
                 "shorts_paths": [str(path.resolve()) for path in shorts_paths],
                 "srt_paths": [str(path.resolve()) for path in srt_paths],
+                "shorts_srt_paths": [
+                    str(path.resolve()) for path in shorts_srt_paths
+                ],
+                "shorts_title_srt_paths": [
+                    str(path.resolve()) for path in shorts_title_srt_paths
+                ],
                 "xml_paths": [str(path.resolve()) for path in xml_paths],
                 "highlights": [
                     {
@@ -1407,6 +1496,8 @@ def maybe_render_phase(
     font_color: str,
     generate_thumbnails: bool,
     karaoke: bool,
+    shorts_blur_strength=20,
+    shorts_title_position: str = "top",
     progress=gr.Progress(),
 ):
     """Chain STEP 2 right after STEP 1 when the 'run both' checkbox is on.
@@ -1435,6 +1526,8 @@ def maybe_render_phase(
         font_color,
         generate_thumbnails,
         karaoke,
+        shorts_blur_strength=shorts_blur_strength,
+        shorts_title_position=shorts_title_position,
         progress=progress,
     )
 
@@ -1874,17 +1967,23 @@ def _run_obs_detect_render(
             session,
             s.get("output_mode", "combined"),
             bool(s.get("generate_shorts", False)),
-            s.get("shorts_mode", "blur"),
+            s.get("shorts_mode", "pad"),
             s.get("shorts_crop", "center"),
             bool(s.get("shorts_title", True)),
             False,  # generate_zip — 自動処理では ZIP を作らない
             False,  # upload_to_drive — 自動処理では Drive 投稿しない
             bool(s.get("auto_append_youtube", False)),
-            s.get("font_name", "Noto Sans JP Black"),
+            s.get("font_name", "Noto Sans JP"),
             _coerce_int(s.get("font_size", 96), 96),
             s.get("font_color", "#FFFFFF"),
             bool(s.get("generate_thumbnails", False)),
             bool(s.get("karaoke", False)),
+            shorts_blur_strength=_normalise_shorts_blur_strength(
+                s.get("shorts_blur_strength", 20)
+            ),
+            shorts_title_position=_normalise_shorts_title_position(
+                s.get("shorts_title_position", "top")
+            ),
             progress=progress,
         )
         # render_phase returns ProcessResult.as_gradio_outputs() = (log, highlights, dl, drive, chapters)
@@ -3266,6 +3365,8 @@ def start_obs_watch(
     obs_audio_alpha=None,
     obs_karaoke=None,
     obs_auto_start_without_prompt_confirmation=None,
+    obs_shorts_blur_strength=None,
+    obs_shorts_title_position=None,
 ) -> str:
     """Manually (re)start OBS integration from the Gradio controls.
 
@@ -3292,6 +3393,8 @@ def start_obs_watch(
             obs_audio_alpha,
             obs_karaoke,
             obs_auto_start_without_prompt_confirmation,
+            obs_shorts_blur_strength,
+            obs_shorts_title_position,
         )
     ):
         obs_processing_settings = _build_obs_processing_settings(
@@ -3313,6 +3416,8 @@ def start_obs_watch(
             obs_audio_alpha,
             obs_karaoke,
             not bool(obs_auto_start_without_prompt_confirmation),
+            shorts_blur_strength=obs_shorts_blur_strength,
+            shorts_title_position=obs_shorts_title_position,
         )
     with _obs_start_lock:
         return _start_obs_watch_impl(
@@ -3718,6 +3823,7 @@ def _legacy_one_shot_handler(
         srt_paths: list[Path] = []
         shorts_paths: list[Path] = []
         shorts_srt_paths: list[Path] = []
+        shorts_title_srt_paths: list[Path] = []
         shorts_ass_paths: list[Path] = []
         thumbnail_paths: list[Path] = []
 
@@ -3741,12 +3847,20 @@ def _legacy_one_shot_handler(
         if modes.enable_shorts:
             progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
             shorts_dir.mkdir(parents=True, exist_ok=True)
+            shorts_srt_paths = generate_all_srts(
+                segments,
+                highlights,
+                shorts_dir,
+                shorts=True,
+            )
+            shorts_title_srt_paths = generate_all_short_title_srts(
+                highlights,
+                shorts_dir,
+            )
             if karaoke:
                 shorts_ass_paths = generate_all_karaoke_ass(
                     segments, highlights, shorts_dir, font_config,
                 )
-            else:
-                shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
             shorts_paths = extract_clips(
                 video_path, highlights, shorts_dir,
                 shorts=True,
@@ -3760,6 +3874,11 @@ def _legacy_one_shot_handler(
             )
             subtitle_kind = "ASS karaoke" if karaoke else "SRT"
             log(f"  Generated {len(shorts_paths)} shorts with {subtitle_kind} subtitles ({font_config.font_name} @ {font_config.font_size}pt)")
+            log(
+                "  Generated "
+                f"{len(shorts_srt_paths) + len(shorts_title_srt_paths)} "
+                "editable Short SRT files (archive + title)"
+            )
 
         if generate_thumbnails and (modes.enable_clips or modes.enable_shorts):
             progress(0.8, desc="Generating thumbnail candidates...")
@@ -4204,10 +4323,24 @@ def create_ui():
                             info="通常の切り抜きがOFFでも生成できます。字幕入り縦型クリップを shorts/ に出力します",
                         )
                         shorts_mode = gr.Radio(
-                            choices=["blur", "pad", "crop"],
-                            value=defaults.get("shorts_mode", "blur"),
+                            choices=["pad", "blur", "crop"],
+                            value=defaults.get("shorts_mode", "pad"),
                             label="ショート動画の変換モード",
-                            info="blur（推奨）: 左右を残してぼかし背景 / pad: 左右を残して黒帯 / crop: 左右を切って拡大",
+                            info="pad（推奨）: 上下を黒帯にして全体表示 / blur: 全体表示＋ぼかし背景 / crop: 左右を切って拡大",
+                        )
+                        shorts_blur_strength = gr.Slider(
+                            minimum=0,
+                            maximum=50,
+                            step=1,
+                            value=defaults.get("shorts_blur_strength", 20),
+                            label="背景のぼかし強度",
+                            info="blurモードの背景だけに反映。0=ぼかしなし / 50=強いぼかし",
+                            visible=defaults.get("shorts_mode", "pad") == "blur",
+                        )
+                        shorts_mode.change(
+                            fn=shorts_blur_visibility,
+                            inputs=shorts_mode,
+                            outputs=shorts_blur_strength,
                         )
                         shorts_crop = gr.Radio(
                             choices=["center", "left", "right"],
@@ -4218,7 +4351,17 @@ def create_ui():
                         shorts_title = gr.Checkbox(
                             label="ショート冒頭にタイトルを表示",
                             value=defaults.get("shorts_title", True),
-                            info="各ショートの最初の4秒だけ、上部中央にタイトルを焼き込みます",
+                            info="各ショートの最初の4秒だけタイトルを焼き込みます",
+                        )
+                        shorts_title_position = gr.Radio(
+                            choices=[
+                                ("上側の帯", "top"),
+                                ("下側の帯", "bottom"),
+                                ("クリップ上に重ねる", "overlay"),
+                            ],
+                            value=defaults.get("shorts_title_position", "top"),
+                            label="タイトルの配置",
+                            info="pad/blurでは上下の余白か映像中央を選択。cropでは画面上部・下部・中央になります",
                         )
                         generate_thumbnails = gr.Checkbox(
                             label="サムネイル候補を生成 / Generate thumbnail candidates",
@@ -4601,10 +4744,29 @@ def create_ui():
                                 info="通常の切り抜きがOFFでも生成できます。字幕入り縦型クリップを shorts/ に出力します",
                             )
                             obs_shorts_mode = gr.Radio(
-                                choices=["blur", "pad", "crop"],
+                                choices=["pad", "blur", "crop"],
                                 value=obs_processing_defaults["shorts_mode"],
                                 label="ショート動画の変換モード",
-                                info="blur（推奨）: 左右を残してぼかし背景 / pad: 左右を残して黒帯 / crop: 左右を切って拡大",
+                                info="pad（推奨）: 上下を黒帯にして全体表示 / blur: 全体表示＋ぼかし背景 / crop: 左右を切って拡大",
+                            )
+                            obs_shorts_blur_strength = gr.Slider(
+                                minimum=0,
+                                maximum=50,
+                                step=1,
+                                value=obs_processing_defaults[
+                                    "shorts_blur_strength"
+                                ],
+                                label="背景のぼかし強度",
+                                info="blurモードの背景だけに反映。0=ぼかしなし / 50=強いぼかし",
+                                visible=(
+                                    obs_processing_defaults["shorts_mode"]
+                                    == "blur"
+                                ),
+                            )
+                            obs_shorts_mode.change(
+                                fn=shorts_blur_visibility,
+                                inputs=obs_shorts_mode,
+                                outputs=obs_shorts_blur_strength,
                             )
                             obs_shorts_crop = gr.Radio(
                                 choices=["center", "left", "right"],
@@ -4616,6 +4778,18 @@ def create_ui():
                                 label="ショート冒頭にタイトルを表示",
                                 value=obs_processing_defaults["shorts_title"],
                                 info="各ショートの最初の4秒だけタイトルを焼き込みます",
+                            )
+                            obs_shorts_title_position = gr.Radio(
+                                choices=[
+                                    ("上側の帯", "top"),
+                                    ("下側の帯", "bottom"),
+                                    ("クリップ上に重ねる", "overlay"),
+                                ],
+                                value=obs_processing_defaults[
+                                    "shorts_title_position"
+                                ],
+                                label="タイトルの配置",
+                                info="pad/blurでは上下の余白か映像中央を選択",
                             )
                         with gr.Column():
                             obs_generate_thumbnails = gr.Checkbox(
@@ -4672,6 +4846,8 @@ def create_ui():
                             obs_audio_alpha,
                             obs_karaoke,
                             obs_auto_start_without_prompt_confirmation,
+                            obs_shorts_blur_strength,
+                            obs_shorts_title_position,
                         ],
                         outputs=obs_save_processing_msg,
                     )
@@ -4913,10 +5089,10 @@ def create_ui():
                     with gr.Column():
                         gr.HTML("<h3>Font Settings / 字幕フォント</h3>")
                         system_fonts = get_system_fonts_cached()
-                        # The bundled heavy gothic (fonts/NotoSansJP-Black.ttf) is
+                        # The bundled bold gothic (fonts/NotoSansJP-Bold.otf) is
                         # not installed system-wide, so surface it explicitly as the
                         # first choice and the default.
-                        BUNDLED_FONT = "Noto Sans JP Black"
+                        BUNDLED_FONT = "Noto Sans JP"
                         font_choices = [BUNDLED_FONT] + [f for f in system_fonts if f != BUNDLED_FONT]
                         saved_font = defaults["font_name"]
                         default_font = saved_font if saved_font in font_choices else BUNDLED_FONT
@@ -4925,7 +5101,7 @@ def create_ui():
                             value=default_font,
                             label="フォント名",
                             allow_custom_value=True,
-                            info="先頭の「Noto Sans JP Black」は同梱の極太ゴシック（ショート字幕向けの既定）。その他はPCにインストール済みのフォント、直接入力も可。",
+                            info="先頭の「Noto Sans JP」は同梱のBold（700・商用利用可）で、ショート字幕向けの既定。その他はPCにインストール済みのフォント、直接入力も可。",
                         )
                         with gr.Row():
                             font_size = gr.Number(
@@ -5062,6 +5238,8 @@ def create_ui():
                             generate_thumbnails,
                             audio_fusion, audio_alpha,
                             karaoke,
+                            shorts_blur_strength,
+                            shorts_title_position,
                             premiere_executable_path,
                             obs_launch_on_startup,
                             obs_executable_path,
@@ -5082,6 +5260,8 @@ def create_ui():
                             generate_thumbnails,
                             audio_fusion, audio_alpha,
                             karaoke,
+                            shorts_blur_strength,
+                            shorts_title_position,
                             premiere_executable_path,
                             obs_launch_on_startup,
                             obs_executable_path,
@@ -5221,6 +5401,8 @@ def create_ui():
                 font_color,
                 generate_thumbnails,
                 karaoke,
+                shorts_blur_strength,
+                shorts_title_position,
             ],
             outputs=[
                 log_output,
@@ -5253,6 +5435,8 @@ def create_ui():
                 font_color,
                 generate_thumbnails,
                 karaoke,
+                shorts_blur_strength,
+                shorts_title_position,
             ],
             outputs=[
                 log_output,
@@ -5300,6 +5484,8 @@ def create_ui():
                 obs_audio_alpha,
                 obs_karaoke,
                 obs_auto_start_without_prompt_confirmation,
+                obs_shorts_blur_strength,
+                obs_shorts_title_position,
             ],
             outputs=obs_status_box,
         )

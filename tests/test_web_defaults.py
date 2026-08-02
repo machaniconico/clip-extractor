@@ -43,6 +43,8 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         generate_thumbnails=False,
         audio_fusion=False, audio_alpha=0.35,
         karaoke=False,
+        shorts_blur_strength=20,
+        shorts_title_position="top",
         premiere_executable_path="",
         obs_launch_on_startup=False,
         obs_auto_connect_on_startup=False,
@@ -64,6 +66,8 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         args["generate_thumbnails"],
         args["audio_fusion"], args["audio_alpha"],
         args["karaoke"],
+        args["shorts_blur_strength"],
+        args["shorts_title_position"],
         args["premiere_executable_path"],
         args["obs_launch_on_startup"],
         args["obs_executable_path"],
@@ -78,12 +82,16 @@ def test_roundtrip_shorts_fields(monkeypatch, tmp_path):
         monkeypatch, tmp_path,
         generate_shorts=True, output_mode="individual",
         shorts_mode="blur", shorts_crop="left", shorts_title=False,
+        shorts_blur_strength=37,
+        shorts_title_position="bottom",
     )
     assert loaded["generate_shorts"] is True, loaded
     assert loaded["output_mode"] == "individual", loaded
     assert loaded["shorts_mode"] == "blur", loaded
     assert loaded["shorts_crop"] == "left", loaded
     assert loaded["shorts_title"] is False, loaded
+    assert loaded["shorts_blur_strength"] == 37, loaded
+    assert loaded["shorts_title_position"] == "bottom", loaded
 
 
 def test_obs_processing_profile_is_separate_from_archive_defaults(
@@ -119,6 +127,8 @@ def test_obs_processing_profile_is_separate_from_archive_defaults(
         0.8,
         True,
         auto_start_without_prompt_confirmation=True,
+        shorts_blur_strength=42,
+        shorts_title_position="overlay",
     )
 
     assert "OBS" in result
@@ -142,6 +152,8 @@ def test_obs_processing_profile_is_separate_from_archive_defaults(
         "shorts_mode": "blur",
         "shorts_crop": "left",
         "shorts_title": False,
+        "shorts_blur_strength": 42,
+        "shorts_title_position": "overlay",
         "generate_thumbnails": True,
         "audio_fusion": True,
         "audio_alpha": 0.8,
@@ -156,6 +168,8 @@ def test_roundtrip_preserves_defaults(monkeypatch, tmp_path):
     assert loaded["shorts_mode"] == "crop", loaded
     assert loaded["shorts_crop"] == "center", loaded
     assert loaded["shorts_title"] is True, loaded
+    assert loaded["shorts_blur_strength"] == 20, loaded
+    assert loaded["shorts_title_position"] == "top", loaded
     assert loaded["audio_fusion"] is False, loaded
     assert loaded["audio_alpha"] == 0.35, loaded
     assert loaded["karaoke"] is False, loaded
@@ -178,10 +192,30 @@ def test_obs_recording_is_the_default_source(monkeypatch, tmp_path):
 
     assert web_app.load_defaults()["obs_stop_event"] == "record"
     assert web_app.load_defaults()["obs_auto_connect_on_startup"] is True
-    assert web_app.load_defaults()["shorts_mode"] == "blur"
-    assert web_app._obs_processing_settings_from_defaults()["shorts_mode"] == "blur"
+    assert web_app.load_defaults()["shorts_mode"] == "pad"
+    assert web_app._obs_processing_settings_from_defaults()["shorts_mode"] == "pad"
+    assert web_app.load_defaults()["shorts_blur_strength"] == 20
+    assert web_app.load_defaults()["shorts_title_position"] == "top"
+    assert web_app.load_defaults()["font_name"] == "Noto Sans JP"
+    assert web_app._obs_processing_settings_from_defaults()["shorts_blur_strength"] == 20
+    assert web_app._obs_processing_settings_from_defaults()["shorts_title_position"] == "top"
     assert AppConfig().obs_stop_event == "record"
-    assert AppConfig().shorts_mode == "blur"
+    assert AppConfig().shorts_mode == "pad"
+    assert AppConfig().shorts_blur_strength == 20
+    assert AppConfig().shorts_title_position == "top"
+
+
+def test_obs_processing_normalises_shorts_visual_settings():
+    settings = web_app._normalise_obs_processing_settings(
+        {
+            "shorts_blur_strength": 999,
+            "shorts_title_position": "invalid",
+        },
+        defaults={},
+    )
+
+    assert settings["shorts_blur_strength"] == 50
+    assert settings["shorts_title_position"] == "top"
 
 
 def test_roundtrip_audio_fusion_fields(monkeypatch, tmp_path):

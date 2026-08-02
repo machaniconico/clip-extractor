@@ -4,12 +4,18 @@ from pathlib import Path
 
 from clipper import (
     _TITLE_WRAP_FULLWIDTH_CHARS,
+    _build_clip_filename,
     _hex_to_ass_color,
+    _is_bundled_default_font_name,
     _title_cluster_width,
     _title_grapheme_clusters,
+    _wrap_title_text,
     format_time_range,
 )
 from transcriber import Segment
+
+
+_SHORT_TITLE_DURATION_SEC = 4.0
 
 
 def generate_srt(
@@ -44,15 +50,73 @@ def generate_all_srts(
     segments: list[Segment],
     highlights: list[dict],
     output_dir: Path,
+    *,
+    shorts: bool = False,
 ) -> list[Path]:
     """Generate SRT files for all clips."""
     srt_paths = []
     for h in highlights:
         range_str = format_time_range(h["start_sec"], h["end_sec"])
-        srt_path = output_dir / f"{range_str}.srt"
+        asset_suffix = "_archive" if shorts else ""
+        srt_name = _build_clip_filename(
+            range_str,
+            h.get("title", ""),
+            shorts,
+            asset_suffix=asset_suffix,
+            extension=".srt",
+        )
+        srt_path = output_dir / srt_name
         generate_srt(segments, h["start_sec"], h["end_sec"], srt_path)
         srt_paths.append(srt_path)
     return srt_paths
+
+
+def generate_short_title_srt(
+    title: str,
+    clip_duration: float,
+    output_path: Path,
+) -> Path:
+    """Generate an editable SRT cue for the Short's opening title."""
+    text = _wrap_title_text(str(title or ""))
+    duration = min(_SHORT_TITLE_DURATION_SEC, max(0.0, float(clip_duration)))
+    lines: list[str] = []
+    if text and duration > 0:
+        lines = [
+            "1",
+            f"{_srt_time(0.0)} --> {_srt_time(duration)}",
+            text,
+            "",
+        ]
+    output_path.write_text("\n".join(lines), encoding="utf-8")
+    return output_path
+
+
+def generate_all_short_title_srts(
+    highlights: list[dict],
+    output_dir: Path,
+) -> list[Path]:
+    """Generate one independently editable title SRT for every Short."""
+    title_srt_paths: list[Path] = []
+    for highlight in highlights:
+        range_str = format_time_range(
+            highlight["start_sec"],
+            highlight["end_sec"],
+        )
+        srt_name = _build_clip_filename(
+            range_str,
+            highlight.get("title", ""),
+            True,
+            asset_suffix="_title",
+            extension=".srt",
+        )
+        srt_path = output_dir / srt_name
+        generate_short_title_srt(
+            highlight.get("title", ""),
+            float(highlight["end_sec"]) - float(highlight["start_sec"]),
+            srt_path,
+        )
+        title_srt_paths.append(srt_path)
+    return title_srt_paths
 
 
 def generate_karaoke_ass(
@@ -157,7 +221,7 @@ def _build_ass_header(font_config) -> str:
     if secondary == primary:
         secondary = _hex_to_ass_color("#555555")
     outline = _hex_to_ass_color(getattr(font_config, "outline_color", "#000000"))
-    font_name = getattr(font_config, "font_name", "Noto Sans JP Black")
+    font_name = getattr(font_config, "font_name", "Noto Sans JP")
     font_size = getattr(font_config, "font_size", 96)
     outline_width = getattr(font_config, "outline_width", 3)
     margin_v = getattr(font_config, "margin_bottom", 60)
@@ -179,7 +243,8 @@ def _build_ass_header(font_config) -> str:
         ),
         (
             f"Style: Default,{font_name},{font_size},{primary},{secondary},{outline},"
-            f"&H80000000&,0,0,0,0,100,100,0,0,1,{outline_width},0,"
+            f"&H80000000&,{(-1 if _is_bundled_default_font_name(font_name) else 0)},"
+            f"0,0,0,100,100,0,0,1,{outline_width},0,"
             f"{alignment},40,40,{margin_v},1"
         ),
         "",

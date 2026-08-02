@@ -13,7 +13,11 @@ from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
 from audio_energy import fuse_audio_energy
 from clipper import extract_clips, generate_thumbnails, get_video_info
-from subtitles import generate_all_karaoke_ass, generate_all_srts
+from subtitles import (
+    generate_all_karaoke_ass,
+    generate_all_short_title_srts,
+    generate_all_srts,
+)
 from premiere_xml import generate_combined_xml, generate_individual_xmls
 from modes import GenerationModes
 import youtube_api
@@ -44,12 +48,20 @@ def main():
     parser.add_argument("-m", "--mode", choices=["combined", "individual"], default="combined",
                         help="Output mode: combined (1 XML, multiple sequences) or individual (separate XMLs)")
     parser.add_argument("-s", "--shorts", action="store_true", help="Also generate 9:16 vertical shorts")
-    parser.add_argument("--shorts-mode", choices=["blur", "pad", "crop"], default="blur",
-                        help="ショート動画の変換モード (default: blur / 左右を残す)")
+    parser.add_argument("--shorts-mode", choices=["blur", "pad", "crop"], default="pad",
+                        help="ショート動画の変換モード (default: pad / 上下を黒帯にして全体表示)")
+    parser.add_argument("--shorts-blur-strength", type=float, default=20,
+                        help="blurモードの背景ぼかし強度 0-50 (default: 20)")
     parser.add_argument("--shorts-crop", choices=["center", "left", "right"], default="center",
                         help="ショート動画の横クロップ位置 (default: center)")
     parser.add_argument("--no-shorts-title", action="store_true",
                         help="ショート動画冒頭のタイトル焼き込みを無効化")
+    parser.add_argument(
+        "--shorts-title-position",
+        choices=["top", "bottom", "overlay"],
+        default="top",
+        help="ショートタイトルの配置 (default: top)",
+    )
     parser.add_argument("--thumbnails", action="store_true",
                         help="サムネイル候補画像を生成 / Generate thumbnail candidates")
     parser.add_argument("--audio-fusion", action="store_true",
@@ -256,6 +268,7 @@ def main():
     srt_paths = []
     shorts_paths = []
     shorts_srt_paths = []
+    shorts_title_srt_paths = []
     shorts_ass_paths = []
     thumbnail_paths = []
     clips_dir = output_dir / "clips"  # referenced later by XML + summary
@@ -278,12 +291,20 @@ def main():
             print("\n--- Shorts Conversion (9:16) with burned-in subtitles ---")
             shorts_dir = output_dir / "shorts"
             shorts_dir.mkdir(parents=True, exist_ok=True)
+            shorts_srt_paths = generate_all_srts(
+                segments,
+                highlights,
+                shorts_dir,
+                shorts=True,
+            )
+            shorts_title_srt_paths = generate_all_short_title_srts(
+                highlights,
+                shorts_dir,
+            )
             if args.karaoke:
                 shorts_ass_paths = generate_all_karaoke_ass(
                     segments, highlights, shorts_dir, font_config,
                 )
-            else:
-                shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
             shorts_paths = extract_clips(
                 video_path, highlights, shorts_dir,
                 shorts=True,
@@ -293,7 +314,9 @@ def main():
                 font_config=font_config,
                 crop_x=args.shorts_crop,
                 shorts_mode=args.shorts_mode,
+                shorts_blur_strength=args.shorts_blur_strength,
                 shorts_title=not args.no_shorts_title,
+                shorts_title_position=args.shorts_title_position,
             )
 
         if args.thumbnails:
@@ -305,6 +328,8 @@ def main():
                     vertical=True,
                     crop_x=args.shorts_crop,
                     shorts_mode=args.shorts_mode,
+                    shorts_blur_strength=args.shorts_blur_strength,
+                    shorts_title_position=args.shorts_title_position,
                     font_config=font_config,
                 )
             else:
@@ -380,6 +405,11 @@ def main():
         print(f"Clips: {len(clip_paths)} files")
         if shorts_paths:
             print(f"Shorts: {len(shorts_paths)} files")
+            print(
+                "Short SRT: "
+                f"{len(shorts_srt_paths) + len(shorts_title_srt_paths)} files "
+                "(archive + title)"
+            )
         if thumbnail_paths:
             print(f"Thumbnails: {len(thumbnail_paths)} files")
         print(f"SRT: {len(srt_paths)} files")

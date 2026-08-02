@@ -13,20 +13,41 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 clipper = pytest.importorskip("clipper")
+from config import FontConfig
+
+
 _shorts_crop_filter = clipper._shorts_crop_filter
 _shorts_base_vf = clipper._shorts_base_vf
 
 
-def test_default_shorts_layout_preserves_full_width_with_blurred_background():
+def test_default_shorts_layout_preserves_full_width_with_black_bars():
     f = _shorts_base_vf()
 
-    assert f == clipper._SHORTS_BLUR_FILTER
-    assert "[fg]scale=1080:1920:force_original_aspect_ratio=decrease" in f
+    assert f == clipper._SHORTS_PAD_FILTER
+    assert "scale=1080:1920:force_original_aspect_ratio=decrease" in f
+    assert "pad=1080:1920" in f
     assert not f.startswith("crop=")
 
 
 def test_unknown_shorts_mode_falls_back_to_full_width_layout():
-    assert _shorts_base_vf("unknown") == clipper._SHORTS_BLUR_FILTER
+    assert _shorts_base_vf("unknown") == clipper._SHORTS_PAD_FILTER
+
+
+def test_srt_style_is_scaled_from_shorts_pixels_to_ffmpeg_srt_playres():
+    style = clipper._build_force_style(FontConfig())
+
+    assert "FontSize=14.4" in style
+    assert "Outline=0.45" in style
+    assert "MarginV=9" in style
+    assert "Bold=-1" in style
+    assert "FontSize=96" not in style
+
+
+def test_default_shorts_font_is_bundled_bold_with_license():
+    assert FontConfig().font_name == "Noto Sans JP"
+    assert clipper._BUNDLED_DEFAULT_FONT_FILE.name == "NotoSansJP-Bold.otf"
+    assert clipper._BUNDLED_DEFAULT_FONT_FILE.is_file()
+    assert (clipper._BUNDLED_FONTS_DIR / "OFL.txt").is_file()
 
 
 def test_center_default_crop_and_scale():
@@ -81,6 +102,23 @@ def test_shorts_base_vf_blur():
     )
 
 
+@pytest.mark.parametrize(
+    ("strength", "expected"),
+    [
+        (0, "boxblur=0"),
+        (7, "boxblur=7"),
+        (37.5, "boxblur=37.5"),
+        (-10, "boxblur=0"),
+        (999, "boxblur=50"),
+        ("invalid", "boxblur=20"),
+    ],
+)
+def test_shorts_blur_strength_is_applied_and_clamped(strength, expected):
+    f = _shorts_base_vf("blur", blur_strength=strength)
+
+    assert expected in f
+
+
 def _leading_filter_labels(chain: str) -> list[str]:
     labels: list[str] = []
     while chain.startswith("["):
@@ -128,6 +166,28 @@ def test_title_drawtext_escapes_specials(monkeypatch):
     assert "x=(w-text_w)/2" in f
     assert "y=140" in f
     assert "enable='lt(t\\,4)'" in f
+
+
+@pytest.mark.parametrize(
+    ("position", "expected_y"),
+    [
+        ("top", "y=140"),
+        ("bottom", "y=h-text_h-360"),
+        ("overlay", "y=(h-text_h)/2"),
+        ("unknown", "y=140"),
+    ],
+)
+def test_title_drawtext_supports_three_positions(monkeypatch, position, expected_y):
+    monkeypatch.setattr(clipper, "_resolve_title_fontfile", lambda font_name: None)
+    font_config = type("FontConfig", (), {"font_name": "Noto Sans JP"})()
+
+    f = clipper._build_title_drawtext(
+        "タイトル",
+        font_config,
+        position=position,
+    )
+
+    assert expected_y in f
 
 
 def test_title_wraps_long_japanese_with_real_newline(monkeypatch):

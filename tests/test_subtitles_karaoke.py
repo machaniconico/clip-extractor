@@ -60,6 +60,7 @@ def test_generate_karaoke_ass_writes_style_dialogue_and_k_tokens(tmp_path):
     assert "[V4+ Styles]" in value
     assert "SecondaryColour" in value
     assert "Style: Default,Noto Sans JP,96" in value
+    assert "&H80000000&,-1,0,0,0,100,100" in value
     assert "&H777777&" in value
     assert dialogue.startswith("Dialogue: 0,0:00:00.00,0:00:01.00,Default")
     assert r"{\k" in dialogue

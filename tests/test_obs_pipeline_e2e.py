@@ -144,7 +144,7 @@ def _auto_settings(tmp_path: Path) -> dict:
         "auto_append_youtube": False,
         "generate_thumbnails": False,
         "karaoke": False,
-        "font_name": "Noto Sans JP Black",
+        "font_name": "Noto Sans JP",
         "font_size": 96,
         "font_color": "#FFFFFF",
     }
@@ -1930,6 +1930,8 @@ def test_start_obs_record_watch_wires_primary_callbacks_and_appends_timestamps(
         True, "OBS only", True, "OBS chapters", 55, 120,
         "blur", "left", False, True, True, 0.8, True,
         True,
+        37,
+        "bottom",
     )
 
     assert status == "connected"
@@ -1942,6 +1944,8 @@ def test_start_obs_record_watch_wires_primary_callbacks_and_appends_timestamps(
     assert captured["settings"]["shorts_mode"] == "blur"
     assert captured["settings"]["shorts_crop"] == "left"
     assert captured["settings"]["shorts_title"] is False
+    assert captured["settings"]["shorts_blur_strength"] == 37
+    assert captured["settings"]["shorts_title_position"] == "bottom"
     assert captured["settings"]["confirm_before_auto_process"] is False
     assert captured["recording_callback"] is recording_finished
     assert captured["on_recording_stopped"] is recording_stopped
