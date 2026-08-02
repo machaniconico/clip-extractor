@@ -3,7 +3,7 @@
 const ppro = require("premierepro");
 const { entrypoints, host } = require("uxp");
 
-const PLUGIN_VERSION = "1.0.0";
+const PLUGIN_VERSION = "1.1.0";
 const BASE_URLS = [
   "http://127.0.0.1:43127",
   "http://127.0.0.1:43128",
@@ -96,12 +96,60 @@ async function obtainProject(job) {
   return { project, created: true };
 }
 
+function overwriteOverlay(project, sequence, overlay, mediaByPath) {
+  const clip = mediaByPath.get(normalizedPath(overlay.path));
+  if (!clip) {
+    throw new Error(`Imported overlay was not found: ${overlay.path}`);
+  }
+
+  const startSeconds = Number(overlay.start_seconds);
+  const videoTrackIndex = Number(overlay.video_track_index);
+  const audioTrackIndex = Number(overlay.audio_track_index);
+  if (!Number.isFinite(startSeconds) || startSeconds < 0) {
+    throw new Error(`Invalid overlay start time: ${overlay.start_seconds}`);
+  }
+  if (!Number.isInteger(videoTrackIndex) || videoTrackIndex < 1) {
+    throw new Error(`Invalid video track index: ${overlay.video_track_index}`);
+  }
+  if (!Number.isInteger(audioTrackIndex) || audioTrackIndex < 0) {
+    throw new Error(`Invalid audio track index: ${overlay.audio_track_index}`);
+  }
+
+  const sequenceEditor = ppro.SequenceEditor.getEditor(sequence);
+  let success = false;
+  const execute = () => {
+    success = project.executeTransaction((compoundAction) => {
+      const action = sequenceEditor.createOverwriteItemAction(
+        clip,
+        ppro.TickTime.createWithSeconds(startSeconds),
+        videoTrackIndex,
+        audioTrackIndex
+      );
+      compoundAction.addAction(action);
+    }, `Clip Extractor: ${overlay.kind || "clip"} overlay`);
+  };
+
+  // lockedAccess became mandatory for action creation in Premiere 26.3.
+  // Keep the fallback so the declared 25.6 minimum remains supported.
+  if (typeof project.lockedAccess === "function") {
+    project.lockedAccess(execute);
+  } else {
+    execute();
+  }
+  if (!success) {
+    throw new Error(`Timeline overlay could not be placed: ${overlay.path}`);
+  }
+}
+
 async function importJob(job) {
-  if (!job || job.action !== "import_clips") {
+  if (!job || job.action !== "create_timeline") {
     throw new Error("Unsupported Clip Extractor job");
   }
   if (!Array.isArray(job.media) || job.media.length === 0) {
     throw new Error("The job contains no media");
+  }
+  if (!Array.isArray(job.timelines) || job.timelines.length === 0) {
+    throw new Error("The job contains no timeline");
   }
 
   const { project, created } = await obtainProject(job);
@@ -135,21 +183,31 @@ async function importJob(job) {
   let firstSequence = null;
   let createdSequenceCount = 0;
 
-  for (const media of job.media) {
-    const clip = mediaByPath.get(normalizedPath(media.path));
-    if (!clip) {
-      throw new Error(`Imported media was not found: ${media.path}`);
+  for (const timeline of job.timelines) {
+    const sourceClip = mediaByPath.get(normalizedPath(timeline.source_path));
+    if (!sourceClip) {
+      throw new Error(`Imported source was not found: ${timeline.source_path}`);
     }
 
-    const sequenceName = String(media.sequence_name || "Clip Extractor");
+    const sequenceName = String(timeline.sequence_name || "Clip Extractor");
     let sequence = sequencesByName.get(sequenceName);
     if (!sequence) {
-      sequence = await project.createSequenceFromMedia(sequenceName, [clip]);
+      sequence = await project.createSequenceFromMedia(
+        sequenceName,
+        [sourceClip]
+      );
       if (!sequence) {
         throw new Error(`Sequence could not be created: ${sequenceName}`);
       }
       sequencesByName.set(sequenceName, sequence);
       createdSequenceCount += 1;
+
+      const overlays = Array.isArray(timeline.overlays)
+        ? timeline.overlays
+        : [];
+      for (const overlay of overlays) {
+        overwriteOverlay(project, sequence, overlay, mediaByPath);
+      }
     }
     if (!firstSequence) {
       firstSequence = sequence;
@@ -171,7 +229,7 @@ async function importJob(job) {
 
   return {
     success: true,
-    message: `${job.media.length}件の素材を読み込み、${createdSequenceCount}件のシーケンスを作成しました`,
+    message: `${job.media.length}件の素材を読み込み、V1/V2/V3タイムラインを作成しました`,
     imported_count: missingPaths.length,
     sequence_count: createdSequenceCount,
     created_project: created,

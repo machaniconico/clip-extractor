@@ -3,7 +3,7 @@
   "id": "com.macha.clip-extractor.premiere-bridge",
   "name": "Clip Extractor Premiere Bridge",
   "shortname": "ClipExtractorBridge",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "main": "index.js",
   "host": {
     "app": "premierepro",

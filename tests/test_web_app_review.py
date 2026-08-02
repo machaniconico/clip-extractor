@@ -327,10 +327,14 @@ def test_render_phase_generates_only_shorts_when_only_shorts_enabled(
     assert extract_calls[0]["shorts"] is True
     assert not (tmp_path / "clips").exists()
     assert (tmp_path / "shorts" / "short.mp4").is_file()
-    assert not (tmp_path / "project.xml").exists()
-    assert (tmp_path / "project_shorts.xml").is_file()
+    assert (tmp_path / "project.xml").is_file()
+    assert not (tmp_path / "project_shorts.xml").exists()
+    shorts_only_xml = ET.parse(tmp_path / "project.xml").getroot()
+    assert len(shorts_only_xml.findall(".//sequence/media/video/track")) == 2
     assert result[5]["clip_paths"] == []
     assert [Path(path).name for path in result[5]["shorts_paths"]] == ["short.mp4"]
+    assert Path(result[5]["source_path"]) == session["video_path"].resolve()
+    assert result[5]["highlights"][0]["start_sec"] == 1.0
     assert session["_obs_render_outcome"]["clip_paths"] == []
     assert [
         Path(path).name for path in session["_obs_render_outcome"]["shorts_paths"]
@@ -375,7 +379,9 @@ def test_render_phase_generates_normal_and_short_clips_together(monkeypatch, tmp
     assert (tmp_path / "clips" / "clip.mp4").is_file()
     assert (tmp_path / "shorts" / "short.mp4").is_file()
     assert (tmp_path / "project.xml").is_file()
-    assert (tmp_path / "project_shorts.xml").is_file()
+    assert not (tmp_path / "project_shorts.xml").exists()
+    combined_xml = ET.parse(tmp_path / "project.xml").getroot()
+    assert len(combined_xml.findall(".//sequence/media/video/track")) == 3
     assert [Path(path).name for path in result[5]["clip_paths"]] == ["clip.mp4"]
     assert [Path(path).name for path in result[5]["shorts_paths"]] == ["short.mp4"]
 
@@ -491,16 +497,24 @@ def test_edited_highlights_flow_into_srt_and_xml_duration(tmp_path):
     assert srt_path.exists()
 
     clip_path = tmp_path / "clip.mp4"
+    source_path = tmp_path / "source.mp4"
     clip_path.write_bytes(b"clip")
+    source_path.write_bytes(b"source")
     xml_path = generate_combined_xml(
         [clip_path],
         highlights,
         {"width": 1920, "height": 1080, "fps": 30.0, "duration": 20.0},
         tmp_path / "project.xml",
+        source_video_path=source_path,
     )
     root = ET.parse(xml_path).getroot()
     sequence_duration = int(root.find(".//sequence/duration").text)
-    assert sequence_duration == int((edited_end - edited_start) * 30.0)
+    assert sequence_duration == int(20.0 * 30.0)
+    video_tracks = root.findall(".//sequence/media/video/track")
+    assert len(video_tracks) == 2
+    assert int(video_tracks[1].find("clipitem/start").text) == int(
+        edited_start * 30.0
+    )
 
 
 def test_render_preview_clip_uses_single_clipper_call(monkeypatch, tmp_path):
