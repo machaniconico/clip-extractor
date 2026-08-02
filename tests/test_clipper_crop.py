@@ -17,6 +17,18 @@ _shorts_crop_filter = clipper._shorts_crop_filter
 _shorts_base_vf = clipper._shorts_base_vf
 
 
+def test_default_shorts_layout_preserves_full_width_with_blurred_background():
+    f = _shorts_base_vf()
+
+    assert f == clipper._SHORTS_BLUR_FILTER
+    assert "[fg]scale=1080:1920:force_original_aspect_ratio=decrease" in f
+    assert not f.startswith("crop=")
+
+
+def test_unknown_shorts_mode_falls_back_to_full_width_layout():
+    assert _shorts_base_vf("unknown") == clipper._SHORTS_BLUR_FILTER
+
+
 def test_center_default_crop_and_scale():
     f = _shorts_crop_filter()
     assert "(iw-ih*9/16)/2" in f, f"center x missing: {f}"

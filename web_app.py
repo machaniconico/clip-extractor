@@ -195,7 +195,7 @@ OBS_PROCESSING_DEFAULTS = {
     "max_duration": 90,
     "output_mode": "combined",
     "generate_shorts": False,
-    "shorts_mode": "crop",
+    "shorts_mode": "blur",
     "shorts_crop": "center",
     "shorts_title": True,
     "generate_thumbnails": False,
@@ -389,7 +389,7 @@ def load_defaults() -> dict:
         "auto_append_youtube": False,
         "num_clips": 5, "min_duration": 30, "max_duration": 90,
         "output_mode": "combined", "generate_shorts": False,
-        "shorts_mode": "crop", "shorts_crop": "center",
+        "shorts_mode": "blur", "shorts_crop": "center",
         "shorts_title": True, "generate_thumbnails": False,
         "audio_fusion": False, "audio_alpha": 0.35,
         "karaoke": False,
@@ -1874,7 +1874,7 @@ def _run_obs_detect_render(
             session,
             s.get("output_mode", "combined"),
             bool(s.get("generate_shorts", False)),
-            s.get("shorts_mode", "crop"),
+            s.get("shorts_mode", "blur"),
             s.get("shorts_crop", "center"),
             bool(s.get("shorts_title", True)),
             False,  # generate_zip — 自動処理では ZIP を作らない
@@ -4204,10 +4204,10 @@ def create_ui():
                             info="通常の切り抜きがOFFでも生成できます。字幕入り縦型クリップを shorts/ に出力します",
                         )
                         shorts_mode = gr.Radio(
-                            choices=["crop", "blur", "pad"],
-                            value=defaults.get("shorts_mode", "crop"),
+                            choices=["blur", "pad", "crop"],
+                            value=defaults.get("shorts_mode", "blur"),
                             label="ショート動画の変換モード",
-                            info="crop: 縦型に切り抜き / blur: ぼかし背景 / pad: 黒帯で全体表示",
+                            info="blur（推奨）: 左右を残してぼかし背景 / pad: 左右を残して黒帯 / crop: 左右を切って拡大",
                         )
                         shorts_crop = gr.Radio(
                             choices=["center", "left", "right"],
@@ -4588,10 +4588,10 @@ def create_ui():
                                 info="通常の切り抜きがOFFでも生成できます。字幕入り縦型クリップを shorts/ に出力します",
                             )
                             obs_shorts_mode = gr.Radio(
-                                choices=["crop", "blur", "pad"],
+                                choices=["blur", "pad", "crop"],
                                 value=obs_processing_defaults["shorts_mode"],
                                 label="ショート動画の変換モード",
-                                info="crop: 縦型に切り抜き / blur: ぼかし背景 / pad: 黒帯で全体表示",
+                                info="blur（推奨）: 左右を残してぼかし背景 / pad: 左右を残して黒帯 / crop: 左右を切って拡大",
                             )
                             obs_shorts_crop = gr.Radio(
                                 choices=["center", "left", "right"],

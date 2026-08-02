@@ -44,8 +44,8 @@ def main():
     parser.add_argument("-m", "--mode", choices=["combined", "individual"], default="combined",
                         help="Output mode: combined (1 XML, multiple sequences) or individual (separate XMLs)")
     parser.add_argument("-s", "--shorts", action="store_true", help="Also generate 9:16 vertical shorts")
-    parser.add_argument("--shorts-mode", choices=["crop", "blur", "pad"], default="crop",
-                        help="ショート動画の変換モード (default: crop)")
+    parser.add_argument("--shorts-mode", choices=["blur", "pad", "crop"], default="blur",
+                        help="ショート動画の変換モード (default: blur / 左右を残す)")
     parser.add_argument("--shorts-crop", choices=["center", "left", "right"], default="center",
                         help="ショート動画の横クロップ位置 (default: center)")
     parser.add_argument("--no-shorts-title", action="store_true",

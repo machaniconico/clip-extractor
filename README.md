@@ -8,7 +8,7 @@ YouTube / Twitch 配信アーカイブ（または手元の動画ファイル）
 
 - **ハイライト自動検出** — 文字起こしを AI（Claude / OpenAI / Gemini）に渡し、盛り上がり区間を抽出
 - **切り抜き生成** — 検出区間を ffmpeg で切り出し（combined / individual の2モード）
-- **縦型ショート変換（9:16）** — `crop` / `blur` / `pad` の3モード＋冒頭タイトル焼き込み（書記素クラスタ対応の折返しで絵文字・結合文字も崩れない）
+- **縦型ショート変換（9:16）** — 左右を残す `blur` を標準に、`pad` / `crop` も選択可能＋冒頭タイトル焼き込み（書記素クラスタ対応の折返しで絵文字・結合文字も崩れない）
 - **ワード単位カラオケ字幕** — ショート専用。ASS の `\k` タイミングで読み上げに同期して色が動く字幕を焼き込み
 - **サムネイル候補の自動生成** — 代表フレームを抽出し、タイトルを焼き込んだ候補画像を生成
 - **音声の盛り上がり融合** — 音量（dBFS）カーブ＋スパイク検出で「盛り上がりスコア」を作り、AI のハイライト順位に融合して再ランク（失敗時は元の順位を維持する fail-open）
@@ -187,7 +187,7 @@ python main.py ./archive.mp4 --shorts --karaoke --thumbnails --audio-fusion
 | `-n, --clips` | 切り抜き本数 | 5 |
 | `-m, --mode` | `combined` / `individual` | combined |
 | `-s, --shorts` | 9:16 縦型ショートも生成 | off |
-| `--shorts-mode` | ショート変換 `crop` / `blur` / `pad` | crop |
+| `--shorts-mode` | ショート変換 `blur` / `pad` / `crop` | blur |
 | `--shorts-crop` | 横クロップ位置 `center` / `left` / `right` | center |
 | `--no-shorts-title` | ショート冒頭のタイトル焼き込みを無効化 | off |
 | `--thumbnails` | サムネイル候補画像を生成 | off |

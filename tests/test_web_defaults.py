@@ -178,7 +178,10 @@ def test_obs_recording_is_the_default_source(monkeypatch, tmp_path):
 
     assert web_app.load_defaults()["obs_stop_event"] == "record"
     assert web_app.load_defaults()["obs_auto_connect_on_startup"] is True
+    assert web_app.load_defaults()["shorts_mode"] == "blur"
+    assert web_app._obs_processing_settings_from_defaults()["shorts_mode"] == "blur"
     assert AppConfig().obs_stop_event == "record"
+    assert AppConfig().shorts_mode == "blur"
 
 
 def test_roundtrip_audio_fusion_fields(monkeypatch, tmp_path):
