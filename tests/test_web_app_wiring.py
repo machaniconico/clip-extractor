@@ -167,7 +167,12 @@ def test_detect_phase_signature_matches_detect_inputs():
     args = _function_args(module, "detect_phase")
     args = [arg for arg in args if arg != "progress"]
     assert args == _event_input_names(module, "detect_phase", "then")
-    assert args[-3:] == ["audio_fusion", "audio_alpha", "output_base_dir"]
+    assert args[-4:] == [
+        "audio_fusion",
+        "audio_alpha",
+        "output_base_dir",
+        "generate_shorts",
+    ]
 
 
 def test_render_phase_signature_matches_render_inputs():
@@ -232,9 +237,25 @@ def test_obs_generation_checkboxes_are_independent_and_profile_backed():
     assert 'label="タイムスタンプ(概要欄)を生成（OBSでは固定ON）"' not in source
     assert 'value=obs_processing_defaults["enable_clips"]' in source
     assert 'value=obs_processing_defaults["enable_chapters"]' in source
+    assert 'value=obs_processing_defaults["generate_shorts"]' in source
     assert 'info="OBS録画から切り抜きを生成します"' in source
     assert 'info="配信終了後にYouTube概要欄へ反映します"' in source
-    assert "どちらか一方はONにしてください" in source
+    assert 'label="ショート動画 (9:16) を生成"' in source
+    assert "通常の切り抜きがOFFでも生成できます" in source
+    assert "3つのうち少なくとも1つはONにしてください" in source
+    assert source.count(
+        "切り抜き動画とショート動画が両方無効のときだけ使われます"
+    ) == 2
+
+
+def test_input_shorts_are_an_independent_generation_output():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert 'label="ショート動画 (9:16) も生成"' not in source
+    assert 'label="ショート動画 (9:16) を生成"' in source
+    assert "切り抜き動画・ショート動画・タイムスタンプ" in source
+    assert "通常の切り抜きがOFFでも生成できます" in source
+    assert "OBS自動処理の生成設定" in source
 
 
 def test_obs_prompt_confirmation_is_wired_to_saved_setting_and_actions():

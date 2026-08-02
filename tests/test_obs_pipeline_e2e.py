@@ -154,6 +154,10 @@ def _find_clips(tmp_path: Path) -> list[Path]:
     return [p for p in tmp_path.glob("output_*/clips/*.mp4")]
 
 
+def _find_shorts(tmp_path: Path) -> list[Path]:
+    return [p for p in tmp_path.glob("output_*/shorts/*_short.mp4")]
+
+
 def test_output_directories_are_unique_for_simultaneous_archives(tmp_path):
     first = web_app._create_output_dir(tmp_path)
     second = web_app._create_output_dir(tmp_path)
@@ -191,6 +195,32 @@ def test_obs_auto_pipeline_generates_real_clip(tmp_path, monkeypatch):
     assert abs(dur - EXPECTED_CLIP_DURATION) <= 2.0, (
         f"clip duration {dur:.2f}s not ~{EXPECTED_CLIP_DURATION}s"
     )
+
+
+@ffmpeg_required
+def test_obs_auto_pipeline_generates_only_real_short(tmp_path, monkeypatch):
+    video = _make_synthetic_video(tmp_path / "short-recording.mp4", duration=4)
+    _stub_transcribe(monkeypatch)
+    _stub_detect_highlights(monkeypatch, start=0.5, end=2.5)
+
+    settings = _auto_settings(tmp_path)
+    settings.update(
+        enable_clips=False,
+        enable_chapters=False,
+        generate_shorts=True,
+        min_duration=1,
+        max_duration=5,
+        output_mode="combined",
+    )
+    outcome = web_app._run_obs_auto_pipeline_outcome(str(video), settings)
+
+    assert outcome.success, outcome.log
+    assert not _find_clips(tmp_path), outcome.log
+    shorts = _find_shorts(tmp_path)
+    assert len(shorts) == 1, outcome.log
+    assert shorts[0].stat().st_size > 0
+    assert outcome.clip_paths == ()
+    assert outcome.shorts_paths == (str(shorts[0]),)
 
 
 # --------------------------------------------------------------------------
@@ -465,13 +495,14 @@ def test_obs_youtube_pipeline_uses_url_and_respects_generation_toggles(
     def fake_render_phase(*args, **kwargs):
         captured["render_args"] = args
         session = args[0]
-        clip_path = tmp_path / "clips" / "clip.mp4"
-        clip_path.parent.mkdir(parents=True, exist_ok=True)
-        clip_path.write_bytes(b"clip")
+        short_path = tmp_path / "shorts" / "clip_short.mp4"
+        short_path.parent.mkdir(parents=True, exist_ok=True)
+        short_path.write_bytes(b"short")
         chapters_path = tmp_path / "chapters.txt"
         chapters_path.write_text("0:00 Intro", encoding="utf-8")
         session["_obs_render_outcome"] = {
-            "clip_paths": [str(clip_path)],
+            "clip_paths": [],
+            "shorts_paths": [str(short_path)],
             "chapters_path": str(chapters_path),
             "chapters_text": "0:00 Intro",
             "youtube_append_requested": False,
@@ -485,8 +516,9 @@ def test_obs_youtube_pipeline_uses_url_and_respects_generation_toggles(
     result = web_app.run_obs_youtube_pipeline(
         url,
         {
-            "enable_clips": True,
+            "enable_clips": False,
             "enable_chapters": False,
+            "generate_shorts": True,
             "auto_append_youtube": True,
         },
     )
@@ -494,8 +526,10 @@ def test_obs_youtube_pipeline_uses_url_and_respects_generation_toggles(
     detect_args = captured["detect_args"]
     assert detect_args[0] == url
     assert detect_args[1] is None
-    assert detect_args[2] is True
+    assert detect_args[2] is False
     assert detect_args[4] is False
+    assert detect_args[-1] is True
+    assert captured["render_args"][2] is True
     assert captured["render_args"][8] is False
     assert "Render 完了" in result
 
@@ -1917,7 +1951,7 @@ def test_start_obs_record_watch_wires_primary_callbacks_and_appends_timestamps(
     web_app.stop_obs_watch()
 
 
-def test_start_obs_rejects_both_generation_outputs_disabled(monkeypatch):
+def test_start_obs_rejects_all_generation_outputs_disabled(monkeypatch):
     status = web_app.start_obs_watch(
         "folder", "localhost", 4455, "", False, "record", "C:/recordings",
         True, False, 5, "combined", False, "gemini", "large-v3", "",
@@ -1926,7 +1960,46 @@ def test_start_obs_rejects_both_generation_outputs_disabled(monkeypatch):
     )
 
     assert "OBS自動処理設定エラー" in status
-    assert "どちらか" in status
+    assert "少なくとも1つ" in status
+
+
+def test_start_obs_accepts_shorts_only(monkeypatch):
+    import obs_integration
+
+    captured = {}
+
+    class FakeWatcher:
+        status = "watching"
+
+        def start(self):
+            pass
+
+        def stop(self):
+            self.status = "stopped"
+
+    def fake_make_callback(_auto_process, settings, _generation):
+        captured["settings"] = settings
+        return lambda _path: None
+
+    monkeypatch.setattr(web_app, "_obs_make_callback", fake_make_callback)
+    monkeypatch.setattr(
+        obs_integration,
+        "create_watcher",
+        lambda *_args, **_kwargs: FakeWatcher(),
+    )
+
+    status = web_app.start_obs_watch(
+        "folder", "localhost", 4455, "", False, "record", "C:/recordings",
+        True, False, 5, "combined", True, "gemini", "large-v3", "",
+        False, "", False, "", 30, 90, "crop", "center", True,
+        False, False, 0.35, False,
+    )
+
+    assert status == "watching"
+    assert captured["settings"]["enable_clips"] is False
+    assert captured["settings"]["generate_shorts"] is True
+    assert captured["settings"]["enable_chapters"] is False
+    web_app.stop_obs_watch()
 
 
 def test_start_obs_folder_record_mode_remains_local_only(monkeypatch):

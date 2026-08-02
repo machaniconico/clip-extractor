@@ -41,9 +41,11 @@ def _session(tmp_path, highlights=None):
         ],
         "youtube_video_id": None,
         "enable_clips": True,
+        "enable_shorts": False,
         "enable_chapters": True,
         "modes": {
             "enable_clips": True,
+            "enable_shorts": False,
             "enable_chapters": True,
             "clip_prompt": "",
             "chapter_prompt": "",
@@ -277,6 +279,105 @@ def test_render_phase_uses_edited_highlights(monkeypatch, tmp_path):
     assert [Path(path).name for path in premiere_job["clip_paths"]] == ["clip.mp4"]
     assert all(Path(path).is_absolute() for path in premiere_job["clip_paths"])
     assert Path(premiere_job["xml_paths"][0]).is_file()
+
+
+def test_render_phase_generates_only_shorts_when_only_shorts_enabled(
+    monkeypatch,
+    tmp_path,
+):
+    session = _session(tmp_path)
+    session["enable_clips"] = False
+    session["enable_shorts"] = True
+    session["enable_chapters"] = False
+    session["modes"].update(
+        enable_clips=False,
+        enable_shorts=True,
+        enable_chapters=False,
+    )
+    extract_calls = []
+
+    def fake_extract(video_path, highlights, output_dir, **kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        extract_calls.append(dict(kwargs))
+        path = output_dir / "short.mp4"
+        path.write_bytes(b"short")
+        return [path]
+
+    monkeypatch.setattr(web_app, "extract_clips", fake_extract)
+
+    result = web_app.render_phase(
+        session,
+        "combined",
+        True,
+        "crop",
+        "center",
+        True,
+        False,
+        False,
+        False,
+        "Noto Sans JP",
+        96,
+        "#FFFFFF",
+        False,
+        False,
+        progress=_progress,
+    )
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["shorts"] is True
+    assert not (tmp_path / "clips").exists()
+    assert (tmp_path / "shorts" / "short.mp4").is_file()
+    assert not (tmp_path / "project.xml").exists()
+    assert (tmp_path / "project_shorts.xml").is_file()
+    assert result[5]["clip_paths"] == []
+    assert [Path(path).name for path in result[5]["shorts_paths"]] == ["short.mp4"]
+    assert session["_obs_render_outcome"]["clip_paths"] == []
+    assert [
+        Path(path).name for path in session["_obs_render_outcome"]["shorts_paths"]
+    ] == ["short.mp4"]
+
+
+def test_render_phase_generates_normal_and_short_clips_together(monkeypatch, tmp_path):
+    session = _session(tmp_path)
+    session["enable_chapters"] = False
+    session["modes"]["enable_chapters"] = False
+    extract_calls = []
+
+    def fake_extract(video_path, highlights, output_dir, **kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        is_short = bool(kwargs.get("shorts", False))
+        extract_calls.append(is_short)
+        path = output_dir / ("short.mp4" if is_short else "clip.mp4")
+        path.write_bytes(b"short" if is_short else b"clip")
+        return [path]
+
+    monkeypatch.setattr(web_app, "extract_clips", fake_extract)
+
+    result = web_app.render_phase(
+        session,
+        "combined",
+        True,
+        "crop",
+        "center",
+        True,
+        False,
+        False,
+        False,
+        "Noto Sans JP",
+        96,
+        "#FFFFFF",
+        False,
+        False,
+        progress=_progress,
+    )
+
+    assert extract_calls == [False, True]
+    assert (tmp_path / "clips" / "clip.mp4").is_file()
+    assert (tmp_path / "shorts" / "short.mp4").is_file()
+    assert (tmp_path / "project.xml").is_file()
+    assert (tmp_path / "project_shorts.xml").is_file()
+    assert [Path(path).name for path in result[5]["clip_paths"]] == ["clip.mp4"]
+    assert [Path(path).name for path in result[5]["shorts_paths"]] == ["short.mp4"]
 
 
 def test_render_phase_skips_twitch_timestamps_and_youtube_append(monkeypatch, tmp_path):
