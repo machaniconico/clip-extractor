@@ -164,6 +164,76 @@ def test_detect_phase_returns_session_state(monkeypatch, tmp_path):
     assert session["youtube_video_id"] == "abc123"
 
 
+def test_detect_phase_twitch_downloads_and_disables_timestamps(monkeypatch, tmp_path):
+    source = tmp_path / "twitch-vod.mp4"
+
+    def fake_download(url, output_dir):
+        assert url == "https://www.twitch.tv/videos/123456789"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"video")
+        return source
+
+    monkeypatch.setattr(web_app, "download_video", fake_download)
+    monkeypatch.setattr(
+        web_app,
+        "get_video_info",
+        lambda path: {"width": 1280, "height": 720, "fps": 30.0, "duration": 60.0},
+    )
+    monkeypatch.setattr(
+        web_app,
+        "transcribe",
+        lambda path, model, language: [Segment(start=1.0, end=4.0, text="hello")],
+    )
+    monkeypatch.setattr(
+        web_app,
+        "detect_highlights",
+        lambda *args, **kwargs: [
+            {
+                "start": "00:00:01.000",
+                "end": "00:00:04.000",
+                "start_sec": 1.0,
+                "end_sec": 4.0,
+                "duration": 3.0,
+                "title": "Twitch highlight",
+                "reason": "mock",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "extract_video_id",
+        lambda _url: pytest.fail("Twitch input must not query a YouTube video id"),
+    )
+
+    session, _status_md, _panel_update = web_app.detect_phase(
+        "https://www.twitch.tv/videos/123456789",
+        None,
+        True,
+        "",
+        True,
+        "ignored for Twitch",
+        1,
+        "gemini",
+        "gemini-2.5-flash",
+        "key",
+        1,
+        10,
+        "tiny",
+        "ja",
+        False,
+        0.35,
+        str(tmp_path),
+        progress=_progress,
+    )
+
+    assert session["source_kind"] == "twitch"
+    assert session["youtube_video_id"] is None
+    assert session["enable_clips"] is True
+    assert session["enable_chapters"] is False
+    assert session["modes"]["enable_chapters"] is False
+    assert any("Twitch入力" in line for line in session["logs"])
+
+
 def test_render_phase_uses_edited_highlights(monkeypatch, tmp_path):
     session = _session(tmp_path)
     web_app.apply_edits_to_session(session, 0, 2.5, 7.5, "Edited title")
@@ -207,6 +277,49 @@ def test_render_phase_uses_edited_highlights(monkeypatch, tmp_path):
     assert [Path(path).name for path in premiere_job["clip_paths"]] == ["clip.mp4"]
     assert all(Path(path).is_absolute() for path in premiere_job["clip_paths"])
     assert Path(premiere_job["xml_paths"][0]).is_file()
+
+
+def test_render_phase_skips_twitch_timestamps_and_youtube_append(monkeypatch, tmp_path):
+    session = _session(tmp_path)
+    session["source_kind"] = "twitch"
+    session["enable_chapters"] = True
+    session["modes"]["enable_chapters"] = True
+
+    def fake_extract(video_path, highlights, output_dir, **kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / "twitch-clip.mp4"
+        path.write_bytes(b"clip")
+        return [path]
+
+    monkeypatch.setattr(web_app, "extract_clips", fake_extract)
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "check_auth_status",
+        lambda: pytest.fail("Twitch render must not check YouTube auth"),
+    )
+
+    result = web_app.render_phase(
+        session,
+        "combined",
+        False,
+        "crop",
+        "center",
+        True,
+        False,
+        False,
+        True,
+        "Noto Sans JP",
+        96,
+        "#FFFFFF",
+        False,
+        False,
+        progress=_progress,
+    )
+
+    assert "[Skip chapters]" in result[0]
+    assert not result[4]
+    assert session["_obs_render_outcome"]["chapters_path"] == ""
+    assert session["_obs_render_outcome"]["youtube_append_requested"] is False
 
 
 def test_chapters_only_render_clears_stale_premiere_job(tmp_path):

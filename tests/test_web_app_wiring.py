@@ -249,6 +249,14 @@ def test_obs_prompt_confirmation_is_wired_to_saved_setting_and_actions():
     assert '"今回はスキップ"' in source
 
 
+def test_input_accepts_youtube_and_twitch_urls():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert 'label="動画URL（YouTube / Twitch）"' in source
+    assert "https://twitch.tv/videos/..." in source
+    assert "Twitch入力ではタイムスタンプを生成しません" in source
+
+
 def test_premiere_button_and_render_state_are_wired():
     module = _module()
     source = WEB_APP.read_text(encoding="utf-8")

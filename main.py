@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""clip-extractor: Auto-generate highlight clips from YouTube archives for Premiere Pro."""
+"""clip-extractor: Auto-generate highlight clips from online archives or local videos."""
 
 import argparse
 import sys
@@ -8,7 +8,7 @@ from pathlib import Path
 
 from chapters import generate_chapter_text, write_chapter_file
 from config import FontConfig
-from downloader import is_youtube_url, download_video
+from downloader import download_video, get_url_source
 from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
 from audio_energy import fuse_audio_energy
@@ -22,11 +22,12 @@ import drive_upload
 
 def main():
     parser = argparse.ArgumentParser(
-        description="YouTube配信アーカイブから切り抜きショート動画を自動生成",
+        description="YouTube/Twitch配信アーカイブから切り抜きショート動画を自動生成",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用例:
   python main.py https://youtube.com/watch?v=xxxxx
+  python main.py https://www.twitch.tv/videos/123456789
   python main.py ./archive.mp4 --shorts
   python main.py ./archive.mp4 --mode individual --clips 3
   python main.py ./archive.mp4 --prompt "面白いシーンだけ選んで"
@@ -35,7 +36,7 @@ def main():
     )
 
     parser.add_argument("input", nargs="?", default=None,
-                        help="YouTube URL or local video file path "
+                        help="YouTube/Twitch URL or local video file path "
                              "(--youtube-setup/--youtube-revoke/--youtube-status "
                              "--drive-setup/--drive-revoke/--drive-status 時は不要)")
     parser.add_argument("-o", "--output", default=None, help="Output directory (default: auto-generated)")
@@ -144,12 +145,16 @@ def main():
 
     # Normal processing path requires `input`.
     if args.input is None:
-        parser.error("input (YouTube URL or local video file path) is required "
+        parser.error("input (YouTube/Twitch URL or local video file path) is required "
                      "unless one of --youtube-setup / --youtube-revoke / --youtube-status "
                      "/ --drive-setup / --drive-revoke / --drive-status is used")
 
+    input_source = get_url_source(args.input)
+
     # Pre-validate YouTube auth so we fail fast before the heavy pipeline.
-    if args.auto_append_youtube:
+    # Twitch has no YouTube description target, so its timestamp-related
+    # option is intentionally ignored instead of triggering an auth check.
+    if args.auto_append_youtube and input_source != "twitch":
         yt_pre = youtube_api.check_auth_status()
         if not yt_pre["configured"]:
             print("Error: --auto-append-youtube は credentials.json が必要です。"
@@ -161,9 +166,11 @@ def main():
             sys.exit(1)
 
     # Validate generation modes — at least one side must be enabled.
+    if input_source == "twitch":
+        print("Twitch入力: タイムスタンプ生成とYouTube概要欄への追記をスキップします")
     modes = GenerationModes(
         enable_clips=not args.no_clips,
-        enable_chapters=not args.no_chapters,
+        enable_chapters=not args.no_chapters and input_source != "twitch",
         clip_prompt=args.prompt or "",
         chapter_prompt=args.chapter_prompt or "",
     )
@@ -188,14 +195,18 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir}")
 
-    # Capture YouTube video id for the optional auto-append step. Only
-    # meaningful when the input is a URL — local files never have one.
-    youtube_video_id = youtube_api.extract_video_id(args.input) if is_youtube_url(args.input) else None
+    # Capture a YouTube video id for the optional auto-append step. Only
+    # meaningful for YouTube URL input — local files and Twitch have none.
+    youtube_video_id = (
+        youtube_api.extract_video_id(args.input)
+        if input_source == "youtube"
+        else None
+    )
     if youtube_video_id:
         print(f"YouTube video id: {youtube_video_id}")
 
     # Step 1: Get video file
-    if is_youtube_url(args.input):
+    if input_source in {"youtube", "twitch"}:
         video_path = download_video(args.input, output_dir / "source")
     else:
         video_path = Path(args.input)
@@ -348,10 +359,15 @@ def main():
         print(chapters_text)
         print(f"\nSaved: {chapters_path}")
     else:
-        print("\n[Skip chapters] タイムスタンプ (概要欄) 生成を無効化 (--no-chapters)")
+        reason = (
+            "Twitch入力ではタイムスタンプを生成しません"
+            if input_source == "twitch"
+            else "タイムスタンプ (概要欄) 生成を無効化 (--no-chapters)"
+        )
+        print(f"\n[Skip chapters] {reason}")
 
     # Optional auto-append to YouTube video description
-    if args.auto_append_youtube and modes.enable_chapters and chapters_text:
+    if args.auto_append_youtube and input_source == "youtube" and modes.enable_chapters and chapters_text:
         if not youtube_video_id:
             print("\n[Skip auto-append] URL 入力ではないため YouTube 概要欄への自動追記はスキップ")
         elif not youtube_api.is_configured():
