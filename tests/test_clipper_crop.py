@@ -23,6 +23,15 @@ _shorts_crop_filter = clipper._shorts_crop_filter
 _shorts_base_vf = clipper._shorts_base_vf
 
 
+def _drawtext_eval_widths(stderr: str) -> list[float]:
+    """Parse FFmpeg expression output on both Windows and Linux builds."""
+    values = re.findall(
+        r"(?m)^(?:\[Eval @ [^]]+\]\s+)?\s*([0-9]+(?:\.[0-9]+)?)\s*$",
+        stderr,
+    )
+    return [float(value) for value in values]
+
+
 def test_default_shorts_layout_preserves_full_width_with_black_bars():
     f = _shorts_base_vf()
 
@@ -271,16 +280,27 @@ def test_title_auto_fits_inside_shorts_frame_with_real_ffmpeg():
         encoding="utf-8",
         check=True,
     )
-    widths = re.findall(r"\[Eval @ [^]]+\]\s+([0-9]+(?:\.[0-9]+)?)", result.stderr)
+    widths = _drawtext_eval_widths(result.stderr)
 
     assert widths, result.stderr
-    text_width = max(float(width) for width in widths)
+    text_width = max(widths)
     # 24px drawtext box padding plus a 32px safe margin on both sides.
     assert text_width + (24 * 2) <= 1080 - (32 * 2)
     assert "fontsize=80" not in drawtext
     assert drawtext.count("drawtext=") == 2
     assert "drawbox=" in drawtext
     assert "\n" not in drawtext
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("[Eval @ 000001] 956.000000\n", [956.0]),
+        ("956.000000\n804.000000\n", [956.0, 804.0]),
+    ],
+)
+def test_drawtext_width_parser_supports_windows_and_linux(stderr, expected):
+    assert _drawtext_eval_widths(stderr) == expected
 
 
 def test_title_cluster_width_handles_zero_advance_components():
