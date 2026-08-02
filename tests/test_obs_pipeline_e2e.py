@@ -250,6 +250,42 @@ def test_obs_auto_callback_waits_for_confirmation_before_running_pipeline(monkey
     assert "Render 完了" in web_app._obs_status_text()
 
 
+def test_obs_confirmation_waits_until_user_decides_without_timeout(monkeypatch):
+    """A pending confirmation must not expire while OBS integration is active."""
+    # If the old deadline is still used, make it expire quickly so this test
+    # catches the regression without waiting 15 minutes.
+    monkeypatch.setattr(web_app, "_OBS_CONFIRMATION_TIMEOUT", 0.01, raising=False)
+    result = {}
+    settings = {
+        "enable_clips": True,
+        "enable_chapters": True,
+        "clip_prompt": "",
+        "confirm_before_auto_process": True,
+    }
+
+    worker = threading.Thread(
+        target=lambda: result.setdefault(
+            "value",
+            web_app._obs_confirm_before_auto_process(
+                settings, "C:/recordings/wait-forever.mkv", lambda: True
+            ),
+        )
+    )
+    worker.start()
+    try:
+        assert _wait_for_obs_confirmation(), web_app._obs_status_text()
+        time.sleep(0.15)
+        assert worker.is_alive(), "confirmation expired before the user decided"
+        assert web_app._obs_resolve_confirmation(True) is True
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert result["value"] is True
+    finally:
+        if worker.is_alive():
+            web_app._obs_resolve_confirmation(True)
+            worker.join(timeout=5)
+
+
 def test_obs_auto_callback_skips_when_confirmation_is_declined(monkeypatch):
     with web_app._obs_status_lock:
         web_app._obs_status_lines.clear()
