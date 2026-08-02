@@ -1,6 +1,6 @@
 # Clip Extractor
 
-YouTube 配信アーカイブ（または手元の動画ファイル）から、AI でハイライトを検出して**切り抜き動画・縦型ショート・サムネ・概要欄タイムスタンプ**を自動生成するツールです。Premiere Pro 用の XML 書き出しと、ブラウザで使える Web UI の両方に対応します。
+YouTube / Twitch 配信アーカイブ（または手元の動画ファイル）から、AI でハイライトを検出して**切り抜き動画・縦型ショート・サムネ・概要欄タイムスタンプ**を自動生成するツールです。Premiere Pro 用の XML 書き出しと、ブラウザで使える Web UI の両方に対応します。Twitch入力では配信のダウンロードと切り抜きに対応し、タイムスタンプ生成は自動的にスキップします。
 
 ---
 
@@ -8,12 +8,13 @@ YouTube 配信アーカイブ（または手元の動画ファイル）から、
 
 - **ハイライト自動検出** — 文字起こしを AI（Claude / OpenAI / Gemini）に渡し、盛り上がり区間を抽出
 - **切り抜き生成** — 検出区間を ffmpeg で切り出し（combined / individual の2モード）
-- **縦型ショート変換（9:16）** — `crop` / `blur` / `pad` の3モード＋冒頭タイトル焼き込み（書記素クラスタ対応の折返しで絵文字・結合文字も崩れない）
+- **縦型ショート変換（9:16）** — 全体を残して上下を黒帯にする `pad` を標準に、強度調整付きの `blur` / `crop` も選択可能。タイトルは上側・下側・映像中央から配置を選べ、発話字幕とタイトルを別々の編集用SRTとしても出力
+- **日本語ショート向け字幕フォント** — 商用利用可能な Noto Sans JP Bold（700、SIL OFL 1.1）を同梱・既定化。PC内の別フォントや直接入力にも対応
 - **ワード単位カラオケ字幕** — ショート専用。ASS の `\k` タイミングで読み上げに同期して色が動く字幕を焼き込み
 - **サムネイル候補の自動生成** — 代表フレームを抽出し、タイトルを焼き込んだ候補画像を生成
 - **音声の盛り上がり融合** — 音量（dBFS）カーブ＋スパイク検出で「盛り上がりスコア」を作り、AI のハイライト順位に融合して再ランク（失敗時は元の順位を維持する fail-open）
 - **概要欄タイムスタンプ生成** — チャプター（タイムスタンプ）テキストを生成。YouTube の概要欄へ自動追記も可能
-- **Premiere Pro 連携** — ボタン1つで書き出し済みクリップを読み込み、シーケンスを自動作成。combined / individual の XML 手動読み込みも維持
+- **Premiere Pro 連携** — 元動画をV1、通常切り抜きをV2、同時生成したショートをV3へ元時刻に合わせて自動配置。combined / individual の XML 手動読み込みも維持
 - **2フェーズ Web UI** — 「検出」と「レンダリング」を分離。検出後に各クリップの **イン/アウト点・タイトルをプレビューしながら編集** してから書き出せる（再文字起こし不要）
 - **外部連携（任意）** — YouTube 概要欄への自動追記、Google Drive へのアップロード
 
@@ -22,7 +23,7 @@ YouTube 配信アーカイブ（または手元の動画ファイル）から、
 ## 処理の流れ
 
 ```
-入力（YouTube URL / 動画ファイル）
+入力（YouTube / Twitch URL / 動画ファイル）
   └─ ダウンロード（yt-dlp）           ※URL のとき
   └─ 文字起こし（faster-whisper）
   └─ ハイライト検出（Claude / OpenAI / Gemini）
@@ -31,7 +32,7 @@ YouTube 配信アーカイブ（または手元の動画ファイル）から、
         ├─ 縦型ショート（--shorts）＋タイトル焼き込み
         ├─ カラオケ字幕（--karaoke）
         └─ サムネ候補（--thumbnails）
-  └─ 概要欄タイムスタンプ生成（+ 任意で YouTube へ追記）
+  └─ 概要欄タイムスタンプ生成（YouTube入力時。+ 任意で YouTube へ追記）
   └─ Premiere Proへ直接送信（または XML 書き出し）
 ```
 
@@ -158,6 +159,9 @@ Premiere Proの File → Import から読み込めます。
 # YouTube URL から
 python main.py https://youtube.com/watch?v=xxxxx
 
+# Twitch VOD / 配信URLから（タイムスタンプは自動スキップ）
+python main.py https://www.twitch.tv/videos/123456789
+
 # 手元の動画から、縦型ショートも生成
 python main.py ./archive.mp4 --shorts
 
@@ -179,14 +183,16 @@ python main.py ./archive.mp4 --shorts --karaoke --thumbnails --audio-fusion
 
 | オプション | 説明 | 既定値 |
 |---|---|---|
-| `input` | YouTube URL または動画ファイルパス | — |
+| `input` | YouTube/Twitch URL または動画ファイルパス | — |
 | `-o, --output` | 出力ディレクトリ | 自動生成 |
 | `-n, --clips` | 切り抜き本数 | 5 |
 | `-m, --mode` | `combined` / `individual` | combined |
 | `-s, --shorts` | 9:16 縦型ショートも生成 | off |
-| `--shorts-mode` | ショート変換 `crop` / `blur` / `pad` | crop |
+| `--shorts-mode` | ショート変換 `blur` / `pad` / `crop` | pad |
+| `--shorts-blur-strength` | `blur` 背景のぼかし強度（0–50） | 20 |
 | `--shorts-crop` | 横クロップ位置 `center` / `left` / `right` | center |
 | `--no-shorts-title` | ショート冒頭のタイトル焼き込みを無効化 | off |
+| `--shorts-title-position` | タイトル配置 `top` / `bottom` / `overlay` | top |
 | `--thumbnails` | サムネイル候補画像を生成 | off |
 | `--audio-fusion` | 音声の盛り上がりを順位に融合 | off |
 | `--audio-alpha` | 音声重み（0.0–1.0） | 0.35 |
@@ -209,6 +215,12 @@ python main.py ./archive.mp4 --shorts --karaoke --thumbnails --audio-fusion
 | `--drive-setup` / `--drive-status` / `--drive-revoke` | Google Drive OAuth の認証 / 状態確認 / 解除 |
 
 YouTube / Drive 連携のセットアップ手順は `CREDENTIALS_SETUP.txt` を参照してください（初心者向けの図解版は `SETUP_GUIDE.html`）。
+
+### Twitch入力について
+
+Inputタブまたは `main.py` に Twitch のVOD URL（例: `https://www.twitch.tv/videos/123456789`）を指定すると、`yt-dlp` で動画をダウンロードして、YouTube入力と同じ文字起こし・AIハイライト検出・切り抜き生成を実行します。TwitchにはYouTube概要欄の追記先がないため、タイムスタンプ（概要欄）生成とYouTube概要欄への自動追記はスキップします。
+
+Twitch側でVOD保存が有効になっており、VODが公開されている必要があります。VODの保持期間は配信者の種別や設定によって異なるため、ダウンロードできない場合はTwitch側でVODの公開状態・保存期間を確認してください。
 
 ---
 

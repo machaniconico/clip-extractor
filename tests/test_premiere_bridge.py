@@ -21,15 +21,26 @@ def _rendered_session(tmp_path: Path) -> dict:
 
     clip = clips_dir / "00m10s-00m40s_見どころ.mp4"
     short = shorts_dir / "00m10s-00m40s_見どころ_short.mp4"
+    source = tmp_path / "source.mp4"
     clip.write_bytes(b"clip")
     short.write_bytes(b"short")
+    source.write_bytes(b"source")
 
     return {
         "output_dir": str(tmp_path),
         "_premiere_output": {
+            "output_dir": str(tmp_path),
             "project_name": "配信アーカイブ",
+            "source_path": str(source),
             "clip_paths": [str(clip)],
             "shorts_paths": [str(short)],
+            "highlights": [
+                {
+                    "title": "見どころ",
+                    "start_sec": 10.0,
+                    "end_sec": 40.0,
+                }
+            ],
         },
     }
 
@@ -39,18 +50,35 @@ def test_build_edit_job_contains_existing_absolute_media(tmp_path):
 
     job = premiere_bridge.build_edit_job(session, include_shorts=True)
 
-    assert job["action"] == "import_clips"
+    assert job["action"] == "create_timeline"
+    assert job["protocol_version"] == 2
     assert Path(job["project_path"]).is_absolute()
     assert Path(job["project_path"]).suffix == ".prproj"
-    assert [item["kind"] for item in job["media"]] == ["clip", "short"]
+    assert [item["kind"] for item in job["media"]] == [
+        "source",
+        "clip",
+        "short",
+    ]
     assert all(Path(item["path"]).is_absolute() for item in job["media"])
     assert all(Path(item["path"]).is_file() for item in job["media"])
-    assert job["media"][0]["sequence_name"].startswith(
-        f"ClipExtractor_{tmp_path.name}_clip_"
+    assert len(job["timelines"]) == 1
+    timeline = job["timelines"][0]
+    assert timeline["sequence_name"].startswith(
+        f"ClipExtractor_{tmp_path.name}_"
     )
-    assert job["media"][0]["sequence_name"].endswith(
-        "00m10s-00m40s_見どころ"
-    )
+    assert Path(timeline["source_path"]) == (tmp_path / "source.mp4").resolve()
+    assert [item["kind"] for item in timeline["overlays"]] == [
+        "clip",
+        "short",
+    ]
+    assert [item["video_track_index"] for item in timeline["overlays"]] == [
+        1,
+        2,
+    ]
+    assert [item["start_seconds"] for item in timeline["overlays"]] == [
+        10.0,
+        10.0,
+    ]
 
 
 def test_build_edit_job_can_exclude_shorts(tmp_path):
@@ -58,7 +86,22 @@ def test_build_edit_job_can_exclude_shorts(tmp_path):
 
     job = premiere_bridge.build_edit_job(session, include_shorts=False)
 
-    assert [item["kind"] for item in job["media"]] == ["clip"]
+    assert [item["kind"] for item in job["media"]] == ["source", "clip"]
+    assert [
+        item["video_track_index"]
+        for item in job["timelines"][0]["overlays"]
+    ] == [1]
+
+
+def test_build_edit_job_places_shorts_on_v2_when_no_normal_clips(tmp_path):
+    session = _rendered_session(tmp_path)
+    session["_premiere_output"]["clip_paths"] = []
+
+    job = premiere_bridge.build_edit_job(session, include_shorts=True)
+
+    assert [item["kind"] for item in job["media"]] == ["source", "short"]
+    assert job["timelines"][0]["overlays"][0]["kind"] == "short"
+    assert job["timelines"][0]["overlays"][0]["video_track_index"] == 1
 
 
 def test_build_edit_job_avoids_overwriting_existing_project(tmp_path):
@@ -270,6 +313,24 @@ def test_request_edit_starts_bridge_only_when_invoked(monkeypatch, tmp_path):
         bridge.stop()
 
 
+def test_request_edit_requires_updated_connected_plugin(monkeypatch, tmp_path):
+    bridge = premiere_bridge.PremiereBridgeServer(ports=(0,))
+    bridge.start()
+    bridge.record_heartbeat(
+        {"plugin_version": "1.0.0", "premiere_version": "26.3.0"}
+    )
+    monkeypatch.setattr(premiere_bridge, "_singleton_bridge", bridge)
+
+    try:
+        message = premiere_bridge.request_premiere_edit(_rendered_session(tmp_path))
+
+        assert "更新" in message
+        assert premiere_bridge.PLUGIN_VERSION in message
+        assert bridge.status_snapshot()["last_job"] is None
+    finally:
+        bridge.stop()
+
+
 def test_request_edit_does_not_queue_when_premiere_launch_fails(
     monkeypatch,
     tmp_path,
@@ -307,6 +368,7 @@ def test_package_plugin_creates_installable_ccx_with_minimal_permissions(tmp_pat
         manifest = json.loads(archive.read("manifest.json"))
 
     assert manifest["manifestVersion"] == 5
+    assert manifest["version"] == premiere_bridge.PLUGIN_VERSION
     assert manifest["host"] == {
         "app": "premierepro",
         "minVersion": "25.6.0",
@@ -316,6 +378,17 @@ def test_package_plugin_creates_installable_ccx_with_minimal_permissions(tmp_pat
     assert manifest["requiredPermissions"]["network"]["domains"] == [
         f"http://127.0.0.1:{port}" for port in premiere_bridge.DEFAULT_PORTS
     ]
+
+
+def test_plugin_uses_sequence_editor_for_v2_v3_timeline_overlays():
+    source = (premiere_bridge.PLUGIN_DIR / "index.js").read_text(encoding="utf-8")
+
+    assert 'job.action !== "create_timeline"' in source
+    assert "ppro.SequenceEditor.getEditor" in source
+    assert "ppro.TickTime.createWithSeconds" in source
+    assert "createOverwriteItemAction" in source
+    assert "video_track_index" in source
+    assert "project.lockedAccess" in source
 
 
 def test_explicit_premiere_executable_is_preferred(tmp_path):

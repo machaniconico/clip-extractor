@@ -9,7 +9,7 @@
   "num_clips": 5,
   "output_mode": "combined",
   "generate_shorts": false,
-  "shorts_mode": "crop",
+  "shorts_mode": "blur",
   "shorts_crop": "center",
   "shorts_title": true,
   "min_duration": 30,

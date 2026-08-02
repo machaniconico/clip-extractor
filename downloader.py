@@ -1,7 +1,8 @@
-"""YouTube video download using yt-dlp."""
+"""Remote video download using yt-dlp."""
 
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 TITLE_BYTE_LIMIT = 100
@@ -10,8 +11,36 @@ TITLE_BYTE_LIMIT = 100
 def is_youtube_url(input_path: str) -> bool:
     """Check if input is a YouTube URL."""
     return bool(re.match(
-        r'https?://(www\.)?(youtube\.com|youtu\.be)/', input_path
+        r'https?://(www\.)?(youtube\.com|youtu\.be)/',
+        str(input_path or "").strip(),
+        flags=re.IGNORECASE,
     ))
+
+
+_TWITCH_HOSTS = frozenset({"twitch.tv", "www.twitch.tv", "m.twitch.tv"})
+
+
+def is_twitch_url(input_path: str) -> bool:
+    """Check if input is a Twitch channel or VOD URL."""
+    try:
+        parsed = urlsplit(str(input_path or "").strip())
+    except ValueError:
+        return False
+    hostname = (parsed.hostname or "").lower()
+    return (
+        parsed.scheme.lower() in {"http", "https"}
+        and hostname in _TWITCH_HOSTS
+        and bool(parsed.path.strip("/"))
+    )
+
+
+def get_url_source(input_path: str) -> str | None:
+    """Return the supported remote source name, or ``None`` for local input."""
+    if is_youtube_url(input_path):
+        return "youtube"
+    if is_twitch_url(input_path):
+        return "twitch"
+    return None
 
 
 def build_output_template(output_dir: Path) -> str:
@@ -27,7 +56,7 @@ def build_output_template(output_dir: Path) -> str:
 
 
 def download_video(url: str, output_dir: Path) -> Path:
-    """Download YouTube video and return the local file path."""
+    """Download a supported remote video URL and return the local file path."""
     import yt_dlp
 
     output_dir.mkdir(parents=True, exist_ok=True)

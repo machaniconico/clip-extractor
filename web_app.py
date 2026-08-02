@@ -69,6 +69,7 @@ class ObsPipelineOutcome:
     error: str = ""
     output_dir: str = ""
     clip_paths: tuple[str, ...] = ()
+    shorts_paths: tuple[str, ...] = ()
     chapters_path: str = ""
     chapters_text: str = ""
     youtube_appended: bool | None = None
@@ -177,6 +178,27 @@ OBS_CONNECTION_DEFAULTS = {
     "obs_auto_process": True,
 }
 
+
+def _normalise_shorts_blur_strength(value) -> float:
+    try:
+        strength = float(value)
+    except (TypeError, ValueError):
+        strength = 20.0
+    if strength != strength:  # NaN
+        strength = 20.0
+    return min(50.0, max(0.0, strength))
+
+
+def _normalise_shorts_title_position(value) -> str:
+    position = str(value or "top")
+    return position if position in {"top", "bottom", "overlay"} else "top"
+
+
+def shorts_blur_visibility(mode: str):
+    """Only show blur strength when the blur background mode is selected."""
+    return gr.update(visible=mode == "blur")
+
+
 # Processing controls are kept in a separate profile for OBS automation.  The
 # archive/Input profile remains the top-level settings profile so users can tune
 # both workflows independently.  Older settings files do not have this nested
@@ -194,9 +216,11 @@ OBS_PROCESSING_DEFAULTS = {
     "max_duration": 90,
     "output_mode": "combined",
     "generate_shorts": False,
-    "shorts_mode": "crop",
+    "shorts_mode": "pad",
+    "shorts_blur_strength": 20,
     "shorts_crop": "center",
     "shorts_title": True,
+    "shorts_title_position": "top",
     "generate_thumbnails": False,
     "audio_fusion": False,
     "audio_alpha": 0.35,
@@ -250,6 +274,12 @@ def _normalise_obs_processing_settings(
         base["audio_alpha"] = float(base["audio_alpha"])
     except (TypeError, ValueError):
         base["audio_alpha"] = OBS_PROCESSING_DEFAULTS["audio_alpha"]
+    base["shorts_blur_strength"] = _normalise_shorts_blur_strength(
+        base["shorts_blur_strength"]
+    )
+    base["shorts_title_position"] = _normalise_shorts_title_position(
+        base["shorts_title_position"]
+    )
     return base
 
 
@@ -272,6 +302,8 @@ def _build_obs_processing_settings(
     audio_alpha,
     karaoke,
     confirm_before_auto_process=True,
+    shorts_blur_strength=20,
+    shorts_title_position="top",
 ) -> dict:
     """Build the OBS profile from the dedicated controls in the UI."""
     return _normalise_obs_processing_settings(
@@ -288,8 +320,10 @@ def _build_obs_processing_settings(
             "output_mode": output_mode,
             "generate_shorts": generate_shorts,
             "shorts_mode": shorts_mode,
+            "shorts_blur_strength": shorts_blur_strength,
             "shorts_crop": shorts_crop,
             "shorts_title": shorts_title,
+            "shorts_title_position": shorts_title_position,
             "generate_thumbnails": generate_thumbnails,
             "audio_fusion": audio_fusion,
             "audio_alpha": audio_alpha,
@@ -388,12 +422,14 @@ def load_defaults() -> dict:
         "auto_append_youtube": False,
         "num_clips": 5, "min_duration": 30, "max_duration": 90,
         "output_mode": "combined", "generate_shorts": False,
-        "shorts_mode": "crop", "shorts_crop": "center",
-        "shorts_title": True, "generate_thumbnails": False,
+        "shorts_mode": "pad", "shorts_crop": "center",
+        "shorts_blur_strength": 20,
+        "shorts_title": True, "shorts_title_position": "top",
+        "generate_thumbnails": False,
         "audio_fusion": False, "audio_alpha": 0.35,
         "karaoke": False,
         "whisper_model": "large-v3", "language": "ja",
-        "font_name": "Noto Sans JP Black", "font_size": 96, "font_color": "#FFFFFF",
+        "font_name": "Noto Sans JP", "font_size": 96, "font_color": "#FFFFFF",
         "output_base_dir": "",
         "premiere_executable_path": "",
         "obs_launch_on_startup": False,
@@ -407,6 +443,12 @@ def load_defaults() -> dict:
             defaults.update(saved)
         except Exception:
             pass
+    defaults["shorts_blur_strength"] = _normalise_shorts_blur_strength(
+        defaults.get("shorts_blur_strength", 20)
+    )
+    defaults["shorts_title_position"] = _normalise_shorts_title_position(
+        defaults.get("shorts_title_position", "top")
+    )
     # Secrets are loaded only inside start_obs_watch(). Returning one here can
     # expose it in Gradio's component configuration when the app is LAN-bound.
     defaults.pop("obs_password", None)
@@ -460,6 +502,8 @@ def save_defaults(ai_provider, ai_model,
                   generate_thumbnails=False,
                   audio_fusion=False, audio_alpha=0.35,
                   karaoke=False,
+                  shorts_blur_strength=20,
+                  shorts_title_position="top",
                   premiere_executable_path="",
                   obs_launch_on_startup=False,
                   obs_executable_path="",
@@ -480,7 +524,13 @@ def save_defaults(ai_provider, ai_model,
         "num_clips": int(num_clips),
         "output_mode": output_mode, "generate_shorts": bool(generate_shorts),
         "shorts_mode": shorts_mode, "shorts_crop": shorts_crop,
+        "shorts_blur_strength": _normalise_shorts_blur_strength(
+            shorts_blur_strength
+        ),
         "shorts_title": bool(shorts_title),
+        "shorts_title_position": _normalise_shorts_title_position(
+            shorts_title_position
+        ),
         "min_duration": int(min_duration), "max_duration": int(max_duration),
         "whisper_model": whisper_model, "language": language,
         "font_name": font_name, "font_size": int(font_size),
@@ -520,7 +570,9 @@ def save_obs_processing_defaults(
     audio_fusion,
     audio_alpha,
     karaoke,
-    confirm_before_auto_process=True,
+    auto_start_without_prompt_confirmation=False,
+    shorts_blur_strength=20,
+    shorts_title_position="top",
 ):
     """Persist the dedicated OBS processing profile without changing Input."""
     data = load_defaults()
@@ -543,13 +595,15 @@ def save_obs_processing_defaults(
         audio_fusion,
         audio_alpha,
         karaoke,
-        confirm_before_auto_process,
+        not bool(auto_start_without_prompt_confirmation),
+        shorts_blur_strength=shorts_blur_strength,
+        shorts_title_position=shorts_title_position,
     )
     SETTINGS_FILE.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    return "OBS用の切り抜き設定を保存しました"
+    return "OBS用の生成設定を保存しました"
 
 
 def resolve_output_base(user_text: str) -> Path:
@@ -675,13 +729,17 @@ def open_output_folder(current_base: str) -> None:
 
 
 from chapters import generate_chapter_text, write_chapter_file
-from downloader import download_video
+from downloader import download_video, get_url_source
 from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
 from audio_energy import fuse_audio_energy
 import clipper
 from clipper import extract_clips, generate_thumbnails as generate_thumbnail_candidates, get_video_info
-from subtitles import generate_all_karaoke_ass, generate_all_srts
+from subtitles import (
+    generate_all_karaoke_ass,
+    generate_all_short_title_srts,
+    generate_all_srts,
+)
 from premiere_xml import generate_combined_xml, generate_individual_xmls
 from premiere_bridge import (
     get_bridge_status_text,
@@ -933,6 +991,7 @@ def detect_phase(
     audio_fusion: bool,
     audio_alpha: float,
     output_base_dir: str,
+    generate_shorts: bool = False,
     progress=gr.Progress(),
 ):
     """Detection phase: validate, resolve input, transcribe, and find highlights."""
@@ -943,8 +1002,18 @@ def detect_phase(
         logs.append(msg)
 
     try:
+        input_value = str(input_url or "").strip()
+        source_kind = "local" if input_file is not None else (
+            get_url_source(input_value) or ("url" if input_value else "local")
+        )
+        if source_kind == "twitch":
+            # Twitch processing is video-output-only by design; there is no Twitch
+            # description target for the generated chapter text.
+            enable_chapters = False
+            chapter_prompt = ""
         modes = GenerationModes(
             enable_clips=bool(enable_clips),
+            enable_shorts=bool(generate_shorts),
             enable_chapters=bool(enable_chapters),
             clip_prompt=clip_prompt or "",
             chapter_prompt=chapter_prompt or "",
@@ -953,15 +1022,20 @@ def detect_phase(
             modes.validate()
         except ValueError as mode_err:
             return {}, f"Error: {mode_err}", gr.update(visible=False)
-        log(f"Modes: clips={modes.enable_clips}, chapters={modes.enable_chapters}")
+        log(
+            f"Modes: clips={modes.enable_clips}, shorts={modes.enable_shorts}, "
+            f"chapters={modes.enable_chapters}"
+        )
+        if source_kind == "twitch":
+            log("Twitch入力: タイムスタンプ生成とYouTube概要欄への追記をスキップ")
 
         base_dir = resolve_output_base(output_base_dir)
         output_dir = _create_output_dir(base_dir)
         log(f"Output base: {base_dir}")
 
         youtube_video_id: str | None = None
-        if input_url and input_url.strip():
-            youtube_video_id = youtube_api.extract_video_id(input_url.strip())
+        if source_kind == "youtube":
+            youtube_video_id = youtube_api.extract_video_id(input_value)
             if youtube_video_id:
                 log(f"YouTube video id: {youtube_video_id}")
 
@@ -978,9 +1052,9 @@ def detect_phase(
                 video_path = safe_dir / safe_name
                 shutil.copy2(original_path, video_path)
                 log(f"Copied to safe path: {video_path}")
-        elif input_url and input_url.strip():
+        elif input_value:
             progress(0.05, desc="Downloading video...")
-            video_path = download_video(input_url.strip(), output_dir / "source")
+            video_path = download_video(input_value, output_dir / "source")
             log(f"Downloaded: {video_path.name}")
         else:
             return (
@@ -1037,11 +1111,14 @@ def detect_phase(
             "video_info": video_info,
             "segments": segments,
             "highlights": highlights,
+            "source_kind": source_kind,
             "youtube_video_id": youtube_video_id,
             "enable_clips": modes.enable_clips,
+            "enable_shorts": modes.enable_shorts,
             "enable_chapters": modes.enable_chapters,
             "modes": {
                 "enable_clips": modes.enable_clips,
+                "enable_shorts": modes.enable_shorts,
                 "enable_chapters": modes.enable_chapters,
                 "clip_prompt": modes.clip_prompt,
                 "chapter_prompt": modes.chapter_prompt,
@@ -1093,6 +1170,8 @@ def render_phase(
     font_color: str,
     generate_thumbnails: bool,
     karaoke: bool,
+    shorts_blur_strength=20,
+    shorts_title_position: str = "top",
     progress=gr.Progress(),
 ):
     """Render phase: replay downstream output generation with edited highlights."""
@@ -1118,10 +1197,17 @@ def render_phase(
         segments = session["segments"]
         highlights = session["highlights"]
         youtube_video_id = session.get("youtube_video_id")
+        source_kind = str(session.get("source_kind") or "local")
         mode_data = session.get("modes") or {}
+        chapters_enabled = bool(
+            mode_data.get("enable_chapters", session.get("enable_chapters", True))
+        )
+        if source_kind == "twitch":
+            chapters_enabled = False
         modes = GenerationModes(
             enable_clips=bool(mode_data.get("enable_clips", session.get("enable_clips", True))),
-            enable_chapters=bool(mode_data.get("enable_chapters", session.get("enable_chapters", True))),
+            enable_shorts=bool(generate_shorts),
+            enable_chapters=chapters_enabled,
             clip_prompt=mode_data.get("clip_prompt", ""),
             chapter_prompt=mode_data.get("chapter_prompt", ""),
         )
@@ -1130,8 +1216,13 @@ def render_phase(
         except ValueError as mode_err:
             return ProcessResult(log=f"Error: {mode_err}").as_gradio_outputs()
 
+        if source_kind == "twitch" and auto_append_youtube:
+            log("Twitch入力ではタイムスタンプとYouTube概要欄への追記をスキップ")
+            auto_append_youtube = False
+
         obs_render_outcome = {
             "clip_paths": [],
+            "shorts_paths": [],
             "chapters_path": "",
             "chapters_text": "",
             "youtube_append_requested": bool(auto_append_youtube),
@@ -1170,14 +1261,17 @@ def render_phase(
         srt_paths: list[Path] = []
         shorts_paths: list[Path] = []
         shorts_srt_paths: list[Path] = []
+        shorts_title_srt_paths: list[Path] = []
         shorts_ass_paths: list[Path] = []
         thumbnail_paths: list[Path] = []
         xml_paths: list[Path] = []
 
+        clips_dir = output_dir / "clips"
+        shorts_dir = output_dir / "shorts"
+
         if modes.enable_clips:
             progress(0.6, desc="[Step 4/6] Extracting clips...")
             log("[Step 4/6] Extracting clips...")
-            clips_dir = output_dir / "clips"
             clip_paths = extract_clips(video_path, highlights, clips_dir)
             obs_render_outcome["clip_paths"] = [str(path) for path in clip_paths]
             log(f"  Extracted {len(clip_paths)} clips")
@@ -1187,97 +1281,126 @@ def render_phase(
             srt_paths = generate_all_srts(segments, highlights, clips_dir)
             log(f"  Generated {len(srt_paths)} SRT files")
 
-            if generate_shorts:
-                progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
-                shorts_dir = output_dir / "shorts"
-                shorts_dir.mkdir(parents=True, exist_ok=True)
-                if karaoke:
-                    shorts_ass_paths = generate_all_karaoke_ass(
-                        segments, highlights, shorts_dir, font_config,
-                    )
-                else:
-                    shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
-                shorts_paths = extract_clips(
+        if modes.enable_shorts:
+            progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
+            shorts_dir.mkdir(parents=True, exist_ok=True)
+            shorts_srt_paths = generate_all_srts(
+                segments,
+                highlights,
+                shorts_dir,
+                shorts=True,
+            )
+            shorts_title_srt_paths = generate_all_short_title_srts(
+                highlights,
+                shorts_dir,
+            )
+            if karaoke:
+                shorts_ass_paths = generate_all_karaoke_ass(
+                    segments, highlights, shorts_dir, font_config,
+                )
+            shorts_paths = extract_clips(
+                video_path, highlights, shorts_dir,
+                shorts=True,
+                srt_paths=shorts_srt_paths,
+                karaoke=bool(karaoke),
+                ass_paths=shorts_ass_paths,
+                font_config=font_config,
+                crop_x=shorts_crop,
+                shorts_mode=shorts_mode,
+                shorts_blur_strength=shorts_blur_strength,
+                shorts_title=shorts_title,
+                shorts_title_position=shorts_title_position,
+            )
+            obs_render_outcome["shorts_paths"] = [str(path) for path in shorts_paths]
+            obs_render_outcome["shorts_srt_paths"] = [
+                str(path) for path in shorts_srt_paths
+            ]
+            obs_render_outcome["shorts_title_srt_paths"] = [
+                str(path) for path in shorts_title_srt_paths
+            ]
+            subtitle_kind = "ASS karaoke" if karaoke else "SRT"
+            log(f"  Generated {len(shorts_paths)} shorts with {subtitle_kind} subtitles ({font_config.font_name} @ {font_config.font_size}pt)")
+            log(
+                "  Generated "
+                f"{len(shorts_srt_paths) + len(shorts_title_srt_paths)} "
+                "editable Short SRT files (archive + title)"
+            )
+
+        if generate_thumbnails and (modes.enable_clips or modes.enable_shorts):
+            progress(0.8, desc="Generating thumbnail candidates...")
+            if modes.enable_shorts:
+                thumbnail_paths = generate_thumbnail_candidates(
                     video_path, highlights, shorts_dir,
-                    shorts=True,
-                    srt_paths=shorts_srt_paths,
-                    karaoke=bool(karaoke),
-                    ass_paths=shorts_ass_paths,
-                    font_config=font_config,
+                    vertical=True,
                     crop_x=shorts_crop,
                     shorts_mode=shorts_mode,
-                    shorts_title=shorts_title,
+                    shorts_blur_strength=shorts_blur_strength,
+                    shorts_title_position=shorts_title_position,
+                    font_config=font_config,
                 )
-                subtitle_kind = "ASS karaoke" if karaoke else "SRT"
-                log(f"  Generated {len(shorts_paths)} shorts with {subtitle_kind} subtitles ({font_config.font_name} @ {font_config.font_size}pt)")
+                log(f"  Generated {len(thumbnail_paths)} vertical thumbnail candidates")
+            else:
+                thumbnail_paths = generate_thumbnail_candidates(
+                    video_path, highlights, clips_dir,
+                    font_config=font_config,
+                )
+                log(f"  Generated {len(thumbnail_paths)} thumbnail candidates")
 
-            if generate_thumbnails:
-                progress(0.8, desc="Generating thumbnail candidates...")
-                if generate_shorts:
-                    thumbnail_dir = output_dir / "shorts"
-                    thumbnail_paths = generate_thumbnail_candidates(
-                        video_path, highlights, thumbnail_dir,
-                        vertical=True,
-                        crop_x=shorts_crop,
-                        shorts_mode=shorts_mode,
-                        font_config=font_config,
-                    )
-                    log(f"  Generated {len(thumbnail_paths)} vertical thumbnail candidates")
-                else:
-                    thumbnail_paths = generate_thumbnail_candidates(
-                        video_path, highlights, clips_dir,
-                        font_config=font_config,
-                    )
-                    log(f"  Generated {len(thumbnail_paths)} thumbnail candidates")
-
+        if clip_paths or shorts_paths:
             progress(0.85, desc="[Step 6/6] Exporting XML...")
             log("[Step 6/6] Exporting Premiere Pro XML...")
             if output_mode == "combined":
-                xml_path = output_dir / "project.xml"
                 xml_paths.append(
                     generate_combined_xml(
-                        clip_paths, highlights, video_info, xml_path,
+                        clip_paths,
+                        highlights,
+                        video_info,
+                        output_dir / "project.xml",
                         project_name=video_path.stem,
+                        source_video_path=video_path,
+                        shorts_paths=shorts_paths,
                     )
                 )
-                if generate_shorts and shorts_paths:
-                    shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                    xml_paths.append(
-                        generate_combined_xml(
-                            shorts_paths, highlights, shorts_video_info,
-                            output_dir / "project_shorts.xml",
-                            project_name=f"{video_path.stem}_shorts",
-                        )
-                    )
                 log("  Premiere Pro XML (combined mode) exported")
             else:
                 xml_paths.extend(
                     generate_individual_xmls(
-                        clip_paths, highlights, video_info, clips_dir,
+                        clip_paths,
+                        highlights,
+                        video_info,
+                        clips_dir if clip_paths else shorts_dir,
+                        source_video_path=video_path,
+                        shorts_paths=shorts_paths,
                     )
                 )
-                if generate_shorts and shorts_paths:
-                    shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                    xml_paths.extend(
-                        generate_individual_xmls(
-                            shorts_paths, highlights,
-                            shorts_video_info, output_dir / "shorts",
-                        )
-                    )
                 log("  Premiere Pro XML (individual mode) exported")
 
-            if clip_paths:
-                premiere_output = {
-                    "output_dir": str(output_dir.resolve()),
-                    "project_name": video_path.stem,
-                    "clip_paths": [str(path.resolve()) for path in clip_paths],
-                    "shorts_paths": [str(path.resolve()) for path in shorts_paths],
-                    "srt_paths": [str(path.resolve()) for path in srt_paths],
-                    "xml_paths": [str(path.resolve()) for path in xml_paths],
-                }
-                session["_premiere_output"] = premiere_output
-        else:
-            log("[Skip 4-6] Clip generation disabled — chapters-only run")
+            premiere_output = {
+                "output_dir": str(output_dir.resolve()),
+                "project_name": video_path.stem,
+                "source_path": str(video_path.resolve()),
+                "clip_paths": [str(path.resolve()) for path in clip_paths],
+                "shorts_paths": [str(path.resolve()) for path in shorts_paths],
+                "srt_paths": [str(path.resolve()) for path in srt_paths],
+                "shorts_srt_paths": [
+                    str(path.resolve()) for path in shorts_srt_paths
+                ],
+                "shorts_title_srt_paths": [
+                    str(path.resolve()) for path in shorts_title_srt_paths
+                ],
+                "xml_paths": [str(path.resolve()) for path in xml_paths],
+                "highlights": [
+                    {
+                        "title": str(highlight.get("title") or ""),
+                        "start_sec": float(highlight["start_sec"]),
+                        "end_sec": float(highlight["end_sec"]),
+                    }
+                    for highlight in highlights
+                ],
+            }
+            session["_premiere_output"] = premiere_output
+        elif not modes.enable_clips and not modes.enable_shorts:
+            log("[Skip 4-6] Video generation disabled — chapters-only run")
 
         drive_link = ""
         if upload_to_drive:
@@ -1373,6 +1496,8 @@ def maybe_render_phase(
     font_color: str,
     generate_thumbnails: bool,
     karaoke: bool,
+    shorts_blur_strength=20,
+    shorts_title_position: str = "top",
     progress=gr.Progress(),
 ):
     """Chain STEP 2 right after STEP 1 when the 'run both' checkbox is on.
@@ -1401,6 +1526,8 @@ def maybe_render_phase(
         font_color,
         generate_thumbnails,
         karaoke,
+        shorts_blur_strength=shorts_blur_strength,
+        shorts_title_position=shorts_title_position,
         progress=progress,
     )
 
@@ -1444,7 +1571,6 @@ _obs_status_lock = threading.Lock()
 _obs_confirmation_lock = threading.Lock()
 _obs_pending_confirmation: dict | None = None
 _OBS_STATUS_MAX = 80
-_OBS_CONFIRMATION_TIMEOUT = 15 * 60
 _OBS_ARCHIVE_DISCOVERY_TIMEOUT = 15 * 60
 _OBS_ARCHIVE_READY_TIMEOUT = 6 * 60 * 60
 _OBS_RECORDING_EVENT_TIMEOUT = 60
@@ -1571,42 +1697,103 @@ def _obs_effective_prompt(settings: dict) -> str:
     return ""
 
 
-def _obs_confirmation_poll() -> tuple:
+def _obs_apply_effective_prompt(settings: dict, prompt: str) -> None:
+    """Apply a one-run prompt to the generation mode that drives detection."""
+    prompt_text = str(prompt or "").strip()
+    if bool(settings.get("enable_clips", True)):
+        settings["clip_prompt"] = prompt_text
+    elif bool(settings.get("enable_chapters", True)):
+        settings["chapter_prompt"] = prompt_text
+
+
+def _obs_confirmation_message(request: dict) -> str:
+    message = str(request.get("message", "") or "")
+    validation_error = str(request.get("validation_error", "") or "")
+    if validation_error:
+        message += f"\n\n**{validation_error}**"
+    return message
+
+
+def _obs_confirmation_poll(seen_request_token: str = "") -> tuple:
     """Return the pending confirmation panel state for the Gradio timer."""
     with _obs_confirmation_lock:
-        request = dict(_obs_pending_confirmation or {})
-    if not request:
-        return gr.update(visible=False), ""
-    return gr.update(visible=True), request.get("message", "")
+        request = _obs_pending_confirmation
+        if request is None:
+            return gr.update(visible=False), "", gr.update(value=""), ""
+        message = _obs_confirmation_message(request)
+        request_token = str(request.get("token", "") or "")
+        if seen_request_token == request_token:
+            prompt_update = gr.update()
+        else:
+            prompt_update = gr.update(value=request.get("initial_prompt", ""))
+    return gr.update(visible=True), message, prompt_update, request_token
 
 
-def _obs_resolve_confirmation(approved: bool) -> bool:
-    """Resolve the current user confirmation from a Gradio button event."""
+def _obs_resolve_confirmation_action(action: str, prompt: str = "") -> bool:
+    """Resolve the pending confirmation with one of the three UI actions."""
+    valid_actions = {"start_as_is", "start_with_prompt", "skip"}
+    if action not in valid_actions:
+        return False
+
+    prompt_text = str(prompt or "").strip()
     with _obs_confirmation_lock:
         request = _obs_pending_confirmation
         if request is None or request.get("decision") is not None:
             return False
-        request["decision"] = bool(approved)
+        if action == "start_with_prompt" and not prompt_text:
+            request["validation_error"] = "プロンプトを入力してください。"
+            return False
+        request["validation_error"] = ""
+        request["decision"] = action
+        request["prompt"] = prompt_text if action == "start_with_prompt" else None
         request["event"].set()
     return True
 
 
-def _obs_confirmation_button_result(approved: bool) -> tuple:
-    resolved = _obs_resolve_confirmation(approved)
+def _obs_resolve_confirmation(approved: bool) -> bool:
+    """Backward-compatible boolean resolver used by non-UI callers and tests."""
+    action = "start_as_is" if approved else "skip"
+    return _obs_resolve_confirmation_action(action)
+
+
+def _obs_confirmation_button_result(action: str, prompt: str = "") -> tuple:
+    resolved = _obs_resolve_confirmation_action(action, prompt)
     if resolved:
+        action_labels = {
+            "start_as_is": "そのまま生成を開始します",
+            "start_with_prompt": "入力したプロンプトで生成を開始します",
+            "skip": "今回は生成しません",
+        }
         _obs_append_status(
-            "自動生成の確認を受け付けました: "
-            + ("生成を開始します" if approved else "今回はスキップします")
+            "自動生成の選択を受け付けました: " + action_labels[action]
         )
-    return gr.update(visible=False), "", _obs_status_text()
+        return (
+            gr.update(visible=False),
+            "",
+            gr.update(value=""),
+            _obs_status_text(),
+        )
+    with _obs_confirmation_lock:
+        request = _obs_pending_confirmation
+        if request is None:
+            panel_update = gr.update(visible=False)
+            message = ""
+        else:
+            panel_update = gr.update(visible=True)
+            message = _obs_confirmation_message(request)
+    return panel_update, message, gr.update(), _obs_status_text()
 
 
 def _obs_confirm_generation() -> tuple:
-    return _obs_confirmation_button_result(True)
+    return _obs_confirmation_button_result("start_as_is")
+
+
+def _obs_confirm_generation_with_prompt(prompt: str) -> tuple:
+    return _obs_confirmation_button_result("start_with_prompt", prompt)
 
 
 def _obs_skip_generation() -> tuple:
-    return _obs_confirmation_button_result(False)
+    return _obs_confirmation_button_result("skip")
 
 
 def _obs_cancel_pending_confirmation() -> None:
@@ -1614,7 +1801,7 @@ def _obs_cancel_pending_confirmation() -> None:
     with _obs_confirmation_lock:
         request = _obs_pending_confirmation
         if request is not None and request.get("decision") is None:
-            request["decision"] = False
+            request["decision"] = "skip"
             request["event"].set()
 
 
@@ -1623,23 +1810,27 @@ def _obs_confirm_before_auto_process(
     source_label: str,
     is_current: Callable[[], bool],
 ) -> bool:
-    """Wait for confirmation when enabled and the effective prompt is empty.
+    """Wait indefinitely for the post-stream generation choice when enabled.
 
     The watcher runs outside a Gradio request, so confirmation is represented by
-    a small shared request that the UI timer renders and the two buttons resolve.
-    A timeout or watcher stop is fail-closed and skips generation.
+    a small shared request that the UI timer renders and the three buttons resolve.
+    A watcher stop is fail-closed and skips generation. User confirmation has
+    no deadline; the short event wait only keeps cancellation responsive.
     """
     if not bool(settings.get("confirm_before_auto_process", False)):
-        return True
-    if _obs_effective_prompt(settings):
         return True
 
     request = {
         "event": threading.Event(),
+        "token": uuid.uuid4().hex,
         "decision": None,
+        "prompt": None,
+        "initial_prompt": _obs_effective_prompt(settings),
+        "validation_error": "",
         "message": (
-            "### 自動生成の確認\n\n"
-            "プロンプトが未入力です。このまま自動生成を開始してもよろしいですか？\n\n"
+            "### 配信終了後の生成\n\n"
+            "生成方法を選んでください。プロンプトを変更する場合は入力欄を使います。"
+            "この確認は選択するまでタイムアウトしません。\n\n"
             f"対象: `{source_label}`"
         ),
     }
@@ -1649,10 +1840,9 @@ def _obs_confirm_before_auto_process(
             _obs_append_status("別の自動生成確認が処理中のため、この処理をスキップしました")
             return False
         _obs_pending_confirmation = request
-    _obs_append_status("プロンプト未入力のため、自動生成の確認を待っています")
+    _obs_append_status("配信終了後の生成方法の選択を待っています（タイムアウトなし）")
 
-    deadline = time.monotonic() + _OBS_CONFIRMATION_TIMEOUT
-    while is_current() and time.monotonic() < deadline:
+    while is_current():
         if request["event"].wait(timeout=0.25):
             break
 
@@ -1663,12 +1853,10 @@ def _obs_confirm_before_auto_process(
 
     if not is_current():
         return False
-    if decision is True:
+    if decision == "start_with_prompt":
+        _obs_apply_effective_prompt(settings, request.get("prompt", ""))
         return True
-    if decision is False:
-        return False
-    _obs_append_status("自動生成の確認がタイムアウトしたため、今回はスキップしました")
-    return False
+    return decision == "start_as_is"
 
 
 def _register_obs_worker(t: threading.Thread) -> None:
@@ -1726,8 +1914,10 @@ def _run_obs_detect_render(
     try:
         s = dict(settings)  # shallow copy; we only read
         clips_enabled = bool(s.get("enable_clips", True))
+        shorts_enabled = bool(s.get("generate_shorts", False))
         chapters_enabled = bool(s.get("enable_chapters", True))
         s["enable_clips"] = clips_enabled
+        s["generate_shorts"] = shorts_enabled
         s["enable_chapters"] = chapters_enabled
         if bool(s.get("auto_append_youtube", False)) and not chapters_enabled:
             # A description can only receive generated timestamp text.  Keep
@@ -1756,6 +1946,7 @@ def _run_obs_detect_render(
             bool(s.get("audio_fusion", False)),
             _coerce_float(s.get("audio_alpha", 0.35), 0.35),
             s.get("output_base_dir", ""),
+            bool(s.get("generate_shorts", False)),
             progress=progress,
         )
         # detect_phase returns (session, status_md, review_panel_update)
@@ -1776,17 +1967,23 @@ def _run_obs_detect_render(
             session,
             s.get("output_mode", "combined"),
             bool(s.get("generate_shorts", False)),
-            s.get("shorts_mode", "crop"),
+            s.get("shorts_mode", "pad"),
             s.get("shorts_crop", "center"),
             bool(s.get("shorts_title", True)),
             False,  # generate_zip — 自動処理では ZIP を作らない
             False,  # upload_to_drive — 自動処理では Drive 投稿しない
             bool(s.get("auto_append_youtube", False)),
-            s.get("font_name", "Noto Sans JP Black"),
+            s.get("font_name", "Noto Sans JP"),
             _coerce_int(s.get("font_size", 96), 96),
             s.get("font_color", "#FFFFFF"),
             bool(s.get("generate_thumbnails", False)),
             bool(s.get("karaoke", False)),
+            shorts_blur_strength=_normalise_shorts_blur_strength(
+                s.get("shorts_blur_strength", 20)
+            ),
+            shorts_title_position=_normalise_shorts_title_position(
+                s.get("shorts_title_position", "top")
+            ),
             progress=progress,
         )
         # render_phase returns ProcessResult.as_gradio_outputs() = (log, highlights, dl, drive, chapters)
@@ -1802,6 +1999,7 @@ def _run_obs_detect_render(
 
         render_outcome = session.get("_obs_render_outcome") or {}
         clip_paths = tuple(str(path) for path in render_outcome.get("clip_paths", []))
+        shorts_paths = tuple(str(path) for path in render_outcome.get("shorts_paths", []))
         chapters_path = str(render_outcome.get("chapters_path", ""))
         chapters_text = str(
             render_outcome.get("chapters_text", "")
@@ -1820,6 +2018,14 @@ def _run_obs_detect_render(
                 for path in clip_files
             ):
                 output_errors.append("切り抜きファイルを確認できませんでした")
+
+        if bool(s.get("generate_shorts", False)):
+            short_files = [Path(path) for path in shorts_paths]
+            if not short_files or any(
+                not path.is_file() or path.stat().st_size <= 0
+                for path in short_files
+            ):
+                output_errors.append("ショート動画ファイルを確認できませんでした")
 
         if bool(s.get("enable_chapters", True)):
             chapter_file = Path(chapters_path) if chapters_path else None
@@ -1843,6 +2049,7 @@ def _run_obs_detect_render(
                 error=error,
                 output_dir=str(session.get("output_dir", "")),
                 clip_paths=clip_paths,
+                shorts_paths=shorts_paths,
                 chapters_path=chapters_path,
                 chapters_text=chapters_text,
                 youtube_appended=youtube_appended,
@@ -1854,6 +2061,7 @@ def _run_obs_detect_render(
             success=True,
             output_dir=str(session.get("output_dir", "")),
             clip_paths=clip_paths,
+            shorts_paths=shorts_paths,
             chapters_path=chapters_path,
             chapters_text=chapters_text,
             youtube_appended=youtube_appended,
@@ -2184,6 +2392,7 @@ def _obs_make_stream_pipeline_callbacks(
             "recording_path": "",
             "recording_outcome": None,
             "confirmation_decision": None,
+            "processing_settings": None,
             "source_claim": None,
         }
 
@@ -2272,8 +2481,9 @@ def _obs_make_stream_pipeline_callbacks(
             try:
                 if not _is_current():
                     return
+                local_settings = dict(settings)
                 if not _obs_confirm_before_auto_process(
-                    settings,
+                    local_settings,
                     str(video_path),
                     _is_current,
                 ):
@@ -2289,7 +2499,7 @@ def _obs_make_stream_pipeline_callbacks(
                     return
                 with state_lock:
                     stream_state["confirmation_decision"] = "approved"
-                local_settings = dict(settings)
+                    stream_state["processing_settings"] = dict(local_settings)
                 # A local path cannot identify the matching YouTube video.
                 # The stream-finish worker applies these chapters once the
                 # broadcast ID is known.
@@ -2499,6 +2709,7 @@ def _obs_make_stream_pipeline_callbacks(
                     confirmation_decision = stream_state.get(
                         "confirmation_decision"
                     )
+                    processing_settings = stream_state.get("processing_settings")
                 if confirmation_decision == "skipped":
                     with state_lock:
                         state["completed_epochs"].add(epoch)
@@ -2507,8 +2718,9 @@ def _obs_make_stream_pipeline_callbacks(
                     )
                     return
                 if confirmation_decision != "approved":
+                    processing_settings = dict(settings)
                     if not _obs_confirm_before_auto_process(
-                        settings,
+                        processing_settings,
                         "YouTube完成アーカイブ",
                         _is_current,
                     ):
@@ -2521,6 +2733,11 @@ def _obs_make_stream_pipeline_callbacks(
                         return
                     with state_lock:
                         stream_state["confirmation_decision"] = "approved"
+                        stream_state["processing_settings"] = dict(
+                            processing_settings
+                        )
+
+                effective_settings = dict(processing_settings or settings)
 
                 while not archive_pipeline_lock.acquire(timeout=0.25):
                     if not _is_current():
@@ -2658,7 +2875,7 @@ def _obs_make_stream_pipeline_callbacks(
                     )
                     return
 
-                archive_settings = dict(settings)
+                archive_settings = effective_settings
                 if recording_primary:
                     archive_settings["auto_append_youtube"] = bool(
                         archive_settings.get("enable_chapters", True)
@@ -2815,8 +3032,9 @@ def _obs_make_callback(
             try:
                 if not _is_current():
                     return
+                local_settings = dict(settings)
                 if not _obs_confirm_before_auto_process(
-                    settings,
+                    local_settings,
                     str(video_path),
                     _is_current,
                 ):
@@ -2826,7 +3044,7 @@ def _obs_make_callback(
                         )
                     return
                 _obs_append_status(f"自動パイプライン開始: {video_path}")
-                outcome = _run_obs_auto_pipeline_outcome(video_path, settings)
+                outcome = _run_obs_auto_pipeline_outcome(video_path, local_settings)
                 _obs_append_status(outcome.log)
                 if not outcome.success:
                     raise RuntimeError(outcome.error or outcome.log)
@@ -2941,6 +3159,7 @@ def _start_obs_watch_impl(
     try:
         GenerationModes(
             enable_clips=bool(obs_profile.get("enable_clips", True)),
+            enable_shorts=bool(obs_profile.get("generate_shorts", False)),
             enable_chapters=bool(obs_profile.get("enable_chapters", True)),
         ).validate()
     except ValueError as mode_err:
@@ -3145,7 +3364,9 @@ def start_obs_watch(
     obs_audio_fusion=None,
     obs_audio_alpha=None,
     obs_karaoke=None,
-    obs_confirm_before_auto_process=None,
+    obs_auto_start_without_prompt_confirmation=None,
+    obs_shorts_blur_strength=None,
+    obs_shorts_title_position=None,
 ) -> str:
     """Manually (re)start OBS integration from the Gradio controls.
 
@@ -3171,7 +3392,9 @@ def start_obs_watch(
             obs_audio_fusion,
             obs_audio_alpha,
             obs_karaoke,
-            obs_confirm_before_auto_process,
+            obs_auto_start_without_prompt_confirmation,
+            obs_shorts_blur_strength,
+            obs_shorts_title_position,
         )
     ):
         obs_processing_settings = _build_obs_processing_settings(
@@ -3192,7 +3415,9 @@ def start_obs_watch(
             obs_audio_fusion,
             obs_audio_alpha,
             obs_karaoke,
-            obs_confirm_before_auto_process,
+            not bool(obs_auto_start_without_prompt_confirmation),
+            shorts_blur_strength=obs_shorts_blur_strength,
+            shorts_title_position=obs_shorts_title_position,
         )
     with _obs_start_lock:
         return _start_obs_watch_impl(
@@ -3443,9 +3668,17 @@ def _legacy_one_shot_handler(
         logs.append(msg)
 
     try:
+        input_value = str(input_url or "").strip()
+        source_kind = "local" if input_file is not None else (
+            get_url_source(input_value) or ("url" if input_value else "local")
+        )
+        if source_kind == "twitch":
+            enable_chapters = False
+            chapter_prompt = ""
         # Validate generation modes — at least one must be enabled
         modes = GenerationModes(
             enable_clips=bool(enable_clips),
+            enable_shorts=bool(generate_shorts),
             enable_chapters=bool(enable_chapters),
             clip_prompt=clip_prompt or "",
             chapter_prompt=chapter_prompt or "",
@@ -3454,12 +3687,17 @@ def _legacy_one_shot_handler(
             modes.validate()
         except ValueError as mode_err:
             return ProcessResult(log=f"Error: {mode_err}").as_gradio_outputs()
-        log(f"Modes: clips={modes.enable_clips}, chapters={modes.enable_chapters}")
+        log(
+            f"Modes: clips={modes.enable_clips}, shorts={modes.enable_shorts}, "
+            f"chapters={modes.enable_chapters}"
+        )
+        if source_kind == "twitch":
+            log("Twitch入力: タイムスタンプ生成とYouTube概要欄への追記をスキップ")
 
         # Pre-validate YouTube auth before starting the heavy pipeline.
         # We only want to discover an auth problem AFTER download/transcribe
         # when the user explicitly asked for the auto-append step.
-        if auto_append_youtube:
+        if auto_append_youtube and source_kind != "twitch":
             yt_status = youtube_api.check_auth_status()
             if not yt_status["configured"]:
                 return ProcessResult(
@@ -3494,8 +3732,8 @@ def _legacy_one_shot_handler(
         # Capture the source video ID (only meaningful for YouTube URL input).
         # We use this later for the optional auto-append-to-YouTube step.
         youtube_video_id: str | None = None
-        if input_url and input_url.strip():
-            youtube_video_id = youtube_api.extract_video_id(input_url.strip())
+        if source_kind == "youtube":
+            youtube_video_id = youtube_api.extract_video_id(input_value)
             if youtube_video_id:
                 log(f"YouTube video id: {youtube_video_id}")
 
@@ -3514,9 +3752,9 @@ def _legacy_one_shot_handler(
                 video_path = safe_dir / safe_name
                 shutil.copy2(original_path, video_path)
                 log(f"Copied to safe path: {video_path}")
-        elif input_url and input_url.strip():
+        elif input_value:
             progress(0.05, desc="Downloading video...")
-            video_path = download_video(input_url.strip(), output_dir / "source")
+            video_path = download_video(input_value, output_dir / "source")
             log(f"Downloaded: {video_path.name}")
         else:
             return ProcessResult(
@@ -3579,21 +3817,23 @@ def _legacy_one_shot_handler(
 
         log(f"  Found {len(highlights)} highlights")
 
-        # Steps 4–6 are the clip pipeline (extract → SRT → Shorts → XML).
-        # When clip generation is disabled, we still keep the earlier highlight
-        # detection result so Step 7 (chapters) can use it.
+        # Steps 4–6 produce normal clips and Shorts independently, then XML.
+        # A chapters-only run still keeps the earlier highlight detection result.
         clip_paths: list[Path] = []
         srt_paths: list[Path] = []
         shorts_paths: list[Path] = []
         shorts_srt_paths: list[Path] = []
+        shorts_title_srt_paths: list[Path] = []
         shorts_ass_paths: list[Path] = []
         thumbnail_paths: list[Path] = []
+
+        clips_dir = output_dir / "clips"
+        shorts_dir = output_dir / "shorts"
 
         if modes.enable_clips:
             # Step 4: Extract clips (normal landscape, no burn-in — Premiere edits SRT separately)
             progress(0.6, desc="[Step 4/6] Extracting clips...")
             log("[Step 4/6] Extracting clips...")
-            clips_dir = output_dir / "clips"
             clip_paths = extract_clips(video_path, highlights, clips_dir)
             log(f"  Extracted {len(clip_paths)} clips")
 
@@ -3603,80 +3843,88 @@ def _legacy_one_shot_handler(
             srt_paths = generate_all_srts(segments, highlights, clips_dir)
             log(f"  Generated {len(srt_paths)} SRT files")
 
-            # Shorts (9:16) — generate subtitle assets first, then burn in.
-            if generate_shorts:
-                progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
-                shorts_dir = output_dir / "shorts"
-                shorts_dir.mkdir(parents=True, exist_ok=True)
-                if karaoke:
-                    shorts_ass_paths = generate_all_karaoke_ass(
-                        segments, highlights, shorts_dir, font_config,
-                    )
-                else:
-                    shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
-                shorts_paths = extract_clips(
+        # Shorts (9:16) are independent from normal clip output.
+        if modes.enable_shorts:
+            progress(0.75, desc="Generating shorts (9:16) with burned-in subtitles...")
+            shorts_dir.mkdir(parents=True, exist_ok=True)
+            shorts_srt_paths = generate_all_srts(
+                segments,
+                highlights,
+                shorts_dir,
+                shorts=True,
+            )
+            shorts_title_srt_paths = generate_all_short_title_srts(
+                highlights,
+                shorts_dir,
+            )
+            if karaoke:
+                shorts_ass_paths = generate_all_karaoke_ass(
+                    segments, highlights, shorts_dir, font_config,
+                )
+            shorts_paths = extract_clips(
+                video_path, highlights, shorts_dir,
+                shorts=True,
+                srt_paths=shorts_srt_paths,
+                karaoke=bool(karaoke),
+                ass_paths=shorts_ass_paths,
+                font_config=font_config,
+                crop_x=shorts_crop,
+                shorts_mode=shorts_mode,
+                shorts_title=shorts_title,
+            )
+            subtitle_kind = "ASS karaoke" if karaoke else "SRT"
+            log(f"  Generated {len(shorts_paths)} shorts with {subtitle_kind} subtitles ({font_config.font_name} @ {font_config.font_size}pt)")
+            log(
+                "  Generated "
+                f"{len(shorts_srt_paths) + len(shorts_title_srt_paths)} "
+                "editable Short SRT files (archive + title)"
+            )
+
+        if generate_thumbnails and (modes.enable_clips or modes.enable_shorts):
+            progress(0.8, desc="Generating thumbnail candidates...")
+            if modes.enable_shorts:
+                thumbnail_paths = generate_thumbnail_candidates(
                     video_path, highlights, shorts_dir,
-                    shorts=True,
-                    srt_paths=shorts_srt_paths,
-                    karaoke=bool(karaoke),
-                    ass_paths=shorts_ass_paths,
-                    font_config=font_config,
+                    vertical=True,
                     crop_x=shorts_crop,
                     shorts_mode=shorts_mode,
-                    shorts_title=shorts_title,
+                    font_config=font_config,
                 )
-                subtitle_kind = "ASS karaoke" if karaoke else "SRT"
-                log(f"  Generated {len(shorts_paths)} shorts with {subtitle_kind} subtitles ({font_config.font_name} @ {font_config.font_size}pt)")
+                log(f"  Generated {len(thumbnail_paths)} vertical thumbnail candidates")
+            else:
+                thumbnail_paths = generate_thumbnail_candidates(
+                    video_path, highlights, clips_dir,
+                    font_config=font_config,
+                )
+                log(f"  Generated {len(thumbnail_paths)} thumbnail candidates")
 
-            if generate_thumbnails:
-                progress(0.8, desc="Generating thumbnail candidates...")
-                if generate_shorts:
-                    thumbnail_dir = output_dir / "shorts"
-                    thumbnail_paths = generate_thumbnail_candidates(
-                        video_path, highlights, thumbnail_dir,
-                        vertical=True,
-                        crop_x=shorts_crop,
-                        shorts_mode=shorts_mode,
-                        font_config=font_config,
-                    )
-                    log(f"  Generated {len(thumbnail_paths)} vertical thumbnail candidates")
-                else:
-                    thumbnail_paths = generate_thumbnail_candidates(
-                        video_path, highlights, clips_dir,
-                        font_config=font_config,
-                    )
-                    log(f"  Generated {len(thumbnail_paths)} thumbnail candidates")
-
+        if clip_paths or shorts_paths:
             # Step 6: Premiere Pro XML
             progress(0.85, desc="[Step 6/6] Exporting XML...")
             log("[Step 6/6] Exporting Premiere Pro XML...")
             if output_mode == "combined":
-                xml_path = output_dir / "project.xml"
                 generate_combined_xml(
-                    clip_paths, highlights, video_info, xml_path,
+                    clip_paths,
+                    highlights,
+                    video_info,
+                    output_dir / "project.xml",
                     project_name=video_path.stem,
+                    source_video_path=video_path,
+                    shorts_paths=shorts_paths,
                 )
-                if generate_shorts and shorts_paths:
-                    shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                    generate_combined_xml(
-                        shorts_paths, highlights, shorts_video_info,
-                        output_dir / "project_shorts.xml",
-                        project_name=f"{video_path.stem}_shorts",
-                    )
                 log("  Premiere Pro XML (combined mode) exported")
             else:
                 generate_individual_xmls(
-                    clip_paths, highlights, video_info, clips_dir,
+                    clip_paths,
+                    highlights,
+                    video_info,
+                    clips_dir if clip_paths else shorts_dir,
+                    source_video_path=video_path,
+                    shorts_paths=shorts_paths,
                 )
-                if generate_shorts and shorts_paths:
-                    shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                    generate_individual_xmls(
-                        shorts_paths, highlights,
-                        shorts_video_info, output_dir / "shorts",
-                    )
                 log("  Premiere Pro XML (individual mode) exported")
-        else:
-            log("[Skip 4-6] Clip generation disabled — chapters-only run")
+        elif not modes.enable_clips and not modes.enable_shorts:
+            log("[Skip 4-6] Video generation disabled — chapters-only run")
 
         # Google Drive upload
         drive_link = ""
@@ -3710,12 +3958,17 @@ def _legacy_one_shot_handler(
             except Exception as ch_err:
                 log(f"Chapter generation failed: {ch_err}")
         else:
-            log("[Skip chapters] タイムスタンプ (概要欄) 生成を無効化")
+            reason = (
+                "Twitch入力ではタイムスタンプを生成しません"
+                if source_kind == "twitch"
+                else "タイムスタンプ (概要欄) 生成を無効化"
+            )
+            log(f"[Skip chapters] {reason}")
 
         # Auto-append to YouTube video description.
         # Only runs when: chapters generated AND user enabled it AND we have a
         # video id (URL input, not a local file upload).
-        if auto_append_youtube and modes.enable_chapters and chapters_text:
+        if auto_append_youtube and source_kind == "youtube" and modes.enable_chapters and chapters_text:
             if not youtube_video_id:
                 log("[Skip auto-append] URL 入力ではないため YouTube 概要欄への自動追記はスキップ")
             elif not youtube_api.is_configured():
@@ -3963,18 +4216,19 @@ def create_ui():
         **BLOCKS_THEME_KWARGS,
     ) as app:
         gr.HTML("<h1 class='main-title'>Clip Extractor</h1>")
-        gr.HTML("<p class='subtitle'>YouTube配信アーカイブから切り抜きショート動画を自動生成</p>")
+        gr.HTML("<p class='subtitle'>YouTube / Twitch配信アーカイブから切り抜きショート動画を自動生成</p>")
 
         with gr.Tabs():
             # --- Input Tab ---
             with gr.Tab("Input / 入力"):
-                # Generation-mode selector: users can keep both on, or run just
-                # one side. When both are on, the clip-side prompt wins.
+                # Normal clips, Shorts, and timestamps are independent outputs.
+                # Any video output uses the clip-side prompt for detection.
                 gr.HTML("<h3>生成モード / Generation Modes（アーカイブ入力用）</h3>")
                 gr.HTML(
                     "<p style='color:#666; margin-top:-0.5em; margin-bottom:0.5em;'>"
-                    "どちらか少なくとも 1 つは有効にしてください。両方有効の場合、"
-                    "切り抜き側のプロンプトだけが使われます。</p>"
+                    "切り抜き動画・ショート動画・タイムスタンプのうち少なくとも1つを"
+                    "有効にしてください。動画を生成する場合は切り抜き用プロンプトが"
+                    "使われます。</p>"
                 )
                 with gr.Row():
                     with gr.Column():
@@ -4000,7 +4254,7 @@ def create_ui():
                             value=defaults.get("chapter_prompt", ""),
                             placeholder="例: 話題が切り替わる節目だけを抜き出して",
                             lines=2,
-                            info="切り抜きが無効のときだけ使われます",
+                            info="切り抜き動画とショート動画が両方無効のときだけ使われます",
                         )
                         auto_append_youtube = gr.Checkbox(
                             label="概要欄に自動追加 (YouTube)",
@@ -4039,9 +4293,9 @@ def create_ui():
                 with gr.Row():
                     with gr.Column(scale=2):
                         input_url = gr.Textbox(
-                            label="YouTube URL",
-                            placeholder="https://youtube.com/watch?v=...",
-                            info="URLを貼り付けると自動でダウンロードします",
+                            label="動画URL（YouTube / Twitch）",
+                            placeholder="https://youtube.com/... または https://twitch.tv/videos/...",
+                            info="YouTube/TwitchのURLを貼り付けると自動でダウンロードします。Twitch入力ではタイムスタンプを生成しません",
                         )
                         gr.HTML("<p style='text-align:center; color:#999;'>または</p>")
                         input_file = gr.File(
@@ -4064,15 +4318,29 @@ def create_ui():
                             info="combined: 1つのXMLに全シーケンス / individual: クリップごとに別XML",
                         )
                         generate_shorts = gr.Checkbox(
-                            label="ショート動画 (9:16) も生成",
+                            label="ショート動画 (9:16) を生成",
                             value=defaults.get("generate_shorts", False),
-                            info="字幕を焼き込んだ縦型クリップを shorts/ に追加出力。下の『デフォルトに設定』で保存されます",
+                            info="通常の切り抜きがOFFでも生成できます。字幕入り縦型クリップを shorts/ に出力します",
                         )
                         shorts_mode = gr.Radio(
-                            choices=["crop", "blur", "pad"],
-                            value=defaults.get("shorts_mode", "crop"),
+                            choices=["pad", "blur", "crop"],
+                            value=defaults.get("shorts_mode", "pad"),
                             label="ショート動画の変換モード",
-                            info="crop: 縦型に切り抜き / blur: ぼかし背景 / pad: 黒帯で全体表示",
+                            info="pad（推奨）: 上下を黒帯にして全体表示 / blur: 全体表示＋ぼかし背景 / crop: 左右を切って拡大",
+                        )
+                        shorts_blur_strength = gr.Slider(
+                            minimum=0,
+                            maximum=50,
+                            step=1,
+                            value=defaults.get("shorts_blur_strength", 20),
+                            label="背景のぼかし強度",
+                            info="blurモードの背景だけに反映。0=ぼかしなし / 50=強いぼかし",
+                            visible=defaults.get("shorts_mode", "pad") == "blur",
+                        )
+                        shorts_mode.change(
+                            fn=shorts_blur_visibility,
+                            inputs=shorts_mode,
+                            outputs=shorts_blur_strength,
                         )
                         shorts_crop = gr.Radio(
                             choices=["center", "left", "right"],
@@ -4083,7 +4351,17 @@ def create_ui():
                         shorts_title = gr.Checkbox(
                             label="ショート冒頭にタイトルを表示",
                             value=defaults.get("shorts_title", True),
-                            info="各ショートの最初の4秒だけ、上部中央にタイトルを焼き込みます",
+                            info="各ショートの最初の4秒だけタイトルを焼き込みます",
+                        )
+                        shorts_title_position = gr.Radio(
+                            choices=[
+                                ("上側の帯", "top"),
+                                ("下側の帯", "bottom"),
+                                ("クリップ上に重ねる", "overlay"),
+                            ],
+                            value=defaults.get("shorts_title_position", "top"),
+                            label="タイトルの配置",
+                            info="pad/blurでは上下の余白か映像中央を選択。cropでは画面上部・下部・中央になります",
                         )
                         generate_thumbnails = gr.Checkbox(
                             label="サムネイル候補を生成 / Generate thumbnail candidates",
@@ -4138,6 +4416,19 @@ def create_ui():
                     value=False,
                     info="チェックすると、AI抽出 (STEP 1) が終わり次第そのままクリップ書き出し (STEP 2) まで一気に進めます。レビューで手直ししたい場合はオフのままにしてください。",
                 )
+
+                with gr.Row():
+                    input_save_defaults_btn = gr.Button(
+                        "現在のInput設定をデフォルトに保存",
+                        variant="secondary",
+                        size="sm",
+                    )
+                    input_save_defaults_msg = gr.Textbox(
+                        label="",
+                        interactive=False,
+                        show_label=False,
+                        lines=1,
+                    )
 
                 with gr.Group(visible=False) as review_panel:
                     gr.Markdown("## クリップレビュー / Clip Review")
@@ -4367,14 +4658,14 @@ def create_ui():
                         )
 
                 with gr.Accordion(
-                    "OBS自動処理用の切り抜き設定",
+                    "OBS自動処理の生成設定",
                     open=True,
                 ):
                     gr.Markdown(
                         "Inputタブのアーカイブ用設定とは別に保存されます。"
                         "OBS連携開始時に保存され、次回の起動時自動連携でも使われます。"
-                        "切り抜きとタイムスタンプは個別にON/OFFできます。"
-                        "どちらか一方はONにしてください。"
+                        "切り抜き・ショート・タイムスタンプは個別にON/OFFできます。"
+                        "3つのうち少なくとも1つはONにしてください。"
                     )
                     with gr.Row():
                         with gr.Column():
@@ -4399,20 +4690,23 @@ def create_ui():
                                 value=obs_processing_defaults["chapter_prompt"],
                                 placeholder="例: 話題が切り替わる節目だけを抜き出して",
                                 lines=2,
+                                info="切り抜き動画とショート動画が両方無効のときだけ使われます",
                             )
                             obs_auto_append_youtube = gr.Checkbox(
                                 label="概要欄に自動追加 (YouTube)",
                                 value=obs_processing_defaults["auto_append_youtube"],
                                 info="配信アーカイブの概要欄へ生成したタイムスタンプを追加します",
                             )
-                            obs_confirm_before_auto_process = gr.Checkbox(
-                                label="プロンプト未入力時に自動生成前の確認を表示",
-                                value=obs_processing_defaults[
-                                    "confirm_before_auto_process"
-                                ],
+                            obs_auto_start_without_prompt_confirmation = gr.Checkbox(
+                                label="プロンプトの入力を確認しないで自動で生成開始",
+                                value=not bool(
+                                    obs_processing_defaults[
+                                        "confirm_before_auto_process"
+                                    ]
+                                ),
                                 info=(
-                                    "ONの場合、プロンプトが空のときに生成開始前の確認を待ちます。"
-                                    "OFFなら検知後すぐに開始します"
+                                    "ONの場合は確認を表示せず、保存済みプロンプトを使って"
+                                    "開始します。未入力ならLLMにお任せします"
                                 ),
                             )
                         with gr.Column():
@@ -4445,15 +4739,34 @@ def create_ui():
                     with gr.Row():
                         with gr.Column():
                             obs_generate_shorts = gr.Checkbox(
-                                label="ショート動画 (9:16) も生成",
+                                label="ショート動画 (9:16) を生成",
                                 value=obs_processing_defaults["generate_shorts"],
-                                info="字幕を焼き込んだ縦型クリップを shorts/ に出力",
+                                info="通常の切り抜きがOFFでも生成できます。字幕入り縦型クリップを shorts/ に出力します",
                             )
                             obs_shorts_mode = gr.Radio(
-                                choices=["crop", "blur", "pad"],
+                                choices=["pad", "blur", "crop"],
                                 value=obs_processing_defaults["shorts_mode"],
                                 label="ショート動画の変換モード",
-                                info="crop: 縦型に切り抜き / blur: ぼかし背景 / pad: 黒帯で全体表示",
+                                info="pad（推奨）: 上下を黒帯にして全体表示 / blur: 全体表示＋ぼかし背景 / crop: 左右を切って拡大",
+                            )
+                            obs_shorts_blur_strength = gr.Slider(
+                                minimum=0,
+                                maximum=50,
+                                step=1,
+                                value=obs_processing_defaults[
+                                    "shorts_blur_strength"
+                                ],
+                                label="背景のぼかし強度",
+                                info="blurモードの背景だけに反映。0=ぼかしなし / 50=強いぼかし",
+                                visible=(
+                                    obs_processing_defaults["shorts_mode"]
+                                    == "blur"
+                                ),
+                            )
+                            obs_shorts_mode.change(
+                                fn=shorts_blur_visibility,
+                                inputs=obs_shorts_mode,
+                                outputs=obs_shorts_blur_strength,
                             )
                             obs_shorts_crop = gr.Radio(
                                 choices=["center", "left", "right"],
@@ -4465,6 +4778,18 @@ def create_ui():
                                 label="ショート冒頭にタイトルを表示",
                                 value=obs_processing_defaults["shorts_title"],
                                 info="各ショートの最初の4秒だけタイトルを焼き込みます",
+                            )
+                            obs_shorts_title_position = gr.Radio(
+                                choices=[
+                                    ("上側の帯", "top"),
+                                    ("下側の帯", "bottom"),
+                                    ("クリップ上に重ねる", "overlay"),
+                                ],
+                                value=obs_processing_defaults[
+                                    "shorts_title_position"
+                                ],
+                                label="タイトルの配置",
+                                info="pad/blurでは上下の余白か映像中央を選択",
                             )
                         with gr.Column():
                             obs_generate_thumbnails = gr.Checkbox(
@@ -4520,7 +4845,9 @@ def create_ui():
                             obs_audio_fusion,
                             obs_audio_alpha,
                             obs_karaoke,
-                            obs_confirm_before_auto_process,
+                            obs_auto_start_without_prompt_confirmation,
+                            obs_shorts_blur_strength,
+                            obs_shorts_title_position,
                         ],
                         outputs=obs_save_processing_msg,
                     )
@@ -4539,15 +4866,27 @@ def create_ui():
 
                 with gr.Group(visible=False) as obs_confirmation_group:
                     obs_confirmation_message = gr.Markdown("")
+                    obs_confirmation_prompt = gr.Textbox(
+                        label="今回の生成プロンプト",
+                        placeholder=(
+                            "今回だけ使う指示を入力。空のままなら「そのまま生成開始」を選択"
+                        ),
+                        lines=3,
+                    )
                     with gr.Row():
                         obs_confirm_btn = gr.Button(
-                            "はい、生成を開始",
+                            "そのまま生成開始",
                             variant="primary",
                         )
-                        obs_skip_btn = gr.Button(
-                            "今回はスキップ",
+                        obs_confirm_with_prompt_btn = gr.Button(
+                            "プロンプトを入力して開始",
                             variant="secondary",
                         )
+                        obs_skip_btn = gr.Button(
+                            "今回は生成しない",
+                            variant="secondary",
+                        )
+                    obs_confirmation_request_token = gr.State("")
 
                 # Live status updates. gr.Timer exists in Gradio 6.x; fall back
                 # to the manual refresh button on older versions (signature
@@ -4562,7 +4901,13 @@ def create_ui():
                     _obs_timer.tick(fn=_obs_status_poll, outputs=obs_status_box)
                     _obs_timer.tick(
                         fn=_obs_confirmation_poll,
-                        outputs=[obs_confirmation_group, obs_confirmation_message],
+                        inputs=[obs_confirmation_request_token],
+                        outputs=[
+                            obs_confirmation_group,
+                            obs_confirmation_message,
+                            obs_confirmation_prompt,
+                            obs_confirmation_request_token,
+                        ],
                     )
 
             # --- Settings Tab ---
@@ -4744,10 +5089,10 @@ def create_ui():
                     with gr.Column():
                         gr.HTML("<h3>Font Settings / 字幕フォント</h3>")
                         system_fonts = get_system_fonts_cached()
-                        # The bundled heavy gothic (fonts/NotoSansJP-Black.ttf) is
+                        # The bundled bold gothic (fonts/NotoSansJP-Bold.otf) is
                         # not installed system-wide, so surface it explicitly as the
                         # first choice and the default.
-                        BUNDLED_FONT = "Noto Sans JP Black"
+                        BUNDLED_FONT = "Noto Sans JP"
                         font_choices = [BUNDLED_FONT] + [f for f in system_fonts if f != BUNDLED_FONT]
                         saved_font = defaults["font_name"]
                         default_font = saved_font if saved_font in font_choices else BUNDLED_FONT
@@ -4756,7 +5101,7 @@ def create_ui():
                             value=default_font,
                             label="フォント名",
                             allow_custom_value=True,
-                            info="先頭の「Noto Sans JP Black」は同梱の極太ゴシック（ショート字幕向けの既定）。その他はPCにインストール済みのフォント、直接入力も可。",
+                            info="先頭の「Noto Sans JP」は同梱のBold（700・商用利用可）で、ショート字幕向けの既定。その他はPCにインストール済みのフォント、直接入力も可。",
                         )
                         with gr.Row():
                             font_size = gr.Number(
@@ -4893,11 +5238,35 @@ def create_ui():
                             generate_thumbnails,
                             audio_fusion, audio_alpha,
                             karaoke,
+                            shorts_blur_strength,
+                            shorts_title_position,
                             premiere_executable_path,
                             obs_launch_on_startup,
                             obs_executable_path,
                             obs_auto_connect_on_startup],
                     outputs=save_defaults_msg,
+                )
+
+                input_save_defaults_btn.click(
+                    fn=save_defaults,
+                    inputs=[ai_provider, ai_model,
+                            enable_clips, enable_chapters, clip_prompt, chapter_prompt,
+                            auto_append_youtube,
+                            num_clips, output_mode, generate_shorts, shorts_mode, shorts_crop, shorts_title,
+                            min_duration, max_duration,
+                            whisper_model, language,
+                            font_name, font_size, font_color,
+                            output_base_dir,
+                            generate_thumbnails,
+                            audio_fusion, audio_alpha,
+                            karaoke,
+                            shorts_blur_strength,
+                            shorts_title_position,
+                            premiere_executable_path,
+                            obs_launch_on_startup,
+                            obs_executable_path,
+                            obs_auto_connect_on_startup],
+                    outputs=input_save_defaults_msg,
                 )
 
             # --- Output Tab ---
@@ -4933,7 +5302,8 @@ def create_ui():
                     gr.Markdown(
                         "### Adobe Premiere Proへ送る\n"
                         "書き出した動画を現在のプロジェクトへ読み込み、"
-                        "各クリップのシーケンスを自動作成します。初回だけ連携プラグインを導入してください。"
+                        "元動画をV1、通常切り抜きをV2、同時生成したショートをV3へ"
+                        "元の時刻に合わせて配置します。初回だけ連携プラグインを導入してください。"
                     )
                     with gr.Row():
                         premiere_edit_btn = gr.Button(
@@ -5004,6 +5374,7 @@ def create_ui():
                 whisper_model, language,
                 audio_fusion, audio_alpha,
                 output_base_dir,
+                generate_shorts,
             ],
             outputs=[session_state, status, review_panel],
             concurrency_limit=1,
@@ -5030,6 +5401,8 @@ def create_ui():
                 font_color,
                 generate_thumbnails,
                 karaoke,
+                shorts_blur_strength,
+                shorts_title_position,
             ],
             outputs=[
                 log_output,
@@ -5062,6 +5435,8 @@ def create_ui():
                 font_color,
                 generate_thumbnails,
                 karaoke,
+                shorts_blur_strength,
+                shorts_title_position,
             ],
             outputs=[
                 log_output,
@@ -5108,7 +5483,9 @@ def create_ui():
                 obs_audio_fusion,
                 obs_audio_alpha,
                 obs_karaoke,
-                obs_confirm_before_auto_process,
+                obs_auto_start_without_prompt_confirmation,
+                obs_shorts_blur_strength,
+                obs_shorts_title_position,
             ],
             outputs=obs_status_box,
         )
@@ -5124,24 +5501,49 @@ def create_ui():
         )
         obs_refresh_btn.click(
             fn=_obs_confirmation_poll,
-            inputs=[],
-            outputs=[obs_confirmation_group, obs_confirmation_message],
+            inputs=[obs_confirmation_request_token],
+            outputs=[
+                obs_confirmation_group,
+                obs_confirmation_message,
+                obs_confirmation_prompt,
+                obs_confirmation_request_token,
+            ],
         )
         obs_confirm_btn.click(
             fn=_obs_confirm_generation,
             inputs=[],
-            outputs=[obs_confirmation_group, obs_confirmation_message, obs_status_box],
+            outputs=[
+                obs_confirmation_group,
+                obs_confirmation_message,
+                obs_confirmation_prompt,
+                obs_status_box,
+            ],
+        )
+        obs_confirm_with_prompt_btn.click(
+            fn=_obs_confirm_generation_with_prompt,
+            inputs=[obs_confirmation_prompt],
+            outputs=[
+                obs_confirmation_group,
+                obs_confirmation_message,
+                obs_confirmation_prompt,
+                obs_status_box,
+            ],
         )
         obs_skip_btn.click(
             fn=_obs_skip_generation,
             inputs=[],
-            outputs=[obs_confirmation_group, obs_confirmation_message, obs_status_box],
+            outputs=[
+                obs_confirmation_group,
+                obs_confirmation_message,
+                obs_confirmation_prompt,
+                obs_status_box,
+            ],
         )
         # Instructions
         with gr.Accordion("使い方 / How to Use", open=False):
             gr.Markdown("""
 ### 基本的な使い方
-1. **Input** タブでYouTube URLを貼り付けるか、動画ファイルをアップロード
+1. **Input** タブでYouTube/Twitch URLを貼り付けるか、動画ファイルをアップロード
 2. クリップ数や出力モードを設定
 3. **STEP 1：AIがおすすめ箇所を抽出** → 内容を確認
 4. **STEP 2：クリップを書き出し** をクリック
@@ -5191,7 +5593,7 @@ Premiere Pro → File → Import → `project.xml` で手動読み込みでき�
 
 ### ショート動画のフォント設定（9:16 出力のみ）
 1. Settings タブの Font Settings でフォント名・サイズ・色を選択
-2. 「ショート動画 (9:16) も生成」をチェックして Generate
+2. 「ショート動画 (9:16) を生成」をチェックして Generate
 3. 出力された Shorts には字幕が焼き込まれ、そのまま YouTube Shorts / TikTok にアップロード可能
 4. 通常の横クリップ（landscape）は字幕が焼き込まれず、Premiere Pro で SRT キャプションを自由に調整できる状態のまま
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""clip-extractor: Auto-generate highlight clips from YouTube archives for Premiere Pro."""
+"""clip-extractor: Auto-generate highlight clips from online archives or local videos."""
 
 import argparse
 import sys
@@ -8,12 +8,16 @@ from pathlib import Path
 
 from chapters import generate_chapter_text, write_chapter_file
 from config import FontConfig
-from downloader import is_youtube_url, download_video
+from downloader import download_video, get_url_source
 from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
 from audio_energy import fuse_audio_energy
 from clipper import extract_clips, generate_thumbnails, get_video_info
-from subtitles import generate_all_karaoke_ass, generate_all_srts
+from subtitles import (
+    generate_all_karaoke_ass,
+    generate_all_short_title_srts,
+    generate_all_srts,
+)
 from premiere_xml import generate_combined_xml, generate_individual_xmls
 from modes import GenerationModes
 import youtube_api
@@ -22,11 +26,12 @@ import drive_upload
 
 def main():
     parser = argparse.ArgumentParser(
-        description="YouTube配信アーカイブから切り抜きショート動画を自動生成",
+        description="YouTube/Twitch配信アーカイブから切り抜きショート動画を自動生成",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 使用例:
   python main.py https://youtube.com/watch?v=xxxxx
+  python main.py https://www.twitch.tv/videos/123456789
   python main.py ./archive.mp4 --shorts
   python main.py ./archive.mp4 --mode individual --clips 3
   python main.py ./archive.mp4 --prompt "面白いシーンだけ選んで"
@@ -35,7 +40,7 @@ def main():
     )
 
     parser.add_argument("input", nargs="?", default=None,
-                        help="YouTube URL or local video file path "
+                        help="YouTube/Twitch URL or local video file path "
                              "(--youtube-setup/--youtube-revoke/--youtube-status "
                              "--drive-setup/--drive-revoke/--drive-status 時は不要)")
     parser.add_argument("-o", "--output", default=None, help="Output directory (default: auto-generated)")
@@ -43,12 +48,20 @@ def main():
     parser.add_argument("-m", "--mode", choices=["combined", "individual"], default="combined",
                         help="Output mode: combined (1 XML, multiple sequences) or individual (separate XMLs)")
     parser.add_argument("-s", "--shorts", action="store_true", help="Also generate 9:16 vertical shorts")
-    parser.add_argument("--shorts-mode", choices=["crop", "blur", "pad"], default="crop",
-                        help="ショート動画の変換モード (default: crop)")
+    parser.add_argument("--shorts-mode", choices=["blur", "pad", "crop"], default="pad",
+                        help="ショート動画の変換モード (default: pad / 上下を黒帯にして全体表示)")
+    parser.add_argument("--shorts-blur-strength", type=float, default=20,
+                        help="blurモードの背景ぼかし強度 0-50 (default: 20)")
     parser.add_argument("--shorts-crop", choices=["center", "left", "right"], default="center",
                         help="ショート動画の横クロップ位置 (default: center)")
     parser.add_argument("--no-shorts-title", action="store_true",
                         help="ショート動画冒頭のタイトル焼き込みを無効化")
+    parser.add_argument(
+        "--shorts-title-position",
+        choices=["top", "bottom", "overlay"],
+        default="top",
+        help="ショートタイトルの配置 (default: top)",
+    )
     parser.add_argument("--thumbnails", action="store_true",
                         help="サムネイル候補画像を生成 / Generate thumbnail candidates")
     parser.add_argument("--audio-fusion", action="store_true",
@@ -144,12 +157,16 @@ def main():
 
     # Normal processing path requires `input`.
     if args.input is None:
-        parser.error("input (YouTube URL or local video file path) is required "
+        parser.error("input (YouTube/Twitch URL or local video file path) is required "
                      "unless one of --youtube-setup / --youtube-revoke / --youtube-status "
                      "/ --drive-setup / --drive-revoke / --drive-status is used")
 
+    input_source = get_url_source(args.input)
+
     # Pre-validate YouTube auth so we fail fast before the heavy pipeline.
-    if args.auto_append_youtube:
+    # Twitch has no YouTube description target, so its timestamp-related
+    # option is intentionally ignored instead of triggering an auth check.
+    if args.auto_append_youtube and input_source != "twitch":
         yt_pre = youtube_api.check_auth_status()
         if not yt_pre["configured"]:
             print("Error: --auto-append-youtube は credentials.json が必要です。"
@@ -161,9 +178,11 @@ def main():
             sys.exit(1)
 
     # Validate generation modes — at least one side must be enabled.
+    if input_source == "twitch":
+        print("Twitch入力: タイムスタンプ生成とYouTube概要欄への追記をスキップします")
     modes = GenerationModes(
         enable_clips=not args.no_clips,
-        enable_chapters=not args.no_chapters,
+        enable_chapters=not args.no_chapters and input_source != "twitch",
         clip_prompt=args.prompt or "",
         chapter_prompt=args.chapter_prompt or "",
     )
@@ -188,14 +207,18 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output directory: {output_dir}")
 
-    # Capture YouTube video id for the optional auto-append step. Only
-    # meaningful when the input is a URL — local files never have one.
-    youtube_video_id = youtube_api.extract_video_id(args.input) if is_youtube_url(args.input) else None
+    # Capture a YouTube video id for the optional auto-append step. Only
+    # meaningful for YouTube URL input — local files and Twitch have none.
+    youtube_video_id = (
+        youtube_api.extract_video_id(args.input)
+        if input_source == "youtube"
+        else None
+    )
     if youtube_video_id:
         print(f"YouTube video id: {youtube_video_id}")
 
     # Step 1: Get video file
-    if is_youtube_url(args.input):
+    if input_source in {"youtube", "twitch"}:
         video_path = download_video(args.input, output_dir / "source")
     else:
         video_path = Path(args.input)
@@ -245,6 +268,7 @@ def main():
     srt_paths = []
     shorts_paths = []
     shorts_srt_paths = []
+    shorts_title_srt_paths = []
     shorts_ass_paths = []
     thumbnail_paths = []
     clips_dir = output_dir / "clips"  # referenced later by XML + summary
@@ -267,12 +291,20 @@ def main():
             print("\n--- Shorts Conversion (9:16) with burned-in subtitles ---")
             shorts_dir = output_dir / "shorts"
             shorts_dir.mkdir(parents=True, exist_ok=True)
+            shorts_srt_paths = generate_all_srts(
+                segments,
+                highlights,
+                shorts_dir,
+                shorts=True,
+            )
+            shorts_title_srt_paths = generate_all_short_title_srts(
+                highlights,
+                shorts_dir,
+            )
             if args.karaoke:
                 shorts_ass_paths = generate_all_karaoke_ass(
                     segments, highlights, shorts_dir, font_config,
                 )
-            else:
-                shorts_srt_paths = generate_all_srts(segments, highlights, shorts_dir)
             shorts_paths = extract_clips(
                 video_path, highlights, shorts_dir,
                 shorts=True,
@@ -282,7 +314,9 @@ def main():
                 font_config=font_config,
                 crop_x=args.shorts_crop,
                 shorts_mode=args.shorts_mode,
+                shorts_blur_strength=args.shorts_blur_strength,
                 shorts_title=not args.no_shorts_title,
+                shorts_title_position=args.shorts_title_position,
             )
 
         if args.thumbnails:
@@ -294,6 +328,8 @@ def main():
                     vertical=True,
                     crop_x=args.shorts_crop,
                     shorts_mode=args.shorts_mode,
+                    shorts_blur_strength=args.shorts_blur_strength,
+                    shorts_title_position=args.shorts_title_position,
                     font_config=font_config,
                 )
             else:
@@ -313,29 +349,17 @@ def main():
             generate_combined_xml(
                 clip_paths, highlights, video_info, xml_path,
                 project_name=video_path.stem,
+                source_video_path=video_path,
+                shorts_paths=shorts_paths,
             )
             print(f"Combined XML: {xml_path}")
-
-            if args.shorts and shorts_paths:
-                shorts_xml_path = output_dir / "project_shorts.xml"
-                shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                generate_combined_xml(
-                    shorts_paths, highlights, shorts_video_info,
-                    shorts_xml_path, project_name=f"{video_path.stem}_shorts",
-                )
-                print(f"Shorts XML: {shorts_xml_path}")
         else:
             xml_paths = generate_individual_xmls(
                 clip_paths, highlights, video_info, clips_dir,
+                source_video_path=video_path,
+                shorts_paths=shorts_paths,
             )
             print(f"Individual XMLs: {len(xml_paths)} files")
-
-            if args.shorts and shorts_paths:
-                shorts_video_info = {**video_info, "width": 1080, "height": 1920}
-                generate_individual_xmls(
-                    shorts_paths, highlights,
-                    shorts_video_info, output_dir / "shorts",
-                )
 
     # Step 9: Generate YouTube chapter description text (auto-chapter on upload)
     chapters_text = ""
@@ -348,10 +372,15 @@ def main():
         print(chapters_text)
         print(f"\nSaved: {chapters_path}")
     else:
-        print("\n[Skip chapters] タイムスタンプ (概要欄) 生成を無効化 (--no-chapters)")
+        reason = (
+            "Twitch入力ではタイムスタンプを生成しません"
+            if input_source == "twitch"
+            else "タイムスタンプ (概要欄) 生成を無効化 (--no-chapters)"
+        )
+        print(f"\n[Skip chapters] {reason}")
 
     # Optional auto-append to YouTube video description
-    if args.auto_append_youtube and modes.enable_chapters and chapters_text:
+    if args.auto_append_youtube and input_source == "youtube" and modes.enable_chapters and chapters_text:
         if not youtube_video_id:
             print("\n[Skip auto-append] URL 入力ではないため YouTube 概要欄への自動追記はスキップ")
         elif not youtube_api.is_configured():
@@ -376,6 +405,11 @@ def main():
         print(f"Clips: {len(clip_paths)} files")
         if shorts_paths:
             print(f"Shorts: {len(shorts_paths)} files")
+            print(
+                "Short SRT: "
+                f"{len(shorts_srt_paths) + len(shorts_title_srt_paths)} files "
+                "(archive + title)"
+            )
         if thumbnail_paths:
             print(f"Thumbnails: {len(thumbnail_paths)} files")
         print(f"SRT: {len(srt_paths)} files")

@@ -40,6 +40,32 @@ def _click_input_names(module: ast.Module, button_name: str) -> list[str]:
     raise AssertionError(f"{button_name}.click(inputs=[...]) not found")
 
 
+def _click_output_names(module: ast.Module, button_name: str) -> list[str]:
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == "click"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == button_name
+        ):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "outputs":
+                continue
+            if isinstance(keyword.value, ast.Name):
+                return [keyword.value.id]
+            assert isinstance(keyword.value, ast.List), ast.dump(keyword.value)
+            names: list[str] = []
+            for elt in keyword.value.elts:
+                assert isinstance(elt, ast.Name), ast.dump(elt)
+                names.append(elt.id)
+            return names
+    raise AssertionError(f"{button_name}.click(outputs=...) not found")
+
+
 def _event_output_names(
     module: ast.Module,
     function_name: str,
@@ -167,7 +193,12 @@ def test_detect_phase_signature_matches_detect_inputs():
     args = _function_args(module, "detect_phase")
     args = [arg for arg in args if arg != "progress"]
     assert args == _event_input_names(module, "detect_phase", "then")
-    assert args[-3:] == ["audio_fusion", "audio_alpha", "output_base_dir"]
+    assert args[-4:] == [
+        "audio_fusion",
+        "audio_alpha",
+        "output_base_dir",
+        "generate_shorts",
+    ]
 
 
 def test_render_phase_signature_matches_render_inputs():
@@ -178,7 +209,14 @@ def test_render_phase_signature_matches_render_inputs():
     assert args[0] == "session"
     assert render_inputs[0] == "session_state"
     assert args[1:] == render_inputs[1:]
-    assert args[-2:] == ["generate_thumbnails", "karaoke"]
+    assert args[-4:] == [
+        "generate_thumbnails",
+        "karaoke",
+        "shorts_blur_strength",
+        "shorts_title_position",
+    ]
+    assert "shorts_blur_strength" in args
+    assert "shorts_title_position" in args
 
 
 def test_save_defaults_signature_matches_save_button_inputs():
@@ -189,6 +227,48 @@ def test_save_defaults_signature_matches_save_button_inputs():
         "obs_launch_on_startup",
         "obs_executable_path",
         "obs_auto_connect_on_startup",
+    ]
+    assert "shorts_blur_strength" in args
+    assert "shorts_title_position" in args
+
+
+def test_shorts_visual_controls_are_available_for_input_and_obs():
+    module = _module()
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert source.count('label="背景のぼかし強度"') == 2
+    assert source.count('label="タイトルの配置"') == 2
+    assert source.count("fn=shorts_blur_visibility") == 2
+    for event_name in ("render_phase", "maybe_render_phase"):
+        event_inputs = _event_input_names(module, event_name, "then")
+        assert "shorts_blur_strength" in event_inputs
+        assert "shorts_title_position" in event_inputs
+    for button in ("save_defaults_btn", "input_save_defaults_btn"):
+        click_inputs = _click_input_names(module, button)
+        assert "shorts_blur_strength" in click_inputs
+        assert "shorts_title_position" in click_inputs
+    for button in ("obs_save_processing_btn", "obs_start_btn"):
+        click_inputs = _click_input_names(module, button)
+        assert "obs_shorts_blur_strength" in click_inputs
+        assert "obs_shorts_title_position" in click_inputs
+
+
+def test_input_tab_exposes_default_save_button_with_same_settings():
+    module = _module()
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    input_tab = source.index('with gr.Tab("Input / 入力")')
+    obs_tab = source.index('with gr.Tab("OBS連携 / OBS")')
+    button = source.index("input_save_defaults_btn =")
+
+    assert input_tab < button < obs_tab
+    assert '"現在のInput設定をデフォルトに保存"' in source
+    assert _click_input_names(
+        module,
+        "input_save_defaults_btn",
+    ) == _click_input_names(module, "save_defaults_btn")
+    assert _click_output_names(module, "input_save_defaults_btn") == [
+        "input_save_defaults_msg",
     ]
 
 
@@ -232,21 +312,64 @@ def test_obs_generation_checkboxes_are_independent_and_profile_backed():
     assert 'label="タイムスタンプ(概要欄)を生成（OBSでは固定ON）"' not in source
     assert 'value=obs_processing_defaults["enable_clips"]' in source
     assert 'value=obs_processing_defaults["enable_chapters"]' in source
+    assert 'value=obs_processing_defaults["generate_shorts"]' in source
     assert 'info="OBS録画から切り抜きを生成します"' in source
     assert 'info="配信終了後にYouTube概要欄へ反映します"' in source
-    assert "どちらか一方はONにしてください" in source
+    assert 'label="ショート動画 (9:16) を生成"' in source
+    assert "通常の切り抜きがOFFでも生成できます" in source
+    assert "3つのうち少なくとも1つはONにしてください" in source
+    assert source.count(
+        "切り抜き動画とショート動画が両方無効のときだけ使われます"
+    ) == 2
+
+
+def test_input_shorts_are_an_independent_generation_output():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert 'label="ショート動画 (9:16) も生成"' not in source
+    assert 'label="ショート動画 (9:16) を生成"' in source
+    assert "切り抜き動画・ショート動画・タイムスタンプ" in source
+    assert "通常の切り抜きがOFFでも生成できます" in source
+    assert "OBS自動処理の生成設定" in source
 
 
 def test_obs_prompt_confirmation_is_wired_to_saved_setting_and_actions():
+    module = _module()
     source = WEB_APP.read_text(encoding="utf-8")
 
-    assert 'label="プロンプト未入力時に自動生成前の確認を表示"' in source
+    assert 'label="プロンプトの入力を確認しないで自動で生成開始"' in source
     assert "confirm_before_auto_process" in source
     assert "_obs_confirmation_poll" in source
     assert "_obs_confirm_generation" in source
+    assert "_obs_confirm_generation_with_prompt" in source
     assert "_obs_skip_generation" in source
-    assert '"はい、生成を開始"' in source
-    assert '"今回はスキップ"' in source
+    assert '"そのまま生成開始"' in source
+    assert '"プロンプトを入力して開始"' in source
+    assert '"今回は生成しない"' in source
+    assert 'label="今回の生成プロンプト"' in source
+    assert "未入力ならLLMにお任せします" in source
+    assert _event_input_names(module, "_obs_confirmation_poll", "tick") == [
+        "obs_confirmation_request_token"
+    ]
+    assert _event_output_names(module, "_obs_confirmation_poll", "tick") == [
+        "obs_confirmation_group",
+        "obs_confirmation_message",
+        "obs_confirmation_prompt",
+        "obs_confirmation_request_token",
+    ]
+    assert _event_input_names(
+        module,
+        "_obs_confirm_generation_with_prompt",
+        "click",
+    ) == ["obs_confirmation_prompt"]
+
+
+def test_input_accepts_youtube_and_twitch_urls():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert 'label="動画URL（YouTube / Twitch）"' in source
+    assert "https://twitch.tv/videos/..." in source
+    assert "Twitch入力ではタイムスタンプを生成しません" in source
 
 
 def test_premiere_button_and_render_state_are_wired():
@@ -297,7 +420,9 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_enable_chapters", "obs_chapter_prompt", "obs_min_duration",
         "obs_max_duration", "obs_shorts_mode", "obs_shorts_crop",
         "obs_shorts_title", "obs_generate_thumbnails", "obs_audio_fusion",
-        "obs_audio_alpha", "obs_karaoke", "obs_confirm_before_auto_process",
+        "obs_audio_alpha", "obs_karaoke",
+        "obs_auto_start_without_prompt_confirmation",
+        "obs_shorts_blur_strength", "obs_shorts_title_position",
     ]
     assert _click_input_names(module, "obs_start_btn") == [
         "obs_trigger_radio", "obs_host", "obs_port", "obs_password",
@@ -308,7 +433,8 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_chapter_prompt", "obs_min_duration", "obs_max_duration",
         "obs_shorts_mode", "obs_shorts_crop", "obs_shorts_title",
         "obs_generate_thumbnails", "obs_audio_fusion", "obs_audio_alpha",
-        "obs_karaoke", "obs_confirm_before_auto_process",
+        "obs_karaoke", "obs_auto_start_without_prompt_confirmation",
+        "obs_shorts_blur_strength", "obs_shorts_title_position",
     ]
 
 
@@ -339,7 +465,7 @@ def test_obs_help_explains_recording_primary_setup_and_archive_fallback():
     assert "アーカイブへの" in source
     assert "フォールバックとYouTube概要欄への自動反映は行いません" in source
     assert 'defaults.get("obs_stop_event", "record")' in source
-    assert "プロンプト未入力時に自動生成前の確認を表示" in source
+    assert "プロンプトの入力を確認しないで自動で生成開始" in source
 
 
 def test_obs_tab_is_second_in_top_navigation():

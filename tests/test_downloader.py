@@ -4,7 +4,16 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from downloader import download_video
+from downloader import download_video, get_url_source, is_twitch_url, is_youtube_url
+
+
+def test_supported_url_detection_includes_twitch_vods_and_channels():
+    assert is_youtube_url("https://www.youtube.com/watch?v=test")
+    assert is_twitch_url("https://www.twitch.tv/videos/123456789")
+    assert is_twitch_url("https://twitch.tv/example_channel")
+    assert not is_twitch_url("https://clips.twitch.tv/ExampleClip")
+    assert get_url_source("https://www.twitch.tv/videos/123456789") == "twitch"
+    assert get_url_source("C:/videos/stream.mp4") is None
 
 
 def test_download_video_enables_node_javascript_runtime(monkeypatch, tmp_path):

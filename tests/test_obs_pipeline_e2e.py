@@ -144,7 +144,7 @@ def _auto_settings(tmp_path: Path) -> dict:
         "auto_append_youtube": False,
         "generate_thumbnails": False,
         "karaoke": False,
-        "font_name": "Noto Sans JP Black",
+        "font_name": "Noto Sans JP",
         "font_size": 96,
         "font_color": "#FFFFFF",
     }
@@ -152,6 +152,10 @@ def _auto_settings(tmp_path: Path) -> dict:
 
 def _find_clips(tmp_path: Path) -> list[Path]:
     return [p for p in tmp_path.glob("output_*/clips/*.mp4")]
+
+
+def _find_shorts(tmp_path: Path) -> list[Path]:
+    return [p for p in tmp_path.glob("output_*/shorts/*_short.mp4")]
 
 
 def test_output_directories_are_unique_for_simultaneous_archives(tmp_path):
@@ -191,6 +195,32 @@ def test_obs_auto_pipeline_generates_real_clip(tmp_path, monkeypatch):
     assert abs(dur - EXPECTED_CLIP_DURATION) <= 2.0, (
         f"clip duration {dur:.2f}s not ~{EXPECTED_CLIP_DURATION}s"
     )
+
+
+@ffmpeg_required
+def test_obs_auto_pipeline_generates_only_real_short(tmp_path, monkeypatch):
+    video = _make_synthetic_video(tmp_path / "short-recording.mp4", duration=4)
+    _stub_transcribe(monkeypatch)
+    _stub_detect_highlights(monkeypatch, start=0.5, end=2.5)
+
+    settings = _auto_settings(tmp_path)
+    settings.update(
+        enable_clips=False,
+        enable_chapters=False,
+        generate_shorts=True,
+        min_duration=1,
+        max_duration=5,
+        output_mode="combined",
+    )
+    outcome = web_app._run_obs_auto_pipeline_outcome(str(video), settings)
+
+    assert outcome.success, outcome.log
+    assert not _find_clips(tmp_path), outcome.log
+    shorts = _find_shorts(tmp_path)
+    assert len(shorts) == 1, outcome.log
+    assert shorts[0].stat().st_size > 0
+    assert outcome.clip_paths == ()
+    assert outcome.shorts_paths == (str(shorts[0]),)
 
 
 # --------------------------------------------------------------------------
@@ -250,6 +280,148 @@ def test_obs_auto_callback_waits_for_confirmation_before_running_pipeline(monkey
     assert "Render 完了" in web_app._obs_status_text()
 
 
+def test_obs_confirmation_waits_until_user_decides_without_timeout(monkeypatch):
+    """A pending confirmation must not expire while OBS integration is active."""
+    # If the old deadline is still used, make it expire quickly so this test
+    # catches the regression without waiting 15 minutes.
+    monkeypatch.setattr(web_app, "_OBS_CONFIRMATION_TIMEOUT", 0.01, raising=False)
+    result = {}
+    settings = {
+        "enable_clips": True,
+        "enable_chapters": True,
+        "clip_prompt": "保存済みのプロンプト",
+        "confirm_before_auto_process": True,
+    }
+
+    worker = threading.Thread(
+        target=lambda: result.setdefault(
+            "value",
+            web_app._obs_confirm_before_auto_process(
+                settings, "C:/recordings/wait-forever.mkv", lambda: True
+            ),
+        )
+    )
+    worker.start()
+    try:
+        assert _wait_for_obs_confirmation(), web_app._obs_status_text()
+        first_poll = web_app._obs_confirmation_poll()
+        second_poll = web_app._obs_confirmation_poll(first_poll[3])
+        assert first_poll[2]["value"] == "保存済みのプロンプト"
+        assert "value" not in second_poll[2], "polling must not overwrite user typing"
+        reload_poll = web_app._obs_confirmation_poll("")
+        assert reload_poll[2]["value"] == "保存済みのプロンプト"
+        time.sleep(0.15)
+        assert worker.is_alive(), "confirmation expired before the user decided"
+        assert web_app._obs_resolve_confirmation(True) is True
+        worker.join(timeout=5)
+        assert not worker.is_alive()
+        assert result["value"] is True
+        assert settings["clip_prompt"] == "保存済みのプロンプト"
+    finally:
+        if worker.is_alive():
+            web_app._obs_resolve_confirmation(True)
+            worker.join(timeout=5)
+
+
+def test_obs_confirmation_prompt_is_applied_only_to_the_current_run(monkeypatch):
+    pipeline_called = threading.Event()
+    captured = {}
+    settings = {
+        "enable_clips": True,
+        "enable_chapters": True,
+        "clip_prompt": "保存済みのプロンプト",
+        "chapter_prompt": "保存済みのタイムスタンプ用プロンプト",
+        "confirm_before_auto_process": True,
+    }
+
+    def fake_pipeline(_path, pipeline_settings):
+        captured.update(pipeline_settings)
+        pipeline_called.set()
+        return web_app.ObsPipelineOutcome(log="[OBS] Render 完了", success=True)
+
+    monkeypatch.setattr(web_app, "_run_obs_auto_pipeline_outcome", fake_pipeline)
+    callback = web_app._obs_make_callback(auto_process=True, settings=settings)
+    callback("C:/recordings/one-time-prompt.mkv")
+
+    assert _wait_for_obs_confirmation(), web_app._obs_status_text()
+    assert web_app._obs_resolve_confirmation_action(
+        "start_with_prompt",
+        "今回だけ使う切り抜きプロンプト",
+    ) is True
+    assert pipeline_called.wait(timeout=5), web_app._obs_status_text()
+    assert captured["clip_prompt"] == "今回だけ使う切り抜きプロンプト"
+    assert captured["chapter_prompt"] == "保存済みのタイムスタンプ用プロンプト"
+    assert settings["clip_prompt"] == "保存済みのプロンプト"
+
+
+def test_recording_primary_confirmation_applies_prompt_to_local_pipeline(monkeypatch):
+    pipeline_called = threading.Event()
+    captured = {}
+    settings = {
+        "enable_clips": True,
+        "enable_chapters": False,
+        "clip_prompt": "保存済みのプロンプト",
+        "confirm_before_auto_process": True,
+    }
+
+    def fake_pipeline(_path, pipeline_settings):
+        captured.update(pipeline_settings)
+        pipeline_called.set()
+        return web_app.ObsPipelineOutcome(log="[OBS] Render 完了", success=True)
+
+    monkeypatch.setattr(web_app, "_run_obs_auto_pipeline_outcome", fake_pipeline)
+    recorded, recording_stopped, _started, _finished = (
+        web_app._obs_make_recording_primary_callbacks(True, settings)
+    )
+    recording_path = "C:/recordings/recording-primary-prompt.mkv"
+    recording_stopped(recording_path)
+    recorded(recording_path)
+
+    assert _wait_for_obs_confirmation(), web_app._obs_status_text()
+    assert web_app._obs_resolve_confirmation_action(
+        "start_with_prompt",
+        "今回のOBS録画だけに使うプロンプト",
+    ) is True
+    assert pipeline_called.wait(timeout=5), web_app._obs_status_text()
+    assert captured["clip_prompt"] == "今回のOBS録画だけに使うプロンプト"
+    assert settings["clip_prompt"] == "保存済みのプロンプト"
+
+
+def test_obs_empty_prompt_action_keeps_confirmation_pending():
+    result = {}
+    settings = {
+        "enable_clips": True,
+        "enable_chapters": True,
+        "clip_prompt": "",
+        "confirm_before_auto_process": True,
+    }
+    worker = threading.Thread(
+        target=lambda: result.setdefault(
+            "value",
+            web_app._obs_confirm_before_auto_process(
+                settings,
+                "C:/recordings/prompt-required.mkv",
+                lambda: True,
+            ),
+        )
+    )
+    worker.start()
+    try:
+        assert _wait_for_obs_confirmation(), web_app._obs_status_text()
+        assert web_app._obs_resolve_confirmation_action(
+            "start_with_prompt",
+            "   ",
+        ) is False
+        assert worker.is_alive()
+        assert web_app._obs_resolve_confirmation(False) is True
+        worker.join(timeout=5)
+        assert result["value"] is False
+    finally:
+        if worker.is_alive():
+            web_app._obs_resolve_confirmation(False)
+            worker.join(timeout=5)
+
+
 def test_obs_auto_callback_skips_when_confirmation_is_declined(monkeypatch):
     with web_app._obs_status_lock:
         web_app._obs_status_lines.clear()
@@ -278,28 +450,33 @@ def test_obs_auto_callback_skips_when_confirmation_is_declined(monkeypatch):
     assert "自動生成をスキップしました" in web_app._obs_status_text()
 
 
-def test_obs_auto_callback_starts_without_confirmation_when_disabled(monkeypatch):
+@pytest.mark.parametrize("saved_prompt", ["", "保存済みのプロンプト"])
+def test_obs_auto_callback_starts_without_confirmation_when_disabled(
+    monkeypatch,
+    saved_prompt,
+):
     pipeline_called = threading.Event()
-    monkeypatch.setattr(
-        web_app,
-        "_run_obs_auto_pipeline_outcome",
-        lambda *_args, **_kwargs: (
-            pipeline_called.set()
-            or web_app.ObsPipelineOutcome(log="[OBS] Render 完了", success=True)
-        ),
-    )
+    captured = {}
+
+    def fake_pipeline(_path, pipeline_settings):
+        captured.update(pipeline_settings)
+        pipeline_called.set()
+        return web_app.ObsPipelineOutcome(log="[OBS] Render 完了", success=True)
+
+    monkeypatch.setattr(web_app, "_run_obs_auto_pipeline_outcome", fake_pipeline)
     callback = web_app._obs_make_callback(
         auto_process=True,
         settings={
             "enable_clips": True,
             "enable_chapters": True,
-            "clip_prompt": "",
+            "clip_prompt": saved_prompt,
             "confirm_before_auto_process": False,
         },
     )
     callback("C:/recordings/no-confirmation.mkv")
 
     assert pipeline_called.wait(timeout=5), web_app._obs_status_text()
+    assert captured["clip_prompt"] == saved_prompt
 
 
 def test_obs_youtube_pipeline_uses_url_and_respects_generation_toggles(
@@ -318,13 +495,14 @@ def test_obs_youtube_pipeline_uses_url_and_respects_generation_toggles(
     def fake_render_phase(*args, **kwargs):
         captured["render_args"] = args
         session = args[0]
-        clip_path = tmp_path / "clips" / "clip.mp4"
-        clip_path.parent.mkdir(parents=True, exist_ok=True)
-        clip_path.write_bytes(b"clip")
+        short_path = tmp_path / "shorts" / "clip_short.mp4"
+        short_path.parent.mkdir(parents=True, exist_ok=True)
+        short_path.write_bytes(b"short")
         chapters_path = tmp_path / "chapters.txt"
         chapters_path.write_text("0:00 Intro", encoding="utf-8")
         session["_obs_render_outcome"] = {
-            "clip_paths": [str(clip_path)],
+            "clip_paths": [],
+            "shorts_paths": [str(short_path)],
             "chapters_path": str(chapters_path),
             "chapters_text": "0:00 Intro",
             "youtube_append_requested": False,
@@ -338,8 +516,9 @@ def test_obs_youtube_pipeline_uses_url_and_respects_generation_toggles(
     result = web_app.run_obs_youtube_pipeline(
         url,
         {
-            "enable_clips": True,
+            "enable_clips": False,
             "enable_chapters": False,
+            "generate_shorts": True,
             "auto_append_youtube": True,
         },
     )
@@ -347,8 +526,10 @@ def test_obs_youtube_pipeline_uses_url_and_respects_generation_toggles(
     detect_args = captured["detect_args"]
     assert detect_args[0] == url
     assert detect_args[1] is None
-    assert detect_args[2] is True
+    assert detect_args[2] is False
     assert detect_args[4] is False
+    assert detect_args[-1] is True
+    assert captured["render_args"][2] is True
     assert captured["render_args"][8] is False
     assert "Render 完了" in result
 
@@ -1748,6 +1929,9 @@ def test_start_obs_record_watch_wires_primary_callbacks_and_appends_timestamps(
         11, "individual", True, "gemini", "large-v3", "",
         True, "OBS only", True, "OBS chapters", 55, 120,
         "blur", "left", False, True, True, 0.8, True,
+        True,
+        37,
+        "bottom",
     )
 
     assert status == "connected"
@@ -1760,6 +1944,9 @@ def test_start_obs_record_watch_wires_primary_callbacks_and_appends_timestamps(
     assert captured["settings"]["shorts_mode"] == "blur"
     assert captured["settings"]["shorts_crop"] == "left"
     assert captured["settings"]["shorts_title"] is False
+    assert captured["settings"]["shorts_blur_strength"] == 37
+    assert captured["settings"]["shorts_title_position"] == "bottom"
+    assert captured["settings"]["confirm_before_auto_process"] is False
     assert captured["recording_callback"] is recording_finished
     assert captured["on_recording_stopped"] is recording_stopped
     assert captured["on_stream_started"] is stream_started
@@ -1768,7 +1955,7 @@ def test_start_obs_record_watch_wires_primary_callbacks_and_appends_timestamps(
     web_app.stop_obs_watch()
 
 
-def test_start_obs_rejects_both_generation_outputs_disabled(monkeypatch):
+def test_start_obs_rejects_all_generation_outputs_disabled(monkeypatch):
     status = web_app.start_obs_watch(
         "folder", "localhost", 4455, "", False, "record", "C:/recordings",
         True, False, 5, "combined", False, "gemini", "large-v3", "",
@@ -1777,7 +1964,46 @@ def test_start_obs_rejects_both_generation_outputs_disabled(monkeypatch):
     )
 
     assert "OBS自動処理設定エラー" in status
-    assert "どちらか" in status
+    assert "少なくとも1つ" in status
+
+
+def test_start_obs_accepts_shorts_only(monkeypatch):
+    import obs_integration
+
+    captured = {}
+
+    class FakeWatcher:
+        status = "watching"
+
+        def start(self):
+            pass
+
+        def stop(self):
+            self.status = "stopped"
+
+    def fake_make_callback(_auto_process, settings, _generation):
+        captured["settings"] = settings
+        return lambda _path: None
+
+    monkeypatch.setattr(web_app, "_obs_make_callback", fake_make_callback)
+    monkeypatch.setattr(
+        obs_integration,
+        "create_watcher",
+        lambda *_args, **_kwargs: FakeWatcher(),
+    )
+
+    status = web_app.start_obs_watch(
+        "folder", "localhost", 4455, "", False, "record", "C:/recordings",
+        True, False, 5, "combined", True, "gemini", "large-v3", "",
+        False, "", False, "", 30, 90, "crop", "center", True,
+        False, False, 0.35, False,
+    )
+
+    assert status == "watching"
+    assert captured["settings"]["enable_clips"] is False
+    assert captured["settings"]["generate_shorts"] is True
+    assert captured["settings"]["enable_chapters"] is False
+    web_app.stop_obs_watch()
 
 
 def test_start_obs_folder_record_mode_remains_local_only(monkeypatch):

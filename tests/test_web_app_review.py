@@ -41,9 +41,11 @@ def _session(tmp_path, highlights=None):
         ],
         "youtube_video_id": None,
         "enable_clips": True,
+        "enable_shorts": False,
         "enable_chapters": True,
         "modes": {
             "enable_clips": True,
+            "enable_shorts": False,
             "enable_chapters": True,
             "clip_prompt": "",
             "chapter_prompt": "",
@@ -164,6 +166,76 @@ def test_detect_phase_returns_session_state(monkeypatch, tmp_path):
     assert session["youtube_video_id"] == "abc123"
 
 
+def test_detect_phase_twitch_downloads_and_disables_timestamps(monkeypatch, tmp_path):
+    source = tmp_path / "twitch-vod.mp4"
+
+    def fake_download(url, output_dir):
+        assert url == "https://www.twitch.tv/videos/123456789"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"video")
+        return source
+
+    monkeypatch.setattr(web_app, "download_video", fake_download)
+    monkeypatch.setattr(
+        web_app,
+        "get_video_info",
+        lambda path: {"width": 1280, "height": 720, "fps": 30.0, "duration": 60.0},
+    )
+    monkeypatch.setattr(
+        web_app,
+        "transcribe",
+        lambda path, model, language: [Segment(start=1.0, end=4.0, text="hello")],
+    )
+    monkeypatch.setattr(
+        web_app,
+        "detect_highlights",
+        lambda *args, **kwargs: [
+            {
+                "start": "00:00:01.000",
+                "end": "00:00:04.000",
+                "start_sec": 1.0,
+                "end_sec": 4.0,
+                "duration": 3.0,
+                "title": "Twitch highlight",
+                "reason": "mock",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "extract_video_id",
+        lambda _url: pytest.fail("Twitch input must not query a YouTube video id"),
+    )
+
+    session, _status_md, _panel_update = web_app.detect_phase(
+        "https://www.twitch.tv/videos/123456789",
+        None,
+        True,
+        "",
+        True,
+        "ignored for Twitch",
+        1,
+        "gemini",
+        "gemini-2.5-flash",
+        "key",
+        1,
+        10,
+        "tiny",
+        "ja",
+        False,
+        0.35,
+        str(tmp_path),
+        progress=_progress,
+    )
+
+    assert session["source_kind"] == "twitch"
+    assert session["youtube_video_id"] is None
+    assert session["enable_clips"] is True
+    assert session["enable_chapters"] is False
+    assert session["modes"]["enable_chapters"] is False
+    assert any("Twitch入力" in line for line in session["logs"])
+
+
 def test_render_phase_uses_edited_highlights(monkeypatch, tmp_path):
     session = _session(tmp_path)
     web_app.apply_edits_to_session(session, 0, 2.5, 7.5, "Edited title")
@@ -207,6 +279,154 @@ def test_render_phase_uses_edited_highlights(monkeypatch, tmp_path):
     assert [Path(path).name for path in premiere_job["clip_paths"]] == ["clip.mp4"]
     assert all(Path(path).is_absolute() for path in premiere_job["clip_paths"])
     assert Path(premiere_job["xml_paths"][0]).is_file()
+
+
+def test_render_phase_generates_only_shorts_when_only_shorts_enabled(
+    monkeypatch,
+    tmp_path,
+):
+    session = _session(tmp_path)
+    session["enable_clips"] = False
+    session["enable_shorts"] = True
+    session["enable_chapters"] = False
+    session["modes"].update(
+        enable_clips=False,
+        enable_shorts=True,
+        enable_chapters=False,
+    )
+    extract_calls = []
+
+    def fake_extract(video_path, highlights, output_dir, **kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        extract_calls.append(dict(kwargs))
+        path = output_dir / "short.mp4"
+        path.write_bytes(b"short")
+        return [path]
+
+    monkeypatch.setattr(web_app, "extract_clips", fake_extract)
+
+    result = web_app.render_phase(
+        session,
+        "combined",
+        True,
+        "crop",
+        "center",
+        True,
+        False,
+        False,
+        False,
+        "Noto Sans JP",
+        96,
+        "#FFFFFF",
+        False,
+        False,
+        progress=_progress,
+    )
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0]["shorts"] is True
+    assert not (tmp_path / "clips").exists()
+    assert (tmp_path / "shorts" / "short.mp4").is_file()
+    assert (tmp_path / "project.xml").is_file()
+    assert not (tmp_path / "project_shorts.xml").exists()
+    shorts_only_xml = ET.parse(tmp_path / "project.xml").getroot()
+    assert len(shorts_only_xml.findall(".//sequence/media/video/track")) == 2
+    assert result[5]["clip_paths"] == []
+    assert [Path(path).name for path in result[5]["shorts_paths"]] == ["short.mp4"]
+    assert Path(result[5]["source_path"]) == session["video_path"].resolve()
+    assert result[5]["highlights"][0]["start_sec"] == 1.0
+    assert session["_obs_render_outcome"]["clip_paths"] == []
+    assert [
+        Path(path).name for path in session["_obs_render_outcome"]["shorts_paths"]
+    ] == ["short.mp4"]
+
+
+def test_render_phase_generates_normal_and_short_clips_together(monkeypatch, tmp_path):
+    session = _session(tmp_path)
+    session["enable_chapters"] = False
+    session["modes"]["enable_chapters"] = False
+    extract_calls = []
+
+    def fake_extract(video_path, highlights, output_dir, **kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        is_short = bool(kwargs.get("shorts", False))
+        extract_calls.append(is_short)
+        path = output_dir / ("short.mp4" if is_short else "clip.mp4")
+        path.write_bytes(b"short" if is_short else b"clip")
+        return [path]
+
+    monkeypatch.setattr(web_app, "extract_clips", fake_extract)
+
+    result = web_app.render_phase(
+        session,
+        "combined",
+        True,
+        "crop",
+        "center",
+        True,
+        False,
+        False,
+        False,
+        "Noto Sans JP",
+        96,
+        "#FFFFFF",
+        False,
+        False,
+        progress=_progress,
+    )
+
+    assert extract_calls == [False, True]
+    assert (tmp_path / "clips" / "clip.mp4").is_file()
+    assert (tmp_path / "shorts" / "short.mp4").is_file()
+    assert (tmp_path / "project.xml").is_file()
+    assert not (tmp_path / "project_shorts.xml").exists()
+    combined_xml = ET.parse(tmp_path / "project.xml").getroot()
+    assert len(combined_xml.findall(".//sequence/media/video/track")) == 3
+    assert [Path(path).name for path in result[5]["clip_paths"]] == ["clip.mp4"]
+    assert [Path(path).name for path in result[5]["shorts_paths"]] == ["short.mp4"]
+
+
+def test_render_phase_skips_twitch_timestamps_and_youtube_append(monkeypatch, tmp_path):
+    session = _session(tmp_path)
+    session["source_kind"] = "twitch"
+    session["enable_chapters"] = True
+    session["modes"]["enable_chapters"] = True
+
+    def fake_extract(video_path, highlights, output_dir, **kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / "twitch-clip.mp4"
+        path.write_bytes(b"clip")
+        return [path]
+
+    monkeypatch.setattr(web_app, "extract_clips", fake_extract)
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "check_auth_status",
+        lambda: pytest.fail("Twitch render must not check YouTube auth"),
+    )
+
+    result = web_app.render_phase(
+        session,
+        "combined",
+        False,
+        "crop",
+        "center",
+        True,
+        False,
+        False,
+        True,
+        "Noto Sans JP",
+        96,
+        "#FFFFFF",
+        False,
+        False,
+        progress=_progress,
+    )
+
+    assert "[Skip chapters]" in result[0]
+    assert not result[4]
+    assert session["_obs_render_outcome"]["chapters_path"] == ""
+    assert session["_obs_render_outcome"]["youtube_append_requested"] is False
 
 
 def test_chapters_only_render_clears_stale_premiere_job(tmp_path):
@@ -277,16 +497,24 @@ def test_edited_highlights_flow_into_srt_and_xml_duration(tmp_path):
     assert srt_path.exists()
 
     clip_path = tmp_path / "clip.mp4"
+    source_path = tmp_path / "source.mp4"
     clip_path.write_bytes(b"clip")
+    source_path.write_bytes(b"source")
     xml_path = generate_combined_xml(
         [clip_path],
         highlights,
         {"width": 1920, "height": 1080, "fps": 30.0, "duration": 20.0},
         tmp_path / "project.xml",
+        source_video_path=source_path,
     )
     root = ET.parse(xml_path).getroot()
     sequence_duration = int(root.find(".//sequence/duration").text)
-    assert sequence_duration == int((edited_end - edited_start) * 30.0)
+    assert sequence_duration == int(20.0 * 30.0)
+    video_tracks = root.findall(".//sequence/media/video/track")
+    assert len(video_tracks) == 2
+    assert int(video_tracks[1].find("clipitem/start").text) == int(
+        edited_start * 30.0
+    )
 
 
 def test_render_preview_clip_uses_single_clipper_call(monkeypatch, tmp_path):
