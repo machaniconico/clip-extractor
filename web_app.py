@@ -4274,6 +4274,19 @@ def create_ui():
                     info="チェックすると、AI抽出 (STEP 1) が終わり次第そのままクリップ書き出し (STEP 2) まで一気に進めます。レビューで手直ししたい場合はオフのままにしてください。",
                 )
 
+                with gr.Row():
+                    input_save_defaults_btn = gr.Button(
+                        "現在のInput設定をデフォルトに保存",
+                        variant="secondary",
+                        size="sm",
+                    )
+                    input_save_defaults_msg = gr.Textbox(
+                        label="",
+                        interactive=False,
+                        show_label=False,
+                        lines=1,
+                    )
+
                 with gr.Group(visible=False) as review_panel:
                     gr.Markdown("## クリップレビュー / Clip Review")
                     status = gr.Markdown("")
@@ -5054,6 +5067,26 @@ def create_ui():
                             obs_executable_path,
                             obs_auto_connect_on_startup],
                     outputs=save_defaults_msg,
+                )
+
+                input_save_defaults_btn.click(
+                    fn=save_defaults,
+                    inputs=[ai_provider, ai_model,
+                            enable_clips, enable_chapters, clip_prompt, chapter_prompt,
+                            auto_append_youtube,
+                            num_clips, output_mode, generate_shorts, shorts_mode, shorts_crop, shorts_title,
+                            min_duration, max_duration,
+                            whisper_model, language,
+                            font_name, font_size, font_color,
+                            output_base_dir,
+                            generate_thumbnails,
+                            audio_fusion, audio_alpha,
+                            karaoke,
+                            premiere_executable_path,
+                            obs_launch_on_startup,
+                            obs_executable_path,
+                            obs_auto_connect_on_startup],
+                    outputs=input_save_defaults_msg,
                 )
 
             # --- Output Tab ---

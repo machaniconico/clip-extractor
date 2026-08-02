@@ -40,6 +40,32 @@ def _click_input_names(module: ast.Module, button_name: str) -> list[str]:
     raise AssertionError(f"{button_name}.click(inputs=[...]) not found")
 
 
+def _click_output_names(module: ast.Module, button_name: str) -> list[str]:
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (
+            isinstance(func, ast.Attribute)
+            and func.attr == "click"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == button_name
+        ):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg != "outputs":
+                continue
+            if isinstance(keyword.value, ast.Name):
+                return [keyword.value.id]
+            assert isinstance(keyword.value, ast.List), ast.dump(keyword.value)
+            names: list[str] = []
+            for elt in keyword.value.elts:
+                assert isinstance(elt, ast.Name), ast.dump(elt)
+                names.append(elt.id)
+            return names
+    raise AssertionError(f"{button_name}.click(outputs=...) not found")
+
+
 def _event_output_names(
     module: ast.Module,
     function_name: str,
@@ -194,6 +220,25 @@ def test_save_defaults_signature_matches_save_button_inputs():
         "obs_launch_on_startup",
         "obs_executable_path",
         "obs_auto_connect_on_startup",
+    ]
+
+
+def test_input_tab_exposes_default_save_button_with_same_settings():
+    module = _module()
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    input_tab = source.index('with gr.Tab("Input / 入力")')
+    obs_tab = source.index('with gr.Tab("OBS連携 / OBS")')
+    button = source.index("input_save_defaults_btn =")
+
+    assert input_tab < button < obs_tab
+    assert '"現在のInput設定をデフォルトに保存"' in source
+    assert _click_input_names(
+        module,
+        "input_save_defaults_btn",
+    ) == _click_input_names(module, "save_defaults_btn")
+    assert _click_output_names(module, "input_save_defaults_btn") == [
+        "input_save_defaults_msg",
     ]
 
 
