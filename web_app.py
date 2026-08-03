@@ -4048,33 +4048,44 @@ APP_CSS = """
             margin: 0 !important;
             white-space: nowrap;
         }
-        @media (min-width: 900px) {
-            .input-workspace {
-                display: grid !important;
-                grid-template-columns: minmax(0, 2fr) minmax(18rem, 1fr);
-                grid-template-areas: "source options" "actions options";
-                align-items: start;
-                gap: 1rem;
-            }
-            .input-source-column {
-                grid-area: source;
-                min-width: 0 !important;
-            }
-            .input-options-column {
-                grid-area: options;
-                min-width: 0 !important;
-            }
-            .input-actions-column {
-                grid-area: actions;
-                min-width: 0 !important;
-            }
+        .gradio-container {
+            --input-workspace-gap: 1rem;
+        }
+        .input-source-row,
+        .input-settings-grid {
+            align-items: stretch;
+            gap: var(--input-workspace-gap);
+        }
+        .input-settings-grid {
+            margin-top: 0.35rem;
+        }
+        .input-url-column,
+        .input-file-column,
+        .input-core-settings-column,
+        .input-shorts-settings-column,
+        .input-actions-column {
+            min-width: 0 !important;
+        }
+        .input-settings-title {
+            margin: 0.1rem 0 -0.15rem !important;
+        }
+        .input-settings-title h3 {
+            font-size: 1rem !important;
+            line-height: 1.4 !important;
+            margin: 0 !important;
+        }
+        .input-actions-column {
+            margin-top: 0.5rem;
         }
         @media (max-width: 899px) {
-            .input-workspace {
+            .input-source-row,
+            .input-settings-grid {
                 flex-direction: column !important;
             }
-            .input-source-column,
-            .input-options-column,
+            .input-url-column,
+            .input-file-column,
+            .input-core-settings-column,
+            .input-shorts-settings-column,
             .input-actions-column {
                 flex: 1 1 auto !important;
                 min-width: 0 !important;
@@ -4323,27 +4334,36 @@ def create_ui():
 """
                         )
 
-                with gr.Row(elem_classes="input-workspace"):
+                with gr.Row(elem_classes="input-source-row"):
                     with gr.Column(
-                        scale=2,
-                        elem_classes="input-source-column",
+                        scale=1,
+                        elem_classes="input-url-column",
                     ):
                         input_url = gr.Textbox(
                             label="動画URL（YouTube / Twitch）",
                             placeholder="https://youtube.com/... または https://twitch.tv/videos/...",
                             info="YouTube/TwitchのURLを貼り付けると自動でダウンロードします。Twitch入力ではタイムスタンプを生成しません",
                         )
-                        gr.HTML("<p style='text-align:center; color:#999;'>または</p>")
+                    with gr.Column(
+                        scale=1,
+                        elem_classes="input-file-column",
+                    ):
                         input_file = gr.File(
                             label="ローカルファイル",
                             file_types=["video"],
                             type="filepath",
+                            height=128,
                         )
 
+                with gr.Row(elem_classes="input-settings-grid"):
                     with gr.Column(
                         scale=1,
-                        elem_classes="input-options-column",
+                        elem_classes="input-core-settings-column",
                     ):
+                        gr.Markdown(
+                            "### クリップ・出力設定",
+                            elem_classes="input-settings-title",
+                        )
                         num_clips = gr.Number(
                             minimum=1, maximum=50, value=defaults["num_clips"],
                             precision=0,
@@ -4366,6 +4386,41 @@ def create_ui():
                             value=defaults.get("output_mode", "combined"),
                             label="出力モード",
                             info="combined: 1つのXMLに全シーケンス / individual: クリップごとに別XML",
+                        )
+                        generate_thumbnails = gr.Checkbox(
+                            label="サムネイル候補を生成 / Generate thumbnail candidates",
+                            value=defaults.get("generate_thumbnails", False),
+                            info="各クリップからタイトル入りの代表フレーム画像を生成します",
+                        )
+                        audio_fusion = gr.Checkbox(
+                            label="音声盛り上がり融合 / Audio excitement fusion",
+                            value=defaults.get("audio_fusion", False),
+                            info="音量や急な盛り上がりを使ってクリップ順位を再調整します / Re-rank clips using loudness and sudden audio peaks",
+                        )
+                        audio_alpha = gr.Slider(
+                            0.0, 1.0,
+                            value=defaults.get("audio_alpha", 0.35),
+                            step=0.05,
+                            label="音声重み alpha / Audio weight",
+                        )
+                        generate_zip = gr.Checkbox(
+                            label="ZIPファイルを生成",
+                            value=False,
+                            info="出力をZIPにまとめてダウンロード可能にする",
+                        )
+                        upload_to_drive = gr.Checkbox(
+                            label="Google Drive にアップロード",
+                            value=False,
+                            info="要: credentials.json の設定",
+                        )
+
+                    with gr.Column(
+                        scale=1,
+                        elem_classes="input-shorts-settings-column",
+                    ):
+                        gr.Markdown(
+                            "### ショート動画設定",
+                            elem_classes="input-settings-title",
                         )
                         generate_shorts = gr.Checkbox(
                             label="ショート動画 (9:16) を生成",
@@ -4413,72 +4468,43 @@ def create_ui():
                             label="タイトルの配置",
                             info="pad/blurでは上下の余白か映像中央を選択。cropでは画面上部・下部・中央になります",
                         )
-                        generate_thumbnails = gr.Checkbox(
-                            label="サムネイル候補を生成 / Generate thumbnail candidates",
-                            value=defaults.get("generate_thumbnails", False),
-                            info="各クリップからタイトル入りの代表フレーム画像を生成します",
-                        )
-                        audio_fusion = gr.Checkbox(
-                            label="音声盛り上がり融合 / Audio excitement fusion",
-                            value=defaults.get("audio_fusion", False),
-                            info="音量や急な盛り上がりを使ってクリップ順位を再調整します / Re-rank clips using loudness and sudden audio peaks",
-                        )
-                        audio_alpha = gr.Slider(
-                            0.0, 1.0,
-                            value=defaults.get("audio_alpha", 0.35),
-                            step=0.05,
-                            label="音声重み alpha / Audio weight",
-                        )
                         karaoke = gr.Checkbox(
                             label="ワード単位カラオケ字幕 / Word-level karaoke captions",
                             value=defaults.get("karaoke", False),
                             info="ショート動画の焼き込み字幕を単語ごとにハイライトします / Highlight burned-in Shorts captions word by word",
                         )
-                        generate_zip = gr.Checkbox(
-                            label="ZIPファイルを生成",
-                            value=False,
-                            info="出力をZIPにまとめてダウンロード可能にする",
-                        )
-                        upload_to_drive = gr.Checkbox(
-                            label="Google Drive にアップロード",
-                            value=False,
-                            info="要: credentials.json の設定",
-                        )
 
-                    with gr.Column(
-                        scale=2,
-                        elem_classes="input-actions-column",
-                    ):
-                        with gr.Row():
-                            detect_btn = gr.Button(
-                                "STEP 1：AIがおすすめ箇所を抽出",
-                                variant="primary",
-                                size="lg",
-                            )
-                            render_btn = gr.Button(
-                                "STEP 2：クリップを書き出し",
-                                variant="secondary",
-                                size="lg",
-                            )
-
-                        auto_run_both = gr.Checkbox(
-                            label="STEP 1 のあと STEP 2 まで自動で実行する",
-                            value=False,
-                            info="チェックすると、AI抽出 (STEP 1) が終わり次第そのままクリップ書き出し (STEP 2) まで一気に進めます。レビューで手直ししたい場合はオフのままにしてください。",
+                with gr.Column(elem_classes="input-actions-column"):
+                    with gr.Row():
+                        detect_btn = gr.Button(
+                            "STEP 1：AIがおすすめ箇所を抽出",
+                            variant="primary",
+                            size="lg",
+                        )
+                        render_btn = gr.Button(
+                            "STEP 2：クリップを書き出し",
+                            variant="secondary",
+                            size="lg",
                         )
 
-                        with gr.Row():
-                            input_save_defaults_btn = gr.Button(
-                                "現在のInput設定をデフォルトに保存",
-                                variant="secondary",
-                                size="sm",
-                            )
-                            input_save_defaults_msg = gr.Textbox(
-                                label="",
-                                interactive=False,
-                                show_label=False,
-                                lines=1,
-                            )
+                    auto_run_both = gr.Checkbox(
+                        label="STEP 1 のあと STEP 2 まで自動で実行する",
+                        value=False,
+                        info="チェックすると、AI抽出 (STEP 1) が終わり次第そのままクリップ書き出し (STEP 2) まで一気に進めます。レビューで手直ししたい場合はオフのままにしてください。",
+                    )
+
+                    with gr.Row():
+                        input_save_defaults_btn = gr.Button(
+                            "現在のInput設定をデフォルトに保存",
+                            variant="secondary",
+                            size="sm",
+                        )
+                        input_save_defaults_msg = gr.Textbox(
+                            label="",
+                            interactive=False,
+                            show_label=False,
+                            lines=1,
+                        )
 
                 session_state = gr.State({})
                 highlights_state = gr.State([])

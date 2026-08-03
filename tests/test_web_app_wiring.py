@@ -272,39 +272,78 @@ def test_input_tab_exposes_default_save_button_with_same_settings():
     ]
 
 
-def test_input_workspace_uses_empty_desktop_space_without_reordering_mobile_flow():
+def test_input_workspace_fills_desktop_width_without_reordering_mobile_flow():
     source = WEB_APP.read_text(encoding="utf-8")
 
     input_tab = source.index('with gr.Tab("Input / 入力")')
     obs_tab = source.index('with gr.Tab("OBS連携 / OBS")')
-    workspace = source.index(
-        'with gr.Row(elem_classes="input-workspace")',
+    source_row = source.index(
+        'with gr.Row(elem_classes="input-source-row")',
         input_tab,
     )
-    source_column = source.index(
-        'elem_classes="input-source-column"',
-        workspace,
+    url_column = source.index(
+        'elem_classes="input-url-column"',
+        source_row,
     )
-    options_column = source.index(
-        'elem_classes="input-options-column"',
-        source_column,
+    file_column = source.index(
+        'elem_classes="input-file-column"',
+        url_column,
+    )
+    settings_grid = source.index(
+        'with gr.Row(elem_classes="input-settings-grid")',
+        file_column,
+    )
+    core_settings = source.index(
+        'elem_classes="input-core-settings-column"',
+        settings_grid,
+    )
+    shorts_settings = source.index(
+        'elem_classes="input-shorts-settings-column"',
+        core_settings,
     )
     actions_column = source.index(
-        'elem_classes="input-actions-column"',
-        options_column,
+        'with gr.Column(elem_classes="input-actions-column"):',
+        shorts_settings,
     )
     review_panel = source.index("as review_panel:", actions_column)
 
-    assert input_tab < workspace < source_column < options_column
-    assert options_column < actions_column < review_panel < obs_tab
+    assert input_tab < source_row < url_column < file_column < settings_grid
+    assert settings_grid < core_settings < shorts_settings < actions_column
+    assert actions_column < review_panel < obs_tab
 
-    source_controls = source[source_column:options_column]
-    assert "input_url = gr.Textbox(" in source_controls
-    assert "input_file = gr.File(" in source_controls
+    url_controls = source[url_column:file_column]
+    assert "input_url = gr.Textbox(" in url_controls
+    assert "input_file = gr.File(" not in url_controls
 
-    option_controls = source[options_column:actions_column]
-    assert "num_clips = gr.Number(" in option_controls
-    assert "upload_to_drive = gr.Checkbox(" in option_controls
+    file_controls = source[file_column:settings_grid]
+    assert "input_file = gr.File(" in file_controls
+    assert "height=128" in file_controls
+
+    core_controls = source[core_settings:shorts_settings]
+    for control in (
+        "num_clips = gr.Number(",
+        "min_duration = gr.Number(",
+        "max_duration = gr.Number(",
+        "output_mode = gr.Radio(",
+        "generate_thumbnails = gr.Checkbox(",
+        "audio_fusion = gr.Checkbox(",
+        "audio_alpha = gr.Slider(",
+        "generate_zip = gr.Checkbox(",
+        "upload_to_drive = gr.Checkbox(",
+    ):
+        assert control in core_controls
+
+    shorts_controls = source[shorts_settings:actions_column]
+    for control in (
+        "generate_shorts = gr.Checkbox(",
+        "shorts_mode = gr.Radio(",
+        "shorts_blur_strength = gr.Slider(",
+        "shorts_crop = gr.Radio(",
+        "shorts_title = gr.Checkbox(",
+        "shorts_title_position = gr.Radio(",
+        "karaoke = gr.Checkbox(",
+    ):
+        assert control in shorts_controls
 
     action_controls = source[actions_column:review_panel]
     for control in (
@@ -316,9 +355,17 @@ def test_input_workspace_uses_empty_desktop_space_without_reordering_mobile_flow
     ):
         assert control in action_controls
 
-    assert 'grid-template-areas: "source options" "actions options";' in source
+    assert 'gap: var(--input-workspace-gap);' in source
     assert "@media (max-width: 899px)" in source
-    assert "flex-direction: column !important;" in source
+    for responsive_class in (
+        ".input-source-row",
+        ".input-settings-grid",
+        ".input-url-column",
+        ".input-file-column",
+        ".input-core-settings-column",
+        ".input-shorts-settings-column",
+    ):
+        assert responsive_class in source
 
 
 def test_clip_duration_controls_live_in_their_workflow_tabs():
