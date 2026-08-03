@@ -4050,6 +4050,17 @@ APP_CSS = """
         }
         .gradio-container {
             --input-workspace-gap: 1rem;
+            --input-source-settings-gap: 1.25rem;
+            --input-source-tint: color-mix(
+                in srgb,
+                var(--block-background-fill) 90%,
+                var(--primary-500) 10%
+            );
+            --input-source-border: color-mix(
+                in srgb,
+                var(--border-color-primary) 65%,
+                var(--primary-500) 35%
+            );
         }
         .input-source-row,
         .input-settings-grid {
@@ -4057,14 +4068,29 @@ APP_CSS = """
             gap: var(--input-workspace-gap);
         }
         .input-settings-grid {
-            margin-top: 0.35rem;
+            margin-top: var(--input-source-settings-gap);
+        }
+        .input-source-control {
+            background: var(--input-source-tint) !important;
+            border-color: var(--input-source-border) !important;
         }
         .input-url-column,
         .input-file-column,
         .input-core-settings-column,
         .input-shorts-settings-column,
-        .input-actions-column {
+        .input-actions-column,
+        .obs-trigger-column,
+        .obs-connection-settings-column,
+        .obs-connection-actions-column {
             min-width: 0 !important;
+        }
+        .input-settings-grid input[type="number"] {
+            -moz-appearance: textfield;
+        }
+        .input-settings-grid input[type="number"]::-webkit-inner-spin-button,
+        .input-settings-grid input[type="number"]::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
         }
         .input-settings-title {
             margin: 0.1rem 0 -0.15rem !important;
@@ -4077,16 +4103,39 @@ APP_CSS = """
         .input-actions-column {
             margin-top: 0.5rem;
         }
+        @media (min-width: 900px) {
+            .obs-connection-workspace {
+                display: grid !important;
+                grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+                grid-template-areas: "trigger connection" "actions connection";
+                grid-template-rows: max-content 1fr;
+                align-items: start;
+                gap: var(--input-workspace-gap);
+            }
+            .obs-trigger-column {
+                grid-area: trigger;
+            }
+            .obs-connection-settings-column {
+                grid-area: connection;
+            }
+            .obs-connection-actions-column {
+                grid-area: actions;
+            }
+        }
         @media (max-width: 899px) {
             .input-source-row,
-            .input-settings-grid {
+            .input-settings-grid,
+            .obs-connection-workspace {
                 flex-direction: column !important;
             }
             .input-url-column,
             .input-file-column,
             .input-core-settings-column,
             .input-shorts-settings-column,
-            .input-actions-column {
+            .input-actions-column,
+            .obs-trigger-column,
+            .obs-connection-settings-column,
+            .obs-connection-actions-column {
                 flex: 1 1 auto !important;
                 min-width: 0 !important;
                 width: 100% !important;
@@ -4343,6 +4392,7 @@ def create_ui():
                             label="動画URL（YouTube / Twitch）",
                             placeholder="https://youtube.com/... または https://twitch.tv/videos/...",
                             info="YouTube/TwitchのURLを貼り付けると自動でダウンロードします。Twitch入力ではタイムスタンプを生成しません",
+                            elem_classes="input-source-control",
                         )
                     with gr.Column(
                         scale=1,
@@ -4353,6 +4403,7 @@ def create_ui():
                             file_types=["video"],
                             type="filepath",
                             height=128,
+                            elem_classes="input-source-control",
                         )
 
                 with gr.Row(elem_classes="input-settings-grid"):
@@ -4652,8 +4703,11 @@ def create_ui():
                         " **Settings / 設定 → OBS Studio 起動・自動連携** "
                         "でそれぞれON/OFFできます。"
                     )
-                with gr.Row():
-                    with gr.Column(scale=1):
+                with gr.Row(elem_classes="obs-connection-workspace"):
+                    with gr.Column(
+                        scale=1,
+                        elem_classes="obs-trigger-column",
+                    ):
                         obs_trigger_radio = gr.Radio(
                             ["websocket", "folder"],
                             label="検知方式 / Trigger",
@@ -4682,7 +4736,10 @@ def create_ui():
                             label="検知後に自動で切り抜き/チャプター生成まで実行",
                             value=bool(defaults.get("obs_auto_process", True)),
                         )
-                    with gr.Column(scale=1):
+                    with gr.Column(
+                        scale=1,
+                        elem_classes="obs-connection-settings-column",
+                    ):
                         obs_host = gr.Textbox(
                             label="WebSocket Host",
                             value=defaults.get("obs_host", "localhost"),
@@ -4735,6 +4792,25 @@ def create_ui():
                             fn=pick_obs_watch_folder_dialog,
                             inputs=obs_watch_folder,
                             outputs=obs_watch_folder,
+                        )
+
+                    with gr.Column(
+                        scale=1,
+                        elem_classes="obs-connection-actions-column",
+                    ):
+                        with gr.Row():
+                            obs_start_btn = gr.Button(
+                                "OBS連携 開始",
+                                variant="primary",
+                            )
+                            obs_stop_btn = gr.Button("OBS連携 停止")
+                            obs_refresh_btn = gr.Button("状態を更新")
+
+                        obs_status_box = gr.Textbox(
+                            label="OBS連携ステータス",
+                            lines=8,
+                            interactive=False,
+                            value="",
                         )
 
                 with gr.Accordion(
@@ -4931,18 +5007,6 @@ def create_ui():
                         ],
                         outputs=obs_save_processing_msg,
                     )
-
-                with gr.Row():
-                    obs_start_btn = gr.Button("OBS連携 開始", variant="primary")
-                    obs_stop_btn = gr.Button("OBS連携 停止")
-                    obs_refresh_btn = gr.Button("状態を更新")
-
-                obs_status_box = gr.Textbox(
-                    label="OBS連携ステータス",
-                    lines=12,
-                    interactive=False,
-                    value="",
-                )
 
                 with gr.Group(visible=False) as obs_confirmation_group:
                     obs_confirmation_message = gr.Markdown("")

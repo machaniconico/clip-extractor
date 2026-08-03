@@ -1,6 +1,7 @@
 """AST regression tests for web_app function/input ordering."""
 
 import ast
+import re
 from pathlib import Path
 
 
@@ -147,6 +148,19 @@ def _string_constant(module: ast.Module, name: str) -> str:
             assert isinstance(node.value.value, str)
             return node.value.value
     raise AssertionError(f"String constant not found: {name}")
+
+
+def _css_properties(css: str, selector: str) -> dict[str, str]:
+    properties: dict[str, str] = {}
+    for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        if selector not in {item.strip() for item in selectors.split(",")}:
+            continue
+        for declaration in body.split(";"):
+            if ":" not in declaration:
+                continue
+            name, value = declaration.split(":", 1)
+            properties[name.strip()] = value.strip()
+    return properties
 
 
 def _top_level_tab_labels(module: ast.Module) -> list[str]:
@@ -366,6 +380,120 @@ def test_input_workspace_fills_desktop_width_without_reordering_mobile_flow():
         ".input-shorts-settings-column",
     ):
         assert responsive_class in source
+
+
+def test_input_workspace_separates_sources_and_hides_number_spinners():
+    css = _string_constant(_module(), "APP_CSS")
+
+    root = _css_properties(css, ".gradio-container")
+    assert root["--input-source-settings-gap"] == "1.25rem"
+    assert "var(--block-background-fill)" in root["--input-source-tint"]
+    assert "var(--primary-500)" in root["--input-source-tint"]
+    assert "var(--border-color-primary)" in root["--input-source-border"]
+
+    settings = _css_properties(css, ".input-settings-grid")
+    assert settings["margin-top"] == "var(--input-source-settings-gap)"
+
+    source_control = _css_properties(css, ".input-source-control")
+    assert source_control["background"] == "var(--input-source-tint) !important"
+    assert source_control["border-color"] == "var(--input-source-border) !important"
+    assert WEB_APP.read_text(encoding="utf-8").count(
+        'elem_classes="input-source-control"'
+    ) == 2
+
+    number_input = _css_properties(
+        css,
+        '.input-settings-grid input[type="number"]',
+    )
+    assert number_input["-moz-appearance"] == "textfield"
+    for selector in (
+        '.input-settings-grid input[type="number"]::-webkit-inner-spin-button',
+        '.input-settings-grid input[type="number"]::-webkit-outer-spin-button',
+    ):
+        properties = _css_properties(css, selector)
+        assert properties["-webkit-appearance"] == "none"
+        assert properties["margin"] == "0"
+
+
+def test_obs_connection_workspace_uses_left_space_without_reordering_mobile_flow():
+    module = _module()
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    obs_tab = source.index('with gr.Tab("OBS連携 / OBS")')
+    settings_tab = source.index('with gr.Tab("Settings / 設定")')
+    workspace = source.index(
+        'with gr.Row(elem_classes="obs-connection-workspace")',
+        obs_tab,
+    )
+    trigger_column = source.index(
+        'elem_classes="obs-trigger-column"',
+        workspace,
+    )
+    connection_column = source.index(
+        'elem_classes="obs-connection-settings-column"',
+        trigger_column,
+    )
+    actions_column = source.index(
+        'elem_classes="obs-connection-actions-column"',
+        connection_column,
+    )
+    processing_settings = source.index(
+        '"OBS自動処理の生成設定"',
+        actions_column,
+    )
+
+    assert obs_tab < workspace < trigger_column < connection_column
+    assert connection_column < actions_column < processing_settings < settings_tab
+
+    trigger_controls = source[trigger_column:connection_column]
+    for control in (
+        "obs_trigger_radio =",
+        "obs_stop_event_radio =",
+        "obs_auto_process =",
+    ):
+        assert control in trigger_controls
+
+    connection_controls = source[connection_column:actions_column]
+    for control in (
+        "obs_host =",
+        "obs_port =",
+        "obs_save_password =",
+        "obs_password =",
+        "obs_watch_folder =",
+        "obs_browse_folder_btn =",
+    ):
+        assert control in connection_controls
+
+    action_controls = source[actions_column:processing_settings]
+    for control in (
+        "obs_start_btn =",
+        "obs_stop_btn =",
+        "obs_refresh_btn =",
+        "obs_status_box =",
+    ):
+        assert control in action_controls
+    assert "lines=8" in action_controls
+
+    css = _string_constant(module, "APP_CSS")
+    workspace_css = _css_properties(css, ".obs-connection-workspace")
+    assert workspace_css["grid-template-areas"] == (
+        '"trigger connection" "actions connection"'
+    )
+    assert workspace_css["grid-template-rows"] == "max-content 1fr"
+    assert workspace_css["flex-direction"] == "column !important"
+    assert _css_properties(css, ".obs-trigger-column")["grid-area"] == "trigger"
+    assert (
+        _css_properties(css, ".obs-connection-settings-column")["grid-area"]
+        == "connection"
+    )
+    assert (
+        _css_properties(css, ".obs-connection-actions-column")["grid-area"]
+        == "actions"
+    )
+
+    assert _click_output_names(module, "obs_start_btn") == ["obs_status_box"]
+    assert _click_output_names(module, "obs_stop_btn") == ["obs_status_box"]
+    assert _click_output_names(module, "obs_refresh_btn") == ["obs_status_box"]
 
 
 def test_clip_duration_controls_live_in_their_workflow_tabs():
