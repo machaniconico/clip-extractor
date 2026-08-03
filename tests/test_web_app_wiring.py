@@ -382,7 +382,7 @@ def test_input_workspace_fills_desktop_width_without_reordering_mobile_flow():
         assert responsive_class in source
 
 
-def test_input_workspace_separates_sources_and_hides_number_spinners():
+def test_input_workspace_separates_sources_and_hides_native_scroll_controls():
     css = _string_constant(_module(), "APP_CSS")
 
     root = _css_properties(css, ".gradio-container")
@@ -393,6 +393,13 @@ def test_input_workspace_separates_sources_and_hides_number_spinners():
 
     settings = _css_properties(css, ".input-settings-grid")
     assert settings["margin-top"] == "var(--input-source-settings-gap)"
+
+    for selector in (
+        ".input-core-settings-column > .input-settings-title",
+        ".input-shorts-settings-column > .input-settings-title",
+    ):
+        settings_title = _css_properties(css, selector)
+        assert settings_title["overflow"] == "visible !important"
 
     source_control = _css_properties(css, ".input-source-control")
     assert source_control["background"] == "var(--input-source-tint) !important"

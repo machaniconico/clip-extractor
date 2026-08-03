@@ -4095,6 +4095,10 @@ APP_CSS = """
         .input-settings-title {
             margin: 0.1rem 0 -0.15rem !important;
         }
+        .input-core-settings-column > .input-settings-title,
+        .input-shorts-settings-column > .input-settings-title {
+            overflow: visible !important;
+        }
         .input-settings-title h3 {
             font-size: 1rem !important;
             line-height: 1.4 !important;
