@@ -4048,6 +4048,39 @@ APP_CSS = """
             margin: 0 !important;
             white-space: nowrap;
         }
+        @media (min-width: 900px) {
+            .input-workspace {
+                display: grid !important;
+                grid-template-columns: minmax(0, 2fr) minmax(18rem, 1fr);
+                grid-template-areas: "source options" "actions options";
+                align-items: start;
+                gap: 1rem;
+            }
+            .input-source-column {
+                grid-area: source;
+                min-width: 0 !important;
+            }
+            .input-options-column {
+                grid-area: options;
+                min-width: 0 !important;
+            }
+            .input-actions-column {
+                grid-area: actions;
+                min-width: 0 !important;
+            }
+        }
+        @media (max-width: 899px) {
+            .input-workspace {
+                flex-direction: column !important;
+            }
+            .input-source-column,
+            .input-options-column,
+            .input-actions-column {
+                flex: 1 1 auto !important;
+                min-width: 0 !important;
+                width: 100% !important;
+            }
+        }
         footer { display: none !important; }
         a[href*="gradio.app"] { display: none !important; }
         """
@@ -4290,8 +4323,11 @@ def create_ui():
 """
                         )
 
-                with gr.Row():
-                    with gr.Column(scale=2):
+                with gr.Row(elem_classes="input-workspace"):
+                    with gr.Column(
+                        scale=2,
+                        elem_classes="input-source-column",
+                    ):
                         input_url = gr.Textbox(
                             label="動画URL（YouTube / Twitch）",
                             placeholder="https://youtube.com/... または https://twitch.tv/videos/...",
@@ -4304,7 +4340,10 @@ def create_ui():
                             type="filepath",
                         )
 
-                    with gr.Column(scale=1):
+                    with gr.Column(
+                        scale=1,
+                        elem_classes="input-options-column",
+                    ):
                         num_clips = gr.Number(
                             minimum=1, maximum=50, value=defaults["num_clips"],
                             precision=0,
@@ -4406,40 +4445,44 @@ def create_ui():
                             info="要: credentials.json の設定",
                         )
 
+                    with gr.Column(
+                        scale=2,
+                        elem_classes="input-actions-column",
+                    ):
+                        with gr.Row():
+                            detect_btn = gr.Button(
+                                "STEP 1：AIがおすすめ箇所を抽出",
+                                variant="primary",
+                                size="lg",
+                            )
+                            render_btn = gr.Button(
+                                "STEP 2：クリップを書き出し",
+                                variant="secondary",
+                                size="lg",
+                            )
+
+                        auto_run_both = gr.Checkbox(
+                            label="STEP 1 のあと STEP 2 まで自動で実行する",
+                            value=False,
+                            info="チェックすると、AI抽出 (STEP 1) が終わり次第そのままクリップ書き出し (STEP 2) まで一気に進めます。レビューで手直ししたい場合はオフのままにしてください。",
+                        )
+
+                        with gr.Row():
+                            input_save_defaults_btn = gr.Button(
+                                "現在のInput設定をデフォルトに保存",
+                                variant="secondary",
+                                size="sm",
+                            )
+                            input_save_defaults_msg = gr.Textbox(
+                                label="",
+                                interactive=False,
+                                show_label=False,
+                                lines=1,
+                            )
+
                 session_state = gr.State({})
                 highlights_state = gr.State([])
                 premiere_job_state = gr.State(None)
-
-                with gr.Row():
-                    detect_btn = gr.Button(
-                        "STEP 1：AIがおすすめ箇所を抽出",
-                        variant="primary",
-                        size="lg",
-                    )
-                    render_btn = gr.Button(
-                        "STEP 2：クリップを書き出し",
-                        variant="secondary",
-                        size="lg",
-                    )
-
-                auto_run_both = gr.Checkbox(
-                    label="STEP 1 のあと STEP 2 まで自動で実行する",
-                    value=False,
-                    info="チェックすると、AI抽出 (STEP 1) が終わり次第そのままクリップ書き出し (STEP 2) まで一気に進めます。レビューで手直ししたい場合はオフのままにしてください。",
-                )
-
-                with gr.Row():
-                    input_save_defaults_btn = gr.Button(
-                        "現在のInput設定をデフォルトに保存",
-                        variant="secondary",
-                        size="sm",
-                    )
-                    input_save_defaults_msg = gr.Textbox(
-                        label="",
-                        interactive=False,
-                        show_label=False,
-                        lines=1,
-                    )
 
                 with gr.Group(visible=False) as review_panel:
                     gr.Markdown("## クリップレビュー / Clip Review")

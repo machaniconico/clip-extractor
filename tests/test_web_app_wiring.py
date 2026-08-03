@@ -272,6 +272,55 @@ def test_input_tab_exposes_default_save_button_with_same_settings():
     ]
 
 
+def test_input_workspace_uses_empty_desktop_space_without_reordering_mobile_flow():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    input_tab = source.index('with gr.Tab("Input / 入力")')
+    obs_tab = source.index('with gr.Tab("OBS連携 / OBS")')
+    workspace = source.index(
+        'with gr.Row(elem_classes="input-workspace")',
+        input_tab,
+    )
+    source_column = source.index(
+        'elem_classes="input-source-column"',
+        workspace,
+    )
+    options_column = source.index(
+        'elem_classes="input-options-column"',
+        source_column,
+    )
+    actions_column = source.index(
+        'elem_classes="input-actions-column"',
+        options_column,
+    )
+    review_panel = source.index("as review_panel:", actions_column)
+
+    assert input_tab < workspace < source_column < options_column
+    assert options_column < actions_column < review_panel < obs_tab
+
+    source_controls = source[source_column:options_column]
+    assert "input_url = gr.Textbox(" in source_controls
+    assert "input_file = gr.File(" in source_controls
+
+    option_controls = source[options_column:actions_column]
+    assert "num_clips = gr.Number(" in option_controls
+    assert "upload_to_drive = gr.Checkbox(" in option_controls
+
+    action_controls = source[actions_column:review_panel]
+    for control in (
+        "detect_btn = gr.Button(",
+        "render_btn = gr.Button(",
+        "auto_run_both = gr.Checkbox(",
+        "input_save_defaults_btn = gr.Button(",
+        "input_save_defaults_msg = gr.Textbox(",
+    ):
+        assert control in action_controls
+
+    assert 'grid-template-areas: "source options" "actions options";' in source
+    assert "@media (max-width: 899px)" in source
+    assert "flex-direction: column !important;" in source
+
+
 def test_clip_duration_controls_live_in_their_workflow_tabs():
     source = WEB_APP.read_text(encoding="utf-8")
 
