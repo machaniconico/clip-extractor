@@ -272,6 +272,36 @@ def test_input_tab_exposes_default_save_button_with_same_settings():
     ]
 
 
+def test_clip_duration_controls_live_in_their_workflow_tabs():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    input_tab = source.index('with gr.Tab("Input / 入力")')
+    obs_tab = source.index('with gr.Tab("OBS連携 / OBS")')
+    settings_tab = source.index('with gr.Tab("Settings / 設定")')
+    output_tab = source.index('with gr.Tab("Output / 出力")')
+
+    input_min = source.index("min_duration = gr.Number(", input_tab)
+    input_max = source.index("max_duration = gr.Number(", input_min)
+    obs_min = source.index("obs_min_duration = gr.Number(", obs_tab)
+    obs_max = source.index("obs_max_duration = gr.Number(", obs_min)
+
+    assert input_tab < input_min < input_max < obs_tab
+    assert obs_tab < obs_min < obs_max < settings_tab
+    assert 'value=defaults["min_duration"]' in source[input_min:input_max]
+    assert 'value=defaults["max_duration"]' in source[input_max:obs_tab]
+    assert (
+        'value=obs_processing_defaults["min_duration"]'
+        in source[obs_min:obs_max]
+    )
+    assert (
+        'value=obs_processing_defaults["max_duration"]'
+        in source[obs_max:settings_tab]
+    )
+    settings_source = source[settings_tab:output_tab]
+    assert "min_duration = gr.Number(" not in settings_source
+    assert "max_duration = gr.Number(" not in settings_source
+
+
 def test_settings_exposes_obs_startup_checkbox_and_executable_path():
     source = WEB_APP.read_text(encoding="utf-8")
 

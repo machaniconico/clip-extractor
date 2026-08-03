@@ -4311,6 +4311,17 @@ def create_ui():
                             label="クリップ数",
                             info="1〜50 個。大きくしすぎると面白くないシーンも混ざりやすくなります (推奨: 3〜10)",
                         )
+                        with gr.Row():
+                            min_duration = gr.Number(
+                                label="最小クリップ長 (秒)",
+                                value=defaults["min_duration"],
+                                precision=0,
+                            )
+                            max_duration = gr.Number(
+                                label="最大クリップ長 (秒)",
+                                value=defaults["max_duration"],
+                                precision=0,
+                            )
                         output_mode = gr.Radio(
                             choices=["combined", "individual"],
                             value=defaults.get("output_mode", "combined"),
@@ -4963,21 +4974,7 @@ def create_ui():
                         ai_provider.change(fn=update_models, inputs=ai_provider, outputs=ai_model)
 
                     with gr.Column():
-                        gr.HTML("<h3>Highlight Detection</h3>")
-                        gr.HTML(
-                            "<p style='color:#666; margin-top:-0.5em;'>"
-                            "プロンプトは Input タブの各モード欄で指定します。ここでは"
-                            "切り抜きの長さ範囲だけ指定。</p>"
-                        )
-                        with gr.Row():
-                            min_duration = gr.Number(
-                                label="最小クリップ長 (秒)", value=defaults["min_duration"], precision=0,
-                            )
-                            max_duration = gr.Number(
-                                label="最大クリップ長 (秒)", value=defaults["max_duration"], precision=0,
-                            )
-
-                        gr.HTML("<h3 style='margin-top: 1.5em;'>出力先 / Output Destination</h3>")
+                        gr.HTML("<h3>出力先 / Output Destination</h3>")
                         _saved_base = (defaults.get("output_base_dir", "") or "").strip()
                         _initial_path = _saved_base or str(resolve_output_base(""))
                         with gr.Row():
