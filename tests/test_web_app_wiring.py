@@ -223,11 +223,17 @@ def test_render_phase_signature_matches_render_inputs():
     assert args[0] == "session"
     assert render_inputs[0] == "session_state"
     assert args[1:] == render_inputs[1:]
-    assert args[-4:] == [
+    assert args[-10:] == [
         "generate_thumbnails",
         "karaoke",
         "shorts_blur_strength",
         "shorts_title_position",
+        "audio_delivery_mode",
+        "bgm_asset_id",
+        "se_asset_id",
+        "bgm_gain_db",
+        "se_gain_db",
+        "se_cue_seconds",
     ]
     assert "shorts_blur_strength" in args
     assert "shorts_title_position" in args
@@ -237,13 +243,41 @@ def test_save_defaults_signature_matches_save_button_inputs():
     module = _module()
     args = _function_args(module, "save_defaults")
     assert args == _click_input_names(module, "save_defaults_btn")
-    assert args[-3:] == [
+    assert args[-9:] == [
         "obs_launch_on_startup",
         "obs_executable_path",
         "obs_auto_connect_on_startup",
+        "audio_delivery_mode",
+        "bgm_asset_id",
+        "se_asset_id",
+        "bgm_gain_db",
+        "se_gain_db",
+        "se_cue_seconds",
     ]
     assert "shorts_blur_strength" in args
     assert "shorts_title_position" in args
+
+
+def test_audio_delivery_controls_are_persisted_and_rendered():
+    module = _module()
+    source = WEB_APP.read_text(encoding="utf-8")
+    expected = [
+        "audio_delivery_mode",
+        "bgm_asset_id",
+        "se_asset_id",
+        "bgm_gain_db",
+        "se_gain_db",
+        "se_cue_seconds",
+    ]
+
+    assert "fn=install_audio_pack_ui" in source
+    assert "fn=refresh_audio_pack_ui" in source
+    assert 'label="BGM・SEの出力方法"' in source
+    for event_name in ("render_phase", "maybe_render_phase"):
+        event_inputs = _event_input_names(module, event_name, "then")
+        assert event_inputs[-6:] == expected
+    for button in ("save_defaults_btn", "input_save_defaults_btn"):
+        assert _click_input_names(module, button)[-6:] == expected
 
 
 def test_shorts_visual_controls_are_available_for_input_and_obs():

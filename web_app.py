@@ -164,6 +164,18 @@ def get_system_fonts_cached():
 
 
 from config import FontConfig
+from audio_assets import (
+    AudioAssetError,
+    get_pack_status as get_audio_pack_status,
+    install_pack as install_audio_pack,
+    list_catalog_assets,
+)
+from audio_delivery import (
+    AudioDeliveryError,
+    AudioDeliveryOptions,
+    deliver_audio_groups,
+    validate_audio_selection,
+)
 
 SETTINGS_FILE = Path(__file__).parent / "default_settings.json"
 GEMINI_KEY_FILE = Path(__file__).parent / ".gemini_key"
@@ -362,6 +374,13 @@ def _resolve_ai_api_key(key_text: str) -> str:
     return entered or load_gemini_api_key()
 
 
+def _resolve_provider_api_key(ai_provider: str, key_text: str) -> str:
+    """Keep saved cloud credentials out of local and CLI provider calls."""
+    if ai_provider in {"gemini", "openai"}:
+        return _resolve_ai_api_key(key_text)
+    return ""
+
+
 def save_gemini_api_key(key_text: str):
     """Persist the Gemini API key to GEMINI_KEY_FILE, or delete the file
     when the textbox is cleared.
@@ -437,6 +456,10 @@ def load_defaults() -> dict:
         "shorts_title": True, "shorts_title_position": "top",
         "generate_thumbnails": False,
         "audio_fusion": False, "audio_alpha": 0.35,
+        "audio_delivery_mode": "both",
+        "bgm_asset_id": "", "se_asset_id": "",
+        "bgm_gain_db": -18.0, "se_gain_db": -8.0,
+        "se_cue_seconds": 0.0,
         "karaoke": False,
         "whisper_model": "large-v3", "language": "ja",
         "font_name": "Noto Sans JP", "font_size": 96, "font_color": "#FFFFFF",
@@ -453,6 +476,9 @@ def load_defaults() -> dict:
             defaults.update(saved)
         except Exception:
             pass
+    if defaults.get("ai_provider") not in _available_ai_providers():
+        defaults["ai_provider"] = "gemini"
+        defaults["ai_model"] = GEMINI_DEFAULT_MODEL
     defaults["ai_model"] = _resolve_ai_model(
         defaults.get("ai_provider", "gemini"),
         defaults.get("ai_model", ""),
@@ -462,6 +488,27 @@ def load_defaults() -> dict:
     )
     defaults["shorts_title_position"] = _normalise_shorts_title_position(
         defaults.get("shorts_title_position", "top")
+    )
+    try:
+        audio_defaults = AudioDeliveryOptions(
+            delivery_mode=defaults.get("audio_delivery_mode", "both"),
+            bgm_asset_id=defaults.get("bgm_asset_id", ""),
+            se_asset_id=defaults.get("se_asset_id", ""),
+            bgm_gain_db=defaults.get("bgm_gain_db", -18.0),
+            se_gain_db=defaults.get("se_gain_db", -8.0),
+            se_cue_seconds=defaults.get("se_cue_seconds", 0.0),
+        )
+    except (TypeError, ValueError):
+        audio_defaults = AudioDeliveryOptions()
+    defaults.update(
+        {
+            "audio_delivery_mode": audio_defaults.delivery_mode.value,
+            "bgm_asset_id": audio_defaults.bgm_asset_id,
+            "se_asset_id": audio_defaults.se_asset_id,
+            "bgm_gain_db": audio_defaults.bgm_gain_db,
+            "se_gain_db": audio_defaults.se_gain_db,
+            "se_cue_seconds": audio_defaults.se_cue_seconds,
+        }
     )
     # Secrets are loaded only inside start_obs_watch(). Returning one here can
     # expose it in Gradio's component configuration when the app is LAN-bound.
@@ -521,7 +568,13 @@ def save_defaults(ai_provider, ai_model,
                   premiere_executable_path="",
                   obs_launch_on_startup=False,
                   obs_executable_path="",
-                  obs_auto_connect_on_startup=True):
+                  obs_auto_connect_on_startup=True,
+                  audio_delivery_mode="both",
+                  bgm_asset_id="",
+                  se_asset_id="",
+                  bgm_gain_db=-18.0,
+                  se_gain_db=-8.0,
+                  se_cue_seconds=0.0):
     """Save current settings as defaults."""
     loaded_defaults = load_defaults()
     saved_obs = {
@@ -553,6 +606,17 @@ def save_defaults(ai_provider, ai_model,
         "generate_thumbnails": bool(generate_thumbnails),
         "audio_fusion": bool(audio_fusion),
         "audio_alpha": float(audio_alpha),
+        "audio_delivery_mode": AudioDeliveryOptions(
+            delivery_mode=audio_delivery_mode,
+            bgm_gain_db=bgm_gain_db,
+            se_gain_db=se_gain_db,
+            se_cue_seconds=se_cue_seconds,
+        ).delivery_mode.value,
+        "bgm_asset_id": str(bgm_asset_id or "").strip(),
+        "se_asset_id": str(se_asset_id or "").strip(),
+        "bgm_gain_db": float(bgm_gain_db),
+        "se_gain_db": float(se_gain_db),
+        "se_cue_seconds": float(se_cue_seconds),
         "karaoke": bool(karaoke),
         "premiere_executable_path": (premiere_executable_path or "").strip(),
         "obs_launch_on_startup": bool(obs_launch_on_startup),
@@ -748,7 +812,11 @@ from transcriber import transcribe, segments_to_text
 from highlighter import (
     GEMINI_DEFAULT_MODEL,
     GEMINI_MODEL_CHOICES,
+    LOCAL_LLM_ENABLE_ENV,
+    LOCAL_LLM_MODEL_ENV,
     detect_highlights,
+    local_llm_default_model,
+    local_llm_enabled,
 )
 from audio_energy import fuse_audio_energy
 import clipper
@@ -779,11 +847,43 @@ OPENAI_MODEL_CHOICES = (
 )
 
 
+def _available_ai_providers() -> list[str]:
+    providers = ["claude", "openai", "gemini"]
+    if local_llm_enabled():
+        providers.append("local")
+    return providers
+
+
+def _ai_provider_info() -> str:
+    base = "Claude: CLI / OpenAI: APIキー / Gemini: 無料枠あり"
+    if local_llm_enabled():
+        return f"{base}。Local: 実験機能 ({LOCAL_LLM_ENABLE_ENV}=1)"
+    return base
+
+
+def _ai_model_info() -> str:
+    base = "既定: Gemini=gemini-3.5-flash-lite（低コスト）、OpenAI=gpt-4.1、Claude=CLI"
+    if local_llm_enabled():
+        return f"{base}。LocalはモデルIDまたは {LOCAL_LLM_MODEL_ENV} で設定"
+    return base
+
+
+def _api_key_info() -> str:
+    no_key_providers = "ClaudeとLocal" if local_llm_enabled() else "Claude"
+    return (
+        f"{no_key_providers}は入力不要。保存済みキーは画面へ再表示しません。"
+        "空欄のまま保存ボタンを押すと削除します。"
+    )
+
+
 def _ai_model_choices(provider: str) -> list[str]:
     if provider == "gemini":
         return list(GEMINI_MODEL_CHOICES)
     if provider == "openai":
         return list(OPENAI_MODEL_CHOICES)
+    if provider == "local":
+        model = local_llm_default_model()
+        return [model] if model else []
     return []
 
 
@@ -792,6 +892,8 @@ def _default_ai_model(provider: str) -> str:
         return GEMINI_DEFAULT_MODEL
     if provider == "openai":
         return OPENAI_MODEL_CHOICES[0]
+    if provider == "local":
+        return local_llm_default_model()
     return ""
 
 
@@ -1130,7 +1232,12 @@ def detect_phase(
         log(f"  Transcription complete: {len(segments)} segments")
 
         progress(0.5, desc="[Step 3/3] Detecting highlights...")
-        provider_name = {"claude": "Claude", "openai": "ChatGPT", "gemini": "Gemini"}.get(ai_provider, ai_provider)
+        provider_name = {
+            "claude": "Claude",
+            "openai": "ChatGPT",
+            "gemini": "Gemini",
+            "local": "Local LLM",
+        }.get(ai_provider, ai_provider)
         log(f"[Step 3/3] Analyzing with {provider_name}...")
         highlights = detect_highlights(
             transcript_text,
@@ -1139,7 +1246,7 @@ def detect_phase(
             max_duration=max_duration,
             custom_prompt=modes.active_prompt,
             ai_provider=ai_provider,
-            api_key=_resolve_ai_api_key(api_key),
+            api_key=_resolve_provider_api_key(ai_provider, api_key),
             ai_model=ai_model,
         )
 
@@ -1221,6 +1328,12 @@ def render_phase(
     karaoke: bool,
     shorts_blur_strength=20,
     shorts_title_position: str = "top",
+    audio_delivery_mode: str = "both",
+    bgm_asset_id: str = "",
+    se_asset_id: str = "",
+    bgm_gain_db: float = -18.0,
+    se_gain_db: float = -8.0,
+    se_cue_seconds: float = 0.0,
     progress=gr.Progress(),
 ):
     """Render phase: replay downstream output generation with edited highlights."""
@@ -1264,6 +1377,22 @@ def render_phase(
             modes.validate()
         except ValueError as mode_err:
             return ProcessResult(log=f"Error: {mode_err}").as_gradio_outputs()
+
+        try:
+            audio_options = AudioDeliveryOptions(
+                delivery_mode=audio_delivery_mode,
+                bgm_asset_id=bgm_asset_id,
+                se_asset_id=se_asset_id,
+                bgm_gain_db=bgm_gain_db,
+                se_gain_db=se_gain_db,
+                se_cue_seconds=se_cue_seconds,
+            )
+            if modes.enable_clips or modes.enable_shorts:
+                validate_audio_selection(audio_options)
+        except (AudioDeliveryError, TypeError, ValueError) as audio_err:
+            return ProcessResult(
+                log="\n".join(logs + [f"Error: 音声出力設定を確認してください: {audio_err}"])
+            ).as_gradio_outputs()
 
         if source_kind == "twitch" and auto_append_youtube:
             log("Twitch入力ではタイムスタンプとYouTube概要欄への追記をスキップ")
@@ -1374,6 +1503,25 @@ def render_phase(
                 f"{len(shorts_srt_paths) + len(shorts_title_srt_paths)} "
                 "editable Short SRT files (archive + title)"
             )
+
+        if clip_paths or shorts_paths:
+            progress(0.79, desc="Applying BGM / SE delivery settings...")
+            audio_result = deliver_audio_groups(
+                output_dir,
+                {"clips": clip_paths, "shorts": shorts_paths},
+                highlights,
+                options=audio_options,
+            )
+            clip_paths = list(audio_result.media_groups.get("clips", ()))
+            shorts_paths = list(audio_result.media_groups.get("shorts", ()))
+            obs_render_outcome["clip_paths"] = [str(path) for path in clip_paths]
+            obs_render_outcome["shorts_paths"] = [str(path) for path in shorts_paths]
+            if audio_result.enabled:
+                log(
+                    "  BGM/SE audio exported: "
+                    f"mode={audio_options.delivery_mode.value}, "
+                    f"files={len(audio_result.deliverables)}"
+                )
 
         if generate_thumbnails and (modes.enable_clips or modes.enable_shorts):
             progress(0.8, desc="Generating thumbnail candidates...")
@@ -1547,6 +1695,12 @@ def maybe_render_phase(
     karaoke: bool,
     shorts_blur_strength=20,
     shorts_title_position: str = "top",
+    audio_delivery_mode: str = "both",
+    bgm_asset_id: str = "",
+    se_asset_id: str = "",
+    bgm_gain_db: float = -18.0,
+    se_gain_db: float = -8.0,
+    se_cue_seconds: float = 0.0,
     progress=gr.Progress(),
 ):
     """Chain STEP 2 right after STEP 1 when the 'run both' checkbox is on.
@@ -1577,6 +1731,12 @@ def maybe_render_phase(
         karaoke,
         shorts_blur_strength=shorts_blur_strength,
         shorts_title_position=shorts_title_position,
+        audio_delivery_mode=audio_delivery_mode,
+        bgm_asset_id=bgm_asset_id,
+        se_asset_id=se_asset_id,
+        bgm_gain_db=bgm_gain_db,
+        se_gain_db=se_gain_db,
+        se_cue_seconds=se_cue_seconds,
         progress=progress,
     )
 
@@ -1987,7 +2147,7 @@ def _run_obs_detect_render(
             _coerce_int(s.get("num_clips", 5), 5),
             s.get("ai_provider", "gemini"),
             s.get("ai_model", ""),
-            load_gemini_api_key(),
+            _resolve_provider_api_key(s.get("ai_provider", "gemini"), ""),
             _coerce_int(s.get("min_duration", 30), 30),
             _coerce_int(s.get("max_duration", 90), 90),
             s.get("whisper_model", "large-v3"),
@@ -2032,6 +2192,14 @@ def _run_obs_detect_render(
             ),
             shorts_title_position=_normalise_shorts_title_position(
                 s.get("shorts_title_position", "top")
+            ),
+            audio_delivery_mode=s.get("audio_delivery_mode", "both"),
+            bgm_asset_id=s.get("bgm_asset_id", ""),
+            se_asset_id=s.get("se_asset_id", ""),
+            bgm_gain_db=_coerce_float(s.get("bgm_gain_db", -18.0), -18.0),
+            se_gain_db=_coerce_float(s.get("se_gain_db", -8.0), -8.0),
+            se_cue_seconds=_coerce_float(
+                s.get("se_cue_seconds", 0.0), 0.0
             ),
             progress=progress,
         )
@@ -3828,7 +3996,12 @@ def _legacy_one_shot_handler(
 
         # Step 3: Highlight detection
         progress(0.5, desc="[Step 3/6] Detecting highlights...")
-        provider_name = {"claude": "Claude", "openai": "ChatGPT", "gemini": "Gemini"}.get(ai_provider, ai_provider)
+        provider_name = {
+            "claude": "Claude",
+            "openai": "ChatGPT",
+            "gemini": "Gemini",
+            "local": "Local LLM",
+        }.get(ai_provider, ai_provider)
         log(f"[Step 3/6] Analyzing with {provider_name}...")
         font_config = FontConfig(
             font_name=font_name,
@@ -3843,7 +4016,7 @@ def _legacy_one_shot_handler(
             max_duration=max_duration,
             custom_prompt=modes.active_prompt,
             ai_provider=ai_provider,
-            api_key=_resolve_ai_api_key(api_key),
+            api_key=_resolve_provider_api_key(ai_provider, api_key),
             ai_model=ai_model,
         )
 
@@ -4354,10 +4527,88 @@ def _startup_auth_status_for_ui() -> str:
     return summary
 
 
+def _audio_asset_choices(kind: str) -> list[tuple[str, str]]:
+    """Return stable catalog choices without touching the network or cache."""
+    choices = [("使用しない", "")]
+    choices.extend(
+        (f"{asset.label} — {asset.creator}", asset.id)
+        for asset in list_catalog_assets()
+        if asset.kind == kind
+    )
+    return choices
+
+
+def _audio_pack_status_text() -> str:
+    try:
+        status = get_audio_pack_status()
+    except AudioAssetError as exc:
+        return f"⚠️ **素材カタログを確認できません:** {exc}"
+    if status.ready:
+        return (
+            f"✅ **CC0素材パック {status.version} は利用可能です** "
+            f"（BGM 4曲・SE 16点 / {status.asset_count}素材）"
+        )
+    if status.state == "invalid":
+        return f"⚠️ **素材パックの再導入が必要です:** {status.message}"
+    return (
+        "**CC0素材パックは未導入です。** "
+        "必要な場合だけ下のボタンから一度ダウンロードします。"
+    )
+
+
+def _audio_pack_control_updates(current_bgm="", current_se="", *, install=False):
+    """Refresh status and enable selectors only for a verified install."""
+    error = ""
+    if install:
+        try:
+            install_audio_pack()
+        except (AudioAssetError, OSError) as exc:
+            error = f"⚠️ **素材パックのダウンロードに失敗しました:** {exc}"
+    try:
+        status = get_audio_pack_status()
+        ready = status.ready
+    except AudioAssetError as exc:
+        ready = False
+        if not error:
+            error = f"⚠️ **素材パックを確認できません:** {exc}"
+    bgm_choices = _audio_asset_choices("bgm")
+    se_choices = _audio_asset_choices("se")
+    bgm_ids = {value for _label, value in bgm_choices}
+    se_ids = {value for _label, value in se_choices}
+    bgm_value = current_bgm if current_bgm in bgm_ids else ""
+    se_value = current_se if current_se in se_ids else ""
+    return (
+        error or _audio_pack_status_text(),
+        gr.update(choices=bgm_choices, value=bgm_value, interactive=ready),
+        gr.update(choices=se_choices, value=se_value, interactive=ready),
+    )
+
+
+def install_audio_pack_ui(current_bgm="", current_se=""):
+    """Explicit UI-only download entry point; render functions never call it."""
+    return _audio_pack_control_updates(current_bgm, current_se, install=True)
+
+
+def refresh_audio_pack_ui(current_bgm="", current_se=""):
+    return _audio_pack_control_updates(current_bgm, current_se, install=False)
+
+
 def create_ui():
     """Create the Gradio web interface."""
     defaults = load_defaults()
     obs_processing_defaults = _obs_processing_settings_from_defaults(defaults)
+    try:
+        audio_pack_ready = get_audio_pack_status().ready
+    except AudioAssetError:
+        audio_pack_ready = False
+    bgm_choices = _audio_asset_choices("bgm")
+    se_choices = _audio_asset_choices("se")
+    bgm_default = defaults.get("bgm_asset_id", "")
+    se_default = defaults.get("se_asset_id", "")
+    if bgm_default not in {value for _label, value in bgm_choices}:
+        bgm_default = ""
+    if se_default not in {value for _label, value in se_choices}:
+        se_default = ""
 
     with gr.Blocks(
         title="Clip Extractor - 配信切り抜き自動生成",
@@ -4580,6 +4831,86 @@ def create_ui():
                             value=defaults.get("karaoke", False),
                             info="ショート動画の焼き込み字幕を単語ごとにハイライトします / Highlight burned-in Shorts captions word by word",
                         )
+
+                with gr.Group(elem_classes="audio-delivery-panel"):
+                    gr.Markdown(
+                        "### BGM・SE素材と出力\n"
+                        "素材は生成時に自動取得しません。必要な場合だけ一度導入し、"
+                        "以後は検証済みローカルキャッシュを使います。"
+                    )
+                    audio_pack_status = gr.Markdown(_audio_pack_status_text())
+                    with gr.Row():
+                        install_audio_pack_btn = gr.Button(
+                            "CC0素材をダウンロード（約3.2 MB）",
+                            variant="secondary",
+                        )
+                        refresh_audio_pack_btn = gr.Button(
+                            "素材の状態を更新",
+                            variant="secondary",
+                        )
+                    with gr.Row():
+                        bgm_asset_id = gr.Dropdown(
+                            choices=bgm_choices,
+                            value=bgm_default,
+                            label="BGM",
+                            info="4曲のCC0ループ素材。未選択ならBGMは追加しません",
+                            interactive=audio_pack_ready,
+                        )
+                        se_asset_id = gr.Dropdown(
+                            choices=se_choices,
+                            value=se_default,
+                            label="SE",
+                            info="16点のCC0効果音。未選択ならSEは追加しません",
+                            interactive=audio_pack_ready,
+                        )
+                    with gr.Row():
+                        bgm_gain_db = gr.Slider(
+                            minimum=-36,
+                            maximum=0,
+                            step=1,
+                            value=defaults.get("bgm_gain_db", -18.0),
+                            label="BGM音量 (dB)",
+                            info="元の会話音声は変更しません。推奨: -18 dB",
+                        )
+                        se_gain_db = gr.Slider(
+                            minimum=-36,
+                            maximum=0,
+                            step=1,
+                            value=defaults.get("se_gain_db", -8.0),
+                            label="SE音量 (dB)",
+                            info="推奨: -8 dB",
+                        )
+                    with gr.Row():
+                        se_cue_seconds = gr.Number(
+                            minimum=0,
+                            value=defaults.get("se_cue_seconds", 0.0),
+                            label="SEを鳴らす位置 (秒)",
+                            info="各クリップ先頭からの相対時刻。範囲外なら無音になります",
+                        )
+                        audio_delivery_mode = gr.Radio(
+                            choices=[
+                                ("別ファイル（編集向け）", "separate"),
+                                ("動画へミックス", "mixed"),
+                                ("両方", "both"),
+                            ],
+                            value=defaults.get("audio_delivery_mode", "both"),
+                            label="BGM・SEの出力方法",
+                            info=(
+                                "別ファイル=clean MP4 + 48kHz WAV + JSON / "
+                                "ミックス=完成MP4 / 両方=すべて"
+                            ),
+                        )
+                    install_audio_pack_btn.click(
+                        fn=install_audio_pack_ui,
+                        inputs=[bgm_asset_id, se_asset_id],
+                        outputs=[audio_pack_status, bgm_asset_id, se_asset_id],
+                        concurrency_limit=1,
+                    )
+                    refresh_audio_pack_btn.click(
+                        fn=refresh_audio_pack_ui,
+                        inputs=[bgm_asset_id, se_asset_id],
+                        outputs=[audio_pack_status, bgm_asset_id, se_asset_id],
+                    )
 
                 with gr.Column(elem_classes="input-actions-column"):
                     with gr.Row():
@@ -5116,10 +5447,10 @@ def create_ui():
                     with gr.Column():
                         gr.HTML("<h3>AI Model / 分析AI</h3>")
                         ai_provider = gr.Dropdown(
-                            choices=["claude", "openai", "gemini"],
+                            choices=_available_ai_providers(),
                             value=defaults["ai_provider"],
                             label="AIプロバイダー",
-                            info="Claude: CLI(サブスク) / OpenAI: APIキー必要 / Gemini: 無料枠あり",
+                            info=_ai_provider_info(),
                         )
                         initial_ai_model = _resolve_ai_model(
                             defaults.get("ai_provider", "gemini"),
@@ -5130,10 +5461,7 @@ def create_ui():
                             value=initial_ai_model,
                             label="モデル",
                             allow_custom_value=True,
-                            info=(
-                                "既定: Gemini=gemini-3.5-flash-lite（低コスト）、"
-                                "OpenAI=gpt-4.1、Claude=CLI"
-                            ),
+                            info=_ai_model_info(),
                         )
                         has_saved_api_key = bool(load_gemini_api_key())
                         api_key = gr.Textbox(
@@ -5145,10 +5473,7 @@ def create_ui():
                                 else "OpenAI / Gemini のAPIキーを入力"
                             ),
                             type="password",
-                            info=(
-                                "Claudeは入力不要。保存済みキーは画面へ再表示しません。"
-                                "空欄のまま保存ボタンを押すと削除します。"
-                            ),
+                            info=_api_key_info(),
                         )
                         save_api_key_btn = gr.Button(
                             "💾 このキーを保存 (.gemini_key)",
@@ -5441,7 +5766,13 @@ def create_ui():
                             premiere_executable_path,
                             obs_launch_on_startup,
                             obs_executable_path,
-                            obs_auto_connect_on_startup],
+                            obs_auto_connect_on_startup,
+                            audio_delivery_mode,
+                            bgm_asset_id,
+                            se_asset_id,
+                            bgm_gain_db,
+                            se_gain_db,
+                            se_cue_seconds],
                     outputs=save_defaults_msg,
                 )
 
@@ -5463,7 +5794,13 @@ def create_ui():
                             premiere_executable_path,
                             obs_launch_on_startup,
                             obs_executable_path,
-                            obs_auto_connect_on_startup],
+                            obs_auto_connect_on_startup,
+                            audio_delivery_mode,
+                            bgm_asset_id,
+                            se_asset_id,
+                            bgm_gain_db,
+                            se_gain_db,
+                            se_cue_seconds],
                     outputs=input_save_defaults_msg,
                 )
 
@@ -5601,6 +5938,12 @@ def create_ui():
                 karaoke,
                 shorts_blur_strength,
                 shorts_title_position,
+                audio_delivery_mode,
+                bgm_asset_id,
+                se_asset_id,
+                bgm_gain_db,
+                se_gain_db,
+                se_cue_seconds,
             ],
             outputs=[
                 log_output,
@@ -5635,6 +5978,12 @@ def create_ui():
                 karaoke,
                 shorts_blur_strength,
                 shorts_title_position,
+                audio_delivery_mode,
+                bgm_asset_id,
+                se_asset_id,
+                bgm_gain_db,
+                se_gain_db,
+                se_cue_seconds,
             ],
             outputs=[
                 log_output,

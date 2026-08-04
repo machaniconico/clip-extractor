@@ -1,0 +1,466 @@
+{
+  "schema_version": 1,
+  "catalog_id": "clip-extractor-audio-assets",
+  "catalog_updated_at": "2026-08-04",
+  "packs": [
+    {
+      "id": "cc0-starter",
+      "version": "2026.08.1",
+      "display_name": "CC0 BGM・SE スターターパック",
+      "description": "商用動画にも使えるCC0 1.0のBGM 4曲と効果音16点。",
+      "license_checked_at": "2026-08-04",
+      "license_files": [
+        "CC0-1.0.txt",
+        "SOURCES.md"
+      ],
+      "sources": [
+        {
+          "id": "kenney-interface-sounds",
+          "type": "zip",
+          "url": "https://kenney.nl/media/pages/assets/interface-sounds/fa43c1dd4d-1677589452/kenney_interface-sounds.zip",
+          "allowed_hosts": [
+            "kenney.nl",
+            "www.kenney.nl"
+          ],
+          "source_page": "https://kenney.nl/assets/interface-sounds",
+          "size": 834536,
+          "max_bytes": 1000000,
+          "sha256": "f2193d072726d6758a5f7871b2dcc54dcce0d5c35c6f0a62f92549b327c81232",
+          "assets": [
+            {
+              "id": "se-interface-bong",
+              "label": "通知・ボン",
+              "kind": "se",
+              "archive_member": "Audio/bong_001.ogg",
+              "path": "se/interface-bong.ogg",
+              "size": 4848,
+              "sha256": "d21d0f0b782445db579d11e2506b24cd1ac9d664ee33aeaf807761aa7b6fd710",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/interface-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-interface-close",
+              "label": "画面を閉じる",
+              "kind": "se",
+              "archive_member": "Audio/close_001.ogg",
+              "path": "se/interface-close.ogg",
+              "size": 9915,
+              "sha256": "44af8249b933e0fd35ec957a638bb1a0b01f85b53fbe9674bf77bd3ca3168ef4",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/interface-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-interface-confirmation",
+              "label": "決定・成功",
+              "kind": "se",
+              "archive_member": "Audio/confirmation_001.ogg",
+              "path": "se/interface-confirmation.ogg",
+              "size": 8968,
+              "sha256": "063564703b6094d70718a3e787a55cc9141611e4ecd6b6637f8828f79b4a8c3a",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/interface-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-interface-error",
+              "label": "エラー・警告",
+              "kind": "se",
+              "archive_member": "Audio/error_001.ogg",
+              "path": "se/interface-error.ogg",
+              "size": 7373,
+              "sha256": "46e67425d16339772e8d328fb36a49426c9467418686e11beeb71ff84b0f6433",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/interface-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-interface-glitch",
+              "label": "グリッチ",
+              "kind": "se",
+              "archive_member": "Audio/glitch_001.ogg",
+              "path": "se/interface-glitch.ogg",
+              "size": 5121,
+              "sha256": "da78c642bbd95da2c364ed0e991ebbfc5a4c0d281165d932b5819e0dd31a39d2",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/interface-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-interface-open",
+              "label": "画面を開く",
+              "kind": "se",
+              "archive_member": "Audio/open_001.ogg",
+              "path": "se/interface-open.ogg",
+              "size": 9834,
+              "sha256": "a27c6bb0df7da1e6af5dd5937593c98bc58b6e513f42fe6a3254cd6a6949c648",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/interface-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-interface-pluck",
+              "label": "軽い決定・プラック",
+              "kind": "se",
+              "archive_member": "Audio/pluck_001.ogg",
+              "path": "se/interface-pluck.ogg",
+              "size": 6317,
+              "sha256": "be97ec4893a02d6eccfb678daa76c83e34cb2583b834ec2593d2641def739fa4",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/interface-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-interface-scratch",
+              "label": "スクラッチ",
+              "kind": "se",
+              "archive_member": "Audio/scratch_001.ogg",
+              "path": "se/interface-scratch.ogg",
+              "size": 8989,
+              "sha256": "5c294d2e1a6b6d07ee2d75b17105a55ad3527e5482dd60652dc49c2ea4c70096",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/interface-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-interface-select",
+              "label": "選択・クリック",
+              "kind": "se",
+              "archive_member": "Audio/select_001.ogg",
+              "path": "se/interface-select.ogg",
+              "size": 5468,
+              "sha256": "aec0c31ea934a35936ae0d2ab8fac8123c93aa5647f935853a58dbaf90278b7a",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/interface-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-interface-switch",
+              "label": "切替・スイッチ",
+              "kind": "se",
+              "archive_member": "Audio/switch_001.ogg",
+              "path": "se/interface-switch.ogg",
+              "size": 6753,
+              "sha256": "3b74efad87f1e69dbd1d05c5ad952ab90859b5a3d11da6ec5bd79b4f03b42afa",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/interface-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            }
+          ]
+        },
+        {
+          "id": "kenney-impact-sounds",
+          "type": "zip",
+          "url": "https://kenney.nl/media/pages/assets/impact-sounds/87b4ddecda-1677589768/kenney_impact-sounds.zip",
+          "allowed_hosts": [
+            "kenney.nl",
+            "www.kenney.nl"
+          ],
+          "source_page": "https://kenney.nl/assets/impact-sounds",
+          "size": 800850,
+          "max_bytes": 1000000,
+          "sha256": "029d734af1582474edf3a694d1b0cebc97c1c152f2f39fa34d4c2bafc5de77f8",
+          "assets": [
+            {
+              "id": "se-impact-bell-heavy",
+              "label": "ベル・強",
+              "kind": "se",
+              "archive_member": "Audio/impactBell_heavy_000.ogg",
+              "path": "se/impact-bell-heavy.ogg",
+              "size": 13915,
+              "sha256": "94b8bb5f2d43ab65e4bcc32b28562416e9bc2c51d9fd4be1e333660ee52f977f",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/impact-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-impact-generic-light",
+              "label": "軽いインパクト",
+              "kind": "se",
+              "archive_member": "Audio/impactGeneric_light_000.ogg",
+              "path": "se/impact-generic-light.ogg",
+              "size": 5827,
+              "sha256": "f0e982611e97512fee5f777986b67e8b435434b601f94992ec044f7e89fb5acb",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/impact-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-impact-metal-heavy",
+              "label": "金属インパクト・強",
+              "kind": "se",
+              "archive_member": "Audio/impactMetal_heavy_000.ogg",
+              "path": "se/impact-metal-heavy.ogg",
+              "size": 6110,
+              "sha256": "e07045693e4a2b3d165c424e3dab4c781d9ff8880a386880ac89a51315d7f831",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/impact-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-impact-punch-heavy",
+              "label": "パンチ・強",
+              "kind": "se",
+              "archive_member": "Audio/impactPunch_heavy_000.ogg",
+              "path": "se/impact-punch-heavy.ogg",
+              "size": 11617,
+              "sha256": "b33a8f14068aec24ec69ba85e5e87fdc41228975f6a1a3e44a6e7d6fc3d9f8d8",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/impact-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-impact-soft-heavy",
+              "label": "柔らかいインパクト・強",
+              "kind": "se",
+              "archive_member": "Audio/impactSoft_heavy_000.ogg",
+              "path": "se/impact-soft-heavy.ogg",
+              "size": 6570,
+              "sha256": "49e7ca88743fca974bb8676ea138b751cfd8f9033b5e7af8736c2a215d6edbc1",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/impact-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            },
+            {
+              "id": "se-impact-wood-heavy",
+              "label": "木材インパクト・強",
+              "kind": "se",
+              "archive_member": "Audio/impactWood_heavy_000.ogg",
+              "path": "se/impact-wood-heavy.ogg",
+              "size": 6233,
+              "sha256": "15ff82332f342c30e469215539e1cc57e11b221aa2cf7e11e811d313a9927f3d",
+              "creator": "Kenney",
+              "source_page": "https://kenney.nl/assets/impact-sounds",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            }
+          ]
+        },
+        {
+          "id": "oga-brand-new-wisdom",
+          "type": "file",
+          "url": "https://opengameart.org/sites/default/files/A%20Brand%20New%20Wisdom.ogg",
+          "allowed_hosts": [
+            "opengameart.org",
+            "www.opengameart.org"
+          ],
+          "source_page": "https://opengameart.org/content/short-loops-background-music-pack",
+          "size": 265389,
+          "max_bytes": 1000000,
+          "sha256": "99d0095c328d598f5fb1bca9fbb4a518112bbf676dc662f0c0c6edfee88d788c",
+          "assets": [
+            {
+              "id": "bgm-brand-new-wisdom",
+              "label": "A Brand New Wisdom",
+              "kind": "bgm",
+              "path": "bgm/a-brand-new-wisdom.ogg",
+              "size": 265389,
+              "sha256": "99d0095c328d598f5fb1bca9fbb4a518112bbf676dc662f0c0c6edfee88d788c",
+              "creator": "hernandack",
+              "source_page": "https://opengameart.org/content/short-loops-background-music-pack",
+              "modifications": "None; downloaded byte-for-byte from the published file.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            }
+          ]
+        },
+        {
+          "id": "oga-just-saying-tho",
+          "type": "file",
+          "url": "https://opengameart.org/sites/default/files/Just%20Saying%20Tho.ogg",
+          "allowed_hosts": [
+            "opengameart.org",
+            "www.opengameart.org"
+          ],
+          "source_page": "https://opengameart.org/content/short-loops-background-music-pack",
+          "size": 397509,
+          "max_bytes": 1000000,
+          "sha256": "687aa35987b89797af14735348c5b2f1b766ac0ba528dc001746aaf4ca1cc82f",
+          "assets": [
+            {
+              "id": "bgm-just-saying-tho",
+              "label": "Just Saying Tho",
+              "kind": "bgm",
+              "path": "bgm/just-saying-tho.ogg",
+              "size": 397509,
+              "sha256": "687aa35987b89797af14735348c5b2f1b766ac0ba528dc001746aaf4ca1cc82f",
+              "creator": "hernandack",
+              "source_page": "https://opengameart.org/content/short-loops-background-music-pack",
+              "modifications": "None; downloaded byte-for-byte from the published file.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            }
+          ]
+        },
+        {
+          "id": "oga-winter-dust",
+          "type": "file",
+          "url": "https://opengameart.org/sites/default/files/Winter%20Dust_0.ogg",
+          "allowed_hosts": [
+            "opengameart.org",
+            "www.opengameart.org"
+          ],
+          "source_page": "https://opengameart.org/content/short-loops-background-music-pack",
+          "size": 468597,
+          "max_bytes": 1000000,
+          "sha256": "8c0da93d35ddfb3c8e4cc01ce4ba6611fb407eec4b6c23f17a691ad7dc0f1fe0",
+          "assets": [
+            {
+              "id": "bgm-winter-dust",
+              "label": "Winter Dust",
+              "kind": "bgm",
+              "path": "bgm/winter-dust.ogg",
+              "size": 468597,
+              "sha256": "8c0da93d35ddfb3c8e4cc01ce4ba6611fb407eec4b6c23f17a691ad7dc0f1fe0",
+              "creator": "hernandack",
+              "source_page": "https://opengameart.org/content/short-loops-background-music-pack",
+              "modifications": "None; downloaded byte-for-byte from the published file.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            }
+          ]
+        },
+        {
+          "id": "oga-swinging-sweet",
+          "type": "file",
+          "url": "https://opengameart.org/sites/default/files/Swinging%20Sweet_0.ogg",
+          "allowed_hosts": [
+            "opengameart.org",
+            "www.opengameart.org"
+          ],
+          "source_page": "https://opengameart.org/content/short-loops-background-music-pack",
+          "size": 405170,
+          "max_bytes": 1000000,
+          "sha256": "5a22466a7ec28c324324217aff836809ccbc9e2489cc22ebf72725f4bfd320bb",
+          "assets": [
+            {
+              "id": "bgm-swinging-sweet",
+              "label": "Swinging Sweet",
+              "kind": "bgm",
+              "path": "bgm/swinging-sweet.ogg",
+              "size": 405170,
+              "sha256": "5a22466a7ec28c324324217aff836809ccbc9e2489cc22ebf72725f4bfd320bb",
+              "creator": "hernandack",
+              "source_page": "https://opengameart.org/content/short-loops-background-music-pack",
+              "modifications": "None; downloaded byte-for-byte from the published file.",
+              "license": {
+                "id": "CC0-1.0",
+                "name": "CC0 1.0 Universal",
+                "url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "attribution_required": false
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

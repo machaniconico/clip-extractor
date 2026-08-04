@@ -13,6 +13,7 @@ YouTube / Twitch 配信アーカイブ（または手元の動画ファイル）
 - **ワード単位カラオケ字幕** — ショート専用。ASS の `\k` タイミングで読み上げに同期して色が動く字幕を焼き込み
 - **サムネイル候補の自動生成** — 代表フレームを抽出し、タイトルを焼き込んだ候補画像を生成
 - **音声の盛り上がり融合** — 音量（dBFS）カーブ＋スパイク検出で「盛り上がりスコア」を作り、AI のハイライト順位に融合して再ランク（失敗時は元の順位を維持する fail-open）
+- **BGM・SE出力** — 公式配布元でCC0 1.0表示を確認した素材を明示的に初回ダウンロードし、clean MP4＋編集用48kHz WAV、ミックス済みMP4、または両方を選択して生成
 - **概要欄タイムスタンプ生成** — チャプター（タイムスタンプ）テキストを生成。YouTube の概要欄へ自動追記も可能
 - **Premiere Pro 連携** — 元動画をV1、通常切り抜きをV2、同時生成したショートをV3へ元時刻に合わせて自動配置。combined / individual の XML 手動読み込みも維持
 - **2フェーズ Web UI** — 「検出」と「レンダリング」を分離。検出後に各クリップの **イン/アウト点・タイトルをプレビューしながら編集** してから書き出せる（再文字起こし不要）
@@ -31,6 +32,7 @@ YouTube / Twitch 配信アーカイブ（または手元の動画ファイル）
   └─ 切り抜き生成（ffmpeg）
         ├─ 縦型ショート（--shorts）＋タイトル焼き込み
         ├─ カラオケ字幕（--karaoke）
+        ├─ 任意のBGM・SE（separate / mixed / both）
         └─ サムネ候補（--thumbnails）
   └─ 概要欄タイムスタンプ生成（YouTube入力時。+ 任意で YouTube へ追記）
   └─ Premiere Proへ直接送信（または XML 書き出し）
@@ -77,6 +79,24 @@ Gemini は**無料枠あり・クレジットカード登録不要**で始めら
 
 配布・販売では、購入者自身のAPIキーを使うBYOK方式を維持し、販売者のキーを同梱・共有しないでください。Gemini APIは18歳以上の業務・専門用途向けで、EEA・スイス・英国の利用者へAPIクライアントを提供する場合は有料サービスのみ利用できます。現在の確認記録と販売前の未解決事項は [`docs/compliance/gemini-api.md`](docs/compliance/gemini-api.md) にあります。
 
+### 実験的ローカルLLM（既定OFF）
+
+将来のローカル推論対応に備え、LM StudioなどのOpenAI互換ローカルサーバーへ接続するテキスト解析プロバイダーを同梱しています。一般向け販売版では表示されず、モデルやLM Studio本体も同梱しません。現在はWhisperで作った字幕だけを解析し、画像・動画フレームはまだ送りません。
+
+試す場合はLM StudioでモデルとLocal Serverを起動してから、同じPowerShellで次を設定してアプリを起動します。
+
+```powershell
+$env:CLIP_EXTRACTOR_ENABLE_LOCAL_LLM = "1"
+$env:CLIP_EXTRACTOR_LOCAL_LLM_MODEL = "LM Studioに表示されるモデルID"
+# 既定値を変える場合だけ指定（loopbackの /v1 のみ許可）
+$env:CLIP_EXTRACTOR_LOCAL_LLM_BASE_URL = "http://127.0.0.1:1234/v1"
+py launcher.py
+```
+
+SettingsのAIプロバイダーに `local` が追加されます。モデル欄へ入力したIDは環境変数より優先されます。APIキーは不要で、保存済みのクラウドAPIキーもローカルサーバーへ渡しません。ローカル推論が失敗してもGemini・OpenAI・Claudeへ自動送信しません。
+
+構造化JSON出力に対応しないモデル、とくに一部の小型モデルでは失敗する場合があります。接続仕様は [LM Studio OpenAI互換API](https://lmstudio.ai/docs/developer/openai-compat)、制約と将来の導入条件は [`docs/compliance/local-llm.md`](docs/compliance/local-llm.md) を参照してください。
+
 ---
 
 ## インストール
@@ -105,6 +125,24 @@ python launcher.py
 ```
 
 Windows では `Clip Extractor.bat` をダブルクリックでも起動できます。起動後 `http://localhost:7860` を開きます。
+
+### BGM・SE素材と出力モード
+
+Input画面の **BGM・SE素材と出力** で使います。初回だけ **「CC0素材をダウンロード」** を押すと、[Kenney Interface Sounds](https://kenney.nl/assets/interface-sounds)、[Kenney Impact Sounds](https://kenney.nl/assets/impact-sounds)、[OpenGameArt Short Loops Background Music Pack](https://opengameart.org/content/short-loops-background-music-pack) から選定したBGM 4曲・SE 16点を取得します。すべてCC0 1.0として公開されている素材です。
+
+- 生成のたびにネットへ接続せず、`%LOCALAPPDATA%/ClipExtractor/asset-packs/` のバージョン別キャッシュを使います
+- ダウンロード元・リダイレクト先、バイト数、SHA-256、音声ストリームを検証してから有効化します
+- BGM/SEを選ばなければ、従来どおりclean MP4だけを生成します
+- 元の会話音声は1回だけ保持し、BGM/SEを加算した後にピークリミッターを適用します
+- ミックス後のAACを4倍サンプルレートで再検査し、-1 dBFSを超える場合は自動減衰して再エンコードします
+
+| 出力方法 | 生成物 |
+|---|---|
+| 別ファイル（`separate`） | clean `.mp4`、選択した `_bgm.wav` / `_se.wav`、編集設定 `_audio.json` |
+| 動画へミックス（`mixed`） | `_mixed.mp4`。中間WAVとclean MP4は残しません |
+| 両方（`both`、既定） | clean MP4、選択したWAV、JSON、`_mixed.mp4` |
+
+WAVはクリップ先頭を0秒とした48kHz stereo PCMです。各出力フォルダには使用素材の作者・取得元・CC0 URL・確認日・元ファイルSHA-256を記録した `audio_manifest.json` と `THIRD_PARTY_NOTICES_AUDIO.txt` も作成します。Premiere連携ではBGM/SEトラックをまだ自動配置しないため、`separate` / `both` のWAVは手動で読み込んでください。権利確認記録は [`docs/compliance/audio-assets.md`](docs/compliance/audio-assets.md) にあります。
 
 ### OBS Studio と同時起動（Windows）
 
@@ -180,6 +218,14 @@ python main.py ./archive.mp4 --prompt "面白いシーンだけ選んで"
 
 # ショート + カラオケ字幕 + サムネ + 音声融合まで一気に
 python main.py ./archive.mp4 --shorts --karaoke --thumbnails --audio-fusion
+
+# CC0素材を一度だけ導入し、素材IDを確認
+python main.py --install-audio-pack
+python main.py --list-audio-assets
+
+# BGM/SEをclean MP4とは別WAVでも、完成MP4にも出力
+python main.py ./archive.mp4 --bgm bgm-brand-new-wisdom \
+  --se se-interface-confirmation --se-cue-seconds 1.5 --audio-delivery both
 ```
 
 > CLI のハイライト検出は既定で `claude` CLI を使います（API キー不要）。OpenAI / Gemini を CLI から使いたい場合は Web UI の利用を推奨します。
@@ -203,6 +249,10 @@ python main.py ./archive.mp4 --shorts --karaoke --thumbnails --audio-fusion
 | `--thumbnails` | サムネイル候補画像を生成 | off |
 | `--audio-fusion` | 音声の盛り上がりを順位に融合 | off |
 | `--audio-alpha` | 音声重み（0.0–1.0） | 0.35 |
+| `--bgm` / `--se` | 追加する素材ID（`--list-audio-assets` で確認） | 未選択 |
+| `--bgm-gain-db` / `--se-gain-db` | BGM / SE の出力ゲイン | -18 / -8 dB |
+| `--se-cue-seconds` | クリップ先頭からSEを鳴らす相対秒 | 0 |
+| `--audio-delivery` | `separate` / `mixed` / `both` | both |
 | `--karaoke` | ショートにワード単位カラオケ字幕を焼き込み | off |
 | `-p, --prompt` | ハイライト検出の追加プロンプト | "" |
 | `--min-duration` / `--max-duration` | クリップの最短/最長秒数 | 30 / 90 |
@@ -220,6 +270,7 @@ python main.py ./archive.mp4 --shorts --karaoke --thumbnails --audio-fusion
 | `--auto-append-youtube` | 生成したタイムスタンプを YouTube 概要欄へ自動追記（URL 入力 + `credentials.json` 必須） |
 | `--youtube-setup` / `--youtube-status` / `--youtube-revoke` | YouTube OAuth の認証 / 状態確認 / 解除 |
 | `--drive-setup` / `--drive-status` / `--drive-revoke` | Google Drive OAuth の認証 / 状態確認 / 解除 |
+| `--install-audio-pack` / `--audio-pack-status` / `--list-audio-assets` | CC0素材パックの導入 / 状態 / 素材ID一覧 |
 
 YouTube / Drive 連携のセットアップ手順は `CREDENTIALS_SETUP.txt` を参照してください（初心者向けの図解版は `SETUP_GUIDE.html`）。
 
@@ -236,6 +287,8 @@ Twitch側でVOD保存が有効になっており、VODが公開されている�
 - 切り抜き動画（横）と、`--shorts` 指定時は縦型ショート（9:16）
 - `--karaoke` 指定時はカラオケ字幕を焼き込んだショート
 - `--thumbnails` 指定時はサムネイル候補画像
+- BGM/SE選択時は出力モードに応じた48kHz WAVステム、ミックス済みMP4、編集用JSON
+- 使用音声素材の `audio_manifest.json` と `THIRD_PARTY_NOTICES_AUDIO.txt`
 - 概要欄用タイムスタンプ（テキスト）
 - Premiere Pro 用 XML（combined / individual）
 
@@ -258,6 +311,8 @@ Twitch側でVOD保存が有効になっており、VODが公開されている�
 | `transcriber.py` | faster-whisper 文字起こし（ワード単位タイムスタンプ対応） |
 | `highlighter.py` | AI ハイライト検出（Claude / OpenAI / Gemini） |
 | `audio_energy.py` | 音声の盛り上がりスコア化・順位融合 |
+| `audio_assets.py` | CC0素材カタログ・検証・バージョン別キャッシュ |
+| `audio_mix.py` / `audio_delivery.py` | BGM/SEステム・ミックス・来歴sidecar出力 |
 | `clipper.py` | 切り抜き・ショート変換・サムネ生成（ffmpeg） |
 | `subtitles.py` | SRT / カラオケ ASS 字幕生成 |
 | `chapters.py` | 概要欄タイムスタンプ生成 |

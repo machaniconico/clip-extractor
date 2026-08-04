@@ -1,8 +1,12 @@
-"""Highlight detection using Claude Code CLI, OpenAI, or Gemini."""
+"""Highlight detection using Claude, cloud APIs, or opt-in local inference."""
 
 import json
+import os
 import re
 import subprocess
+from urllib.parse import urlsplit
+
+import httpx
 
 
 SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパートです。
@@ -86,6 +90,59 @@ HIGHLIGHTS_JSON_SCHEMA = {
     "additionalProperties": False,
 }
 
+LOCAL_LLM_ENABLE_ENV = "CLIP_EXTRACTOR_ENABLE_LOCAL_LLM"
+LOCAL_LLM_MODEL_ENV = "CLIP_EXTRACTOR_LOCAL_LLM_MODEL"
+LOCAL_LLM_BASE_URL_ENV = "CLIP_EXTRACTOR_LOCAL_LLM_BASE_URL"
+LOCAL_LLM_DEFAULT_BASE_URL = "http://127.0.0.1:1234/v1"
+LOCAL_LLM_TIMEOUT_SECONDS = 600.0
+_LOCAL_LLM_TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def local_llm_enabled(environ=None) -> bool:
+    """Return whether the dormant local provider was explicitly enabled."""
+    source = os.environ if environ is None else environ
+    return str(source.get(LOCAL_LLM_ENABLE_ENV, "")).strip().casefold() in (
+        _LOCAL_LLM_TRUTHY_VALUES
+    )
+
+
+def local_llm_default_model(environ=None) -> str:
+    """Return the configured local model ID without inventing a default."""
+    source = os.environ if environ is None else environ
+    return str(source.get(LOCAL_LLM_MODEL_ENV, "")).strip()
+
+
+def validate_local_llm_base_url(value: str) -> str:
+    """Allow only a loopback HTTP OpenAI-compatible ``/v1`` endpoint."""
+    raw = str(value or "").strip().rstrip("/")
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"Invalid local LLM URL: {exc}") from exc
+
+    if parsed.scheme != "http" or not parsed.hostname:
+        raise ValueError("Local LLM URL must use http:// on a loopback host")
+    if (
+        "@" in parsed.netloc
+        or "?" in raw
+        or "#" in raw
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("Local LLM URL cannot contain credentials, query, or fragment")
+
+    host = parsed.hostname.casefold()
+    if host not in {"localhost", "127.0.0.1", "::1"}:
+        raise ValueError("Local LLM URL host must be loopback only")
+    if parsed.path.rstrip("/") != "/v1":
+        raise ValueError("Local LLM URL path must be exactly /v1")
+    if port is not None and not (1 <= port <= 65535):
+        raise ValueError("Invalid local LLM URL port")
+    return raw
+
 
 def _build_user_prompt(transcript, num_clips, min_duration, max_duration, custom_prompt):
     user_prompt = f"""以下の配信トランスクリプトから、最も魅力的な {num_clips} 個のシーンを選んでください。
@@ -158,6 +215,77 @@ def _call_openai(user_prompt, api_key, model="gpt-4.1"):
             temperature=0.3,
         )
     return response.choices[0].message.content
+
+
+def _call_local_openai_compatible(user_prompt, model=""):
+    """Call an explicitly enabled loopback OpenAI-compatible local server."""
+    if not local_llm_enabled():
+        raise RuntimeError(
+            f"ローカルLLMは実験機能です。{LOCAL_LLM_ENABLE_ENV}=1 を設定してください。"
+        )
+
+    resolved_model = str(model or local_llm_default_model()).strip()
+    if not resolved_model:
+        raise ValueError(
+            "ローカルモデルIDが必要です。モデル欄または "
+            f"{LOCAL_LLM_MODEL_ENV} を設定してください。"
+        )
+    base_url = validate_local_llm_base_url(
+        os.environ.get(LOCAL_LLM_BASE_URL_ENV, LOCAL_LLM_DEFAULT_BASE_URL)
+    )
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise RuntimeError("openai パッケージが必要です: pip install openai")
+
+    print(f"Analyzing transcript with local AI ({resolved_model})...")
+    timeout = httpx.Timeout(
+        LOCAL_LLM_TIMEOUT_SECONDS,
+        connect=3.0,
+        write=30.0,
+        read=LOCAL_LLM_TIMEOUT_SECONDS,
+        pool=5.0,
+    )
+    http_client = httpx.Client(
+        timeout=timeout,
+        trust_env=False,
+        follow_redirects=False,
+    )
+    try:
+        client = OpenAI(
+            base_url=base_url,
+            api_key="lm-studio",
+            timeout=timeout,
+            max_retries=0,
+            http_client=http_client,
+        )
+    except Exception:
+        http_client.close()
+        raise
+    try:
+        response = client.chat.completions.create(
+            model=resolved_model,
+            messages=[
+                {"role": "system", "content": GEMINI_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "clip_extractor_highlights",
+                    "strict": True,
+                    "schema": HIGHLIGHTS_JSON_SCHEMA,
+                },
+            },
+        )
+    finally:
+        client.close()
+
+    content = response.choices[0].message.content
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("Local AI returned an empty response")
+    return content
 
 
 def _call_gemini(user_prompt, api_key, model=GEMINI_DEFAULT_MODEL):
@@ -276,8 +404,12 @@ def detect_highlights(
     elif ai_provider == "gemini":
         model = ai_model or GEMINI_DEFAULT_MODEL
         response_text = _call_gemini(user_prompt, api_key, model)
-    else:
+    elif ai_provider == "local":
+        response_text = _call_local_openai_compatible(user_prompt, ai_model)
+    elif ai_provider == "claude":
         response_text = _call_claude(user_prompt)
+    else:
+        raise ValueError(f"Unsupported AI provider: {ai_provider!r}")
 
     data = _extract_json_object(response_text)
     if data is None:
