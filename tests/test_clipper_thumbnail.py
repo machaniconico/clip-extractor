@@ -98,3 +98,29 @@ def test_scene_strategy_falls_back_to_midpoint(monkeypatch, caplog):
 
     assert timestamp == 20.0
     assert "falling back to midpoint" in caplog.text
+
+
+def test_thumbnail_batch_rejects_selected_vfx_source_collision(
+    tmp_path, monkeypatch
+):
+    output_dir = tmp_path / "clips"
+    output_dir.mkdir()
+    protected = output_dir / "00h00m01s-00h00m02s_thumb.png"
+    protected.write_bytes(b"user-vfx")
+    monkeypatch.setattr(
+        clipper,
+        "generate_thumbnail",
+        lambda *_args, **_kwargs: pytest.fail(
+            "collision must be detected before thumbnail generation"
+        ),
+    )
+
+    with pytest.raises(ValueError, match="VFX source"):
+        clipper.generate_thumbnails(
+            tmp_path / "source.mp4",
+            [{"title": "clip", "start_sec": 1, "end_sec": 2}],
+            output_dir,
+            protected_source_paths=[protected],
+        )
+
+    assert protected.read_bytes() == b"user-vfx"

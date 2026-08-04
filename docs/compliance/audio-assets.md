@@ -38,5 +38,28 @@ CC0 summary and legal code:
 - The installed manifest preserves source URLs, final URLs, creator, license,
   modification state, byte size, and SHA-256.
 
+## User-provided BGM, SE, and VFX
+
+User-selected folders are a separate input path from the downloadable pack.
+Their files are referenced in place and are not copied into the application,
+uploaded, bundled, or described as CC0. The application does not determine or
+approve their license; the user is responsible for selecting material whose
+commercial-use and editing permissions they have already verified.
+
+Selections use a content-addressed ID and are rechecked for file replacement
+and a matching media stream before rendering. Output provenance records only
+the material kind, original filename, byte size, and SHA-256; it does not copy
+the absolute source path or claim an independently verified license. BGM/SE
+records are written to `audio_manifest.json` and
+`THIRD_PARTY_NOTICES_AUDIO.txt`; baked VFX/effect decisions are written to
+`effects_manifest.json` in the generated clip group.
+
+On regeneration, prior audio artifacts named by a recognized current or legacy
+manifest are moved to a recoverable `.audio_delivery_recovery-*` directory
+with a `RECOVERY.json` path index. They are not irreversibly deleted based only
+on provenance stored inside the user-writable output directory. A mixed audio
+delivery also remaps the owned `effects_manifest.json` from its clean source
+name to the final `_mixed.mp4` output atomically.
+
 This record documents provenance and implemented controls; it is not a legal
 opinion or a guarantee of non-infringement.

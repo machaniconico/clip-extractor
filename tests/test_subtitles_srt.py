@@ -1,5 +1,7 @@
 """Regression tests for SRT sidecars used by clips and Shorts."""
 
+import pytest
+
 from subtitles import generate_all_short_title_srts, generate_all_srts
 from transcriber import Segment
 
@@ -67,3 +69,48 @@ def test_same_time_range_with_different_titles_does_not_overwrite_srt(tmp_path):
 
     assert paths[0] != paths[1]
     assert all(path.exists() for path in paths)
+
+
+@pytest.mark.parametrize(
+    "titles",
+    [
+        ("same", "same"),
+        ("bad/name", r"bad\name"),
+        ("CASE", "case"),
+        (f"{'長' * 400}A", f"{'長' * 400}B"),
+    ],
+    ids=["identical", "sanitized", "casefold", "truncated"],
+)
+def test_srt_sidecar_batches_disambiguate_all_filename_collisions(
+    tmp_path,
+    titles,
+):
+    highlights = [
+        {"start_sec": 10.0, "end_sec": 20.0, "title": title}
+        for title in titles
+    ]
+    segments = [Segment(start=10.0, end=12.0, text="字幕です")]
+    for directory in ("regular", "archive", "title", "rerun"):
+        (tmp_path / directory).mkdir()
+
+    regular = generate_all_srts(segments, highlights, tmp_path / "regular")
+    archive = generate_all_srts(
+        segments,
+        highlights,
+        tmp_path / "archive",
+        shorts=True,
+    )
+    title = generate_all_short_title_srts(highlights, tmp_path / "title")
+
+    for paths, suffix in [
+        (regular, "_dup02.srt"),
+        (archive, "_short_dup02_archive.srt"),
+        (title, "_short_dup02_title.srt"),
+    ]:
+        assert len({path.name.casefold() for path in paths}) == 2
+        assert paths[1].name.endswith(suffix)
+        assert all(path.exists() for path in paths)
+        assert all(len(path.name.encode("utf-16-le")) // 2 <= 255 for path in paths)
+
+    rerun = generate_all_short_title_srts(highlights, tmp_path / "rerun")
+    assert [path.name for path in rerun] == [path.name for path in title]

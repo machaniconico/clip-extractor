@@ -4,6 +4,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import clipper
@@ -218,3 +220,47 @@ def test_build_ass_subtitles_filter_uses_authored_ass_without_force_style():
     assert filt.startswith("subtitles='")
     assert "C\\:/Users/x/a\\'b.ass" in filt
     assert "force_style" not in filt
+
+
+@pytest.mark.parametrize(
+    "titles",
+    [
+        ("same", "same"),
+        ("bad/name", r"bad\name"),
+        ("CASE", "case"),
+        (f"{'長' * 400}A", f"{'長' * 400}B"),
+    ],
+    ids=["identical", "sanitized", "casefold", "truncated"],
+)
+def test_karaoke_ass_batch_disambiguates_same_range_deterministically(
+    tmp_path,
+    titles,
+):
+    highlights = [
+        {"start_sec": 10.0, "end_sec": 20.0, "title": title}
+        for title in titles
+    ]
+    segments = [Segment(start=10.0, end=12.0, text="字幕です")]
+    (tmp_path / "first").mkdir()
+    (tmp_path / "rerun").mkdir()
+
+    paths = subtitles.generate_all_karaoke_ass(
+        segments,
+        highlights,
+        tmp_path / "first",
+        _font_config(),
+    )
+    rerun = subtitles.generate_all_karaoke_ass(
+        segments,
+        highlights,
+        tmp_path / "rerun",
+        _font_config(),
+    )
+
+    assert [path.name for path in paths] == [
+        "00h00m10s-00h00m20s.ass",
+        "00h00m10s-00h00m20s_dup02.ass",
+    ]
+    assert len({path.name.casefold() for path in paths}) == 2
+    assert all(path.exists() for path in paths)
+    assert [path.name for path in rerun] == [path.name for path in paths]

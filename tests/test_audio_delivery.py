@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from audio_delivery import (
     validate_audio_selection,
 )
 from audio_mix import AudioBatchResult, AudioDeliveryMode, AudioOutputResult
+from user_media import UserMediaAsset, UserMediaError
 
 
 def _asset(tmp_path: Path, asset_id: str, kind: str) -> InstalledAsset:
@@ -44,6 +46,256 @@ def _ready_status():
     )
 
 
+def _owned_manifest(
+    root: Path,
+    groups,
+    *,
+    delivery_mode="both",
+    notice_content: bytes = b"",
+):
+    for records in groups.values():
+        for record in records:
+            for artifact in record.get("artifacts", []):
+                if artifact.get("kind") not in {
+                    "bgm_stem",
+                    "se_stem",
+                    "mixed_video",
+                    "clip_audio_manifest",
+                }:
+                    continue
+                relative = Path(artifact["file"])
+                candidate = root / relative
+                content = (
+                    candidate.read_bytes()
+                    if ".." not in relative.parts
+                    and candidate.is_file()
+                    and not candidate.is_symlink()
+                    else b""
+                )
+                artifact["size_bytes"] = len(content)
+                artifact["sha256"] = hashlib.sha256(content).hexdigest()
+    return {
+        "schema_version": 2,
+        "generator": "clip-extractor",
+        "generated_at": "2026-08-05T00:00:00+00:00",
+        "delivery_mode": delivery_mode,
+        "settings": {},
+        "pack": None,
+        "selected_assets": {},
+        "notices": {
+            "file": audio_delivery.AUDIO_NOTICES_NAME,
+            "size_bytes": len(notice_content),
+            "sha256": hashlib.sha256(notice_content).hexdigest(),
+        },
+        "groups": groups,
+    }
+
+
+def _recovery_contents(root: Path) -> dict[str, bytes]:
+    directories = list(root.glob(f"{audio_delivery._RECOVERY_PREFIX}*"))
+    assert len(directories) == 1
+    index = json.loads(
+        (directories[0] / audio_delivery._RECOVERY_INDEX_NAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    return {
+        item["original_file"]: (directories[0] / item["backup_file"]).read_bytes()
+        for item in index["files"]
+    }
+
+
+def _user_asset(tmp_path: Path, asset_id: str, kind: str) -> UserMediaAsset:
+    path = tmp_path / f"{kind}.wav"
+    path.write_bytes(b"user audio")
+    digest = asset_id.rsplit(":", 1)[-1]
+    return UserMediaAsset(
+        id=asset_id,
+        kind=kind,
+        path=path.resolve(),
+        filename=path.name,
+        relative_path=path.name,
+        size=path.stat().st_size,
+        sha256=digest,
+    )
+
+
+def test_user_audio_resolves_without_cc0_pack_and_writes_user_provenance(
+    tmp_path, monkeypatch
+):
+    clips_dir = tmp_path / "clips"
+    clips_dir.mkdir()
+    clean = clips_dir / "clip.mp4"
+    clean.write_bytes(b"clean")
+    digest = "b" * 64
+    bgm = _user_asset(tmp_path, f"user:bgm:{digest}", "bgm")
+    monkeypatch.setattr(
+        audio_delivery,
+        "get_pack_status",
+        lambda: pytest.fail("user-only audio must not require the CC0 pack"),
+    )
+    monkeypatch.setattr(
+        audio_delivery,
+        "resolve_user_media_asset",
+        lambda folder, asset_id, kind: bgm,
+    )
+    monkeypatch.setattr(audio_delivery, "validate_user_media", lambda asset: None)
+
+    captured = {}
+
+    def fake_process(_paths, _highlights, **kwargs):
+        captured.update(kwargs)
+        stem = clips_dir / "clip_bgm.wav"
+        sidecar = clips_dir / "clip_audio.json"
+        stem.write_bytes(b"stem")
+        sidecar.write_text("{}", encoding="utf-8")
+        return AudioBatchResult(
+            clips=(
+                AudioOutputResult(
+                    deliverables=(clean, stem, sidecar),
+                    clean_video=clean,
+                    bgm_stem=stem,
+                    manifest=sidecar,
+                ),
+            )
+        )
+
+    monkeypatch.setattr(audio_delivery, "process_clip_batch", fake_process)
+
+    result = deliver_audio_groups(
+        tmp_path,
+        {"clips": [clean]},
+        [{"title": "clip", "start_sec": 0, "end_sec": 2}],
+        options=AudioDeliveryOptions(
+            delivery_mode="separate",
+            bgm_asset_id=bgm.id,
+            bgm_user_folder=str(tmp_path),
+        ),
+    )
+
+    assert captured["bgm_path"] == bgm.path
+    assert captured["se_path"] is None
+    provenance = captured["provenance"]["bgm"]
+    assert provenance == {
+        "id": bgm.id,
+        "kind": "bgm",
+        "source_type": "user_provided",
+        "original_filename": "bgm.wav",
+        "source_sha256": digest,
+        "source_size_bytes": len(b"user audio"),
+    }
+    payload = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert payload["pack"] is None
+    assert payload["selected_assets"]["bgm"]["source_type"] == "user_provided"
+    notices = result.notices_path.read_text(encoding="utf-8")
+    assert "User-provided material" in notices
+    assert "CC0 1.0 Universal" not in notices
+
+
+def test_user_audio_is_revalidated_immediately_before_mixing(
+    tmp_path, monkeypatch
+):
+    clean = tmp_path / "clip.mp4"
+    clean.write_bytes(b"clean")
+    digest = "c" * 64
+    bgm = _user_asset(tmp_path, f"user:bgm:{digest}", "bgm")
+    monkeypatch.setattr(
+        audio_delivery,
+        "get_pack_status",
+        lambda: pytest.fail("user-only audio must not require the CC0 pack"),
+    )
+    monkeypatch.setattr(
+        audio_delivery,
+        "resolve_user_media_asset",
+        lambda _folder, _asset_id, _kind: bgm,
+    )
+    validations = 0
+
+    def validate(asset):
+        nonlocal validations
+        validations += 1
+        if validations == 2:
+            raise UserMediaError("replaced")
+        return asset
+
+    monkeypatch.setattr(audio_delivery, "validate_user_media", validate)
+    monkeypatch.setattr(
+        audio_delivery,
+        "process_clip_batch",
+        lambda *_args, **_kwargs: pytest.fail("mixing must not start"),
+    )
+
+    with pytest.raises(AudioDeliveryError, match="生成直前に変更"):
+        deliver_audio_groups(
+            tmp_path,
+            {"clips": [clean]},
+            [{"title": "clip", "start_sec": 0, "end_sec": 2}],
+            options=AudioDeliveryOptions(
+                bgm_asset_id=bgm.id,
+                bgm_user_folder=str(tmp_path),
+            ),
+        )
+
+    assert clean.read_bytes() == b"clean"
+
+
+def test_user_audio_reference_requires_its_matching_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        audio_delivery,
+        "get_pack_status",
+        lambda: pytest.fail("user audio must not inspect the CC0 pack"),
+    )
+    with pytest.raises(AudioDeliveryError, match="参照フォルダ"):
+        validate_audio_selection(
+            AudioDeliveryOptions(bgm_asset_id=f"user:bgm:{'c' * 64}")
+        )
+
+
+def test_user_audio_cannot_collide_with_generated_output(tmp_path, monkeypatch):
+    clips_dir = tmp_path / "clips"
+    clips_dir.mkdir()
+    clean = clips_dir / "clip.mp4"
+    clean.write_bytes(b"clean")
+    source = clips_dir / "clip_bgm.wav"
+    source.write_bytes(b"must stay unchanged")
+    digest = "e" * 64
+    asset = UserMediaAsset(
+        id=f"user:bgm:{digest}",
+        kind="bgm",
+        path=source.resolve(),
+        filename=source.name,
+        relative_path=source.name,
+        size=source.stat().st_size,
+        sha256=digest,
+    )
+    monkeypatch.setattr(
+        audio_delivery,
+        "resolve_user_media_asset",
+        lambda *_args: asset,
+    )
+    monkeypatch.setattr(audio_delivery, "validate_user_media", lambda _asset: None)
+    monkeypatch.setattr(
+        audio_delivery,
+        "process_clip_batch",
+        lambda *_args, **_kwargs: pytest.fail("FFmpeg must not run on a collision"),
+    )
+
+    with pytest.raises(AudioDeliveryError, match="衝突"):
+        deliver_audio_groups(
+            tmp_path,
+            {"clips": [clean]},
+            [{"start_sec": 0, "end_sec": 2}],
+            options=AudioDeliveryOptions(
+                delivery_mode="separate",
+                bgm_asset_id=asset.id,
+                bgm_user_folder=str(tmp_path),
+            ),
+        )
+
+    assert source.read_bytes() == b"must stay unchanged"
+    assert not list(tmp_path.glob(".audio_delivery_transaction-*"))
+
+
 def test_disabled_audio_preserves_clean_media_and_removes_prior_generated_files(
     tmp_path,
 ):
@@ -55,10 +307,13 @@ def test_disabled_audio_preserves_clean_media_and_removes_prior_generated_files(
     stale_stem = clips_dir / "clip_bgm.wav"
     stale_mixed.write_bytes(b"mixed")
     stale_stem.write_bytes(b"stem")
-    manifest = {
-        "groups": {
+    manifest = _owned_manifest(
+        tmp_path,
+        {
             "clips": [
                 {
+                    "source_clean_video": "clips/clip.mp4",
+                    "primary_video": "clips/clip.mp4",
                     "artifacts": [
                         {"kind": "clean_video", "file": "clips/clip.mp4"},
                         {
@@ -69,8 +324,9 @@ def test_disabled_audio_preserves_clean_media_and_removes_prior_generated_files(
                     ]
                 }
             ]
-        }
-    }
+        },
+        notice_content=b"old",
+    )
     (tmp_path / audio_delivery.AUDIO_MANIFEST_NAME).write_text(
         json.dumps(manifest), encoding="utf-8"
     )
@@ -90,6 +346,208 @@ def test_disabled_audio_preserves_clean_media_and_removes_prior_generated_files(
     assert not stale_stem.exists()
     assert not (tmp_path / audio_delivery.AUDIO_MANIFEST_NAME).exists()
     assert not (tmp_path / audio_delivery.AUDIO_NOTICES_NAME).exists()
+    recovery = _recovery_contents(tmp_path)
+    assert recovery["clips/clip_mixed.mp4"] == b"mixed"
+    assert recovery["clips/clip_bgm.wav"] == b"stem"
+
+
+def test_forged_v2_manifest_can_only_quarantine_claimed_user_content(tmp_path):
+    claimed = tmp_path / "important_bgm.wav"
+    claimed.write_bytes(b"USER-CONTENT")
+    notices = tmp_path / audio_delivery.AUDIO_NOTICES_NAME
+    notices.write_text("forged notice", encoding="utf-8")
+    manifest = _owned_manifest(
+        tmp_path,
+        {
+            "clips": [
+                {
+                    "source_clean_video": "important.mp4",
+                    "artifacts": [
+                        {"kind": "bgm_stem", "file": "important_bgm.wav"}
+                    ],
+                }
+            ]
+        },
+        notice_content=b"forged notice",
+    )
+    (tmp_path / audio_delivery.AUDIO_MANIFEST_NAME).write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+
+    deliver_audio_groups(tmp_path, {}, [], options=AudioDeliveryOptions())
+
+    assert not claimed.exists()
+    recovery = _recovery_contents(tmp_path)
+    assert recovery["important_bgm.wav"] == b"USER-CONTENT"
+
+
+def test_legacy_v1_manifest_is_migrated_to_recovery_when_audio_disabled(
+    tmp_path,
+):
+    clean = tmp_path / "clip.mp4"
+    clean.write_bytes(b"clean")
+    legacy_stem = tmp_path / "clip_bgm.wav"
+    legacy_stem.write_bytes(b"legacy stem")
+    legacy = {
+        "schema_version": 1,
+        "delivery_mode": "both",
+        "groups": {
+            "clips": [
+                {
+                    "primary_video": "clip.mp4",
+                    "artifacts": [
+                        {"kind": "clean_video", "file": "clip.mp4"},
+                        {"kind": "bgm_stem", "file": "clip_bgm.wav"},
+                    ],
+                }
+            ]
+        },
+    }
+    (tmp_path / audio_delivery.AUDIO_MANIFEST_NAME).write_text(
+        json.dumps(legacy),
+        encoding="utf-8",
+    )
+    (tmp_path / audio_delivery.AUDIO_NOTICES_NAME).write_text(
+        "legacy notice",
+        encoding="utf-8",
+    )
+
+    result = deliver_audio_groups(
+        tmp_path,
+        {"clips": [clean]},
+        [{"start_sec": 0, "end_sec": 2}],
+        options=AudioDeliveryOptions(),
+    )
+
+    assert result.enabled is False
+    assert clean.read_bytes() == b"clean"
+    assert not legacy_stem.exists()
+    recovery = _recovery_contents(tmp_path)
+    assert recovery["clip_bgm.wav"] == b"legacy stem"
+    assert audio_delivery.AUDIO_MANIFEST_NAME in recovery
+    assert audio_delivery.AUDIO_NOTICES_NAME in recovery
+
+
+def test_legacy_v1_manifest_is_quarantined_before_enabled_regeneration(
+    tmp_path, monkeypatch
+):
+    clean = tmp_path / "clip.mp4"
+    clean.write_bytes(b"clean")
+    old_stem = tmp_path / "clip_bgm.wav"
+    old_stem.write_bytes(b"legacy stem")
+    old_sidecar = tmp_path / "clip_audio.json"
+    old_sidecar.write_text("legacy sidecar", encoding="utf-8")
+    legacy = {
+        "schema_version": 1,
+        "delivery_mode": "separate",
+        "groups": {
+            "clips": [
+                {
+                    "primary_video": "clip.mp4",
+                    "artifacts": [
+                        {"kind": "clean_video", "file": "clip.mp4"},
+                        {"kind": "bgm_stem", "file": "clip_bgm.wav"},
+                        {
+                            "kind": "clip_audio_manifest",
+                            "file": "clip_audio.json",
+                        },
+                    ],
+                }
+            ]
+        },
+    }
+    (tmp_path / audio_delivery.AUDIO_MANIFEST_NAME).write_text(
+        json.dumps(legacy),
+        encoding="utf-8",
+    )
+    (tmp_path / audio_delivery.AUDIO_NOTICES_NAME).write_text(
+        "legacy notice",
+        encoding="utf-8",
+    )
+    bgm = _asset(tmp_path, "NEW-BGM", "bgm")
+    monkeypatch.setattr(audio_delivery, "get_pack_status", _ready_status)
+    monkeypatch.setattr(audio_delivery, "get_installed_asset", lambda _id: bgm)
+
+    def fake_process(_paths, _highlights, **_kwargs):
+        old_stem.write_bytes(b"new stem")
+        old_sidecar.write_text("new sidecar", encoding="utf-8")
+        return AudioBatchResult(
+            clips=(
+                AudioOutputResult(
+                    deliverables=(clean, old_stem, old_sidecar),
+                    clean_video=clean,
+                    bgm_stem=old_stem,
+                    manifest=old_sidecar,
+                ),
+            )
+        )
+
+    monkeypatch.setattr(audio_delivery, "process_clip_batch", fake_process)
+
+    result = deliver_audio_groups(
+        tmp_path,
+        {"clips": [clean]},
+        [{"title": "clip", "start_sec": 0, "end_sec": 2}],
+        options=AudioDeliveryOptions(
+            delivery_mode="separate",
+            bgm_asset_id=bgm.id,
+        ),
+    )
+
+    assert result.enabled is True
+    assert old_stem.read_bytes() == b"new stem"
+    assert old_sidecar.read_text(encoding="utf-8") == "new sidecar"
+    recovery = _recovery_contents(tmp_path)
+    assert recovery["clip_bgm.wav"] == b"legacy stem"
+    assert recovery["clip_audio.json"] == b"legacy sidecar"
+
+
+def test_disabled_audio_leaves_unknown_provenance_files_untouched(tmp_path):
+    manifest = tmp_path / audio_delivery.AUDIO_MANIFEST_NAME
+    notices = tmp_path / audio_delivery.AUDIO_NOTICES_NAME
+    manifest.write_text("USER-NOTES", encoding="utf-8")
+    notices.write_text("USER-NOTICE", encoding="utf-8")
+
+    result = deliver_audio_groups(
+        tmp_path,
+        {},
+        [],
+        options=AudioDeliveryOptions(),
+    )
+
+    assert result.enabled is False
+    assert manifest.read_text(encoding="utf-8") == "USER-NOTES"
+    assert notices.read_text(encoding="utf-8") == "USER-NOTICE"
+
+
+def test_enabled_audio_rejects_unowned_generated_target_before_mixing(
+    tmp_path, monkeypatch
+):
+    clean = tmp_path / "clip.mp4"
+    clean.write_bytes(b"clean")
+    collision = tmp_path / "clip_bgm.wav"
+    collision.write_bytes(b"USER-STEM")
+    bgm = _asset(tmp_path, "bgm", "bgm")
+    monkeypatch.setattr(audio_delivery, "get_pack_status", _ready_status)
+    monkeypatch.setattr(audio_delivery, "get_installed_asset", lambda _id: bgm)
+    monkeypatch.setattr(
+        audio_delivery,
+        "process_clip_batch",
+        lambda *_args, **_kwargs: pytest.fail(
+            "collision must be rejected before audio mixing"
+        ),
+    )
+
+    with pytest.raises(AudioDeliveryError, match="衝突"):
+        deliver_audio_groups(
+            tmp_path,
+            {"clips": [clean]},
+            [{"start_sec": 0, "end_sec": 2}],
+            options=AudioDeliveryOptions(bgm_asset_id=bgm.id),
+        )
+
+    assert collision.read_bytes() == b"USER-STEM"
 
 
 def test_validate_selection_never_installs_missing_pack(monkeypatch):
@@ -233,10 +691,12 @@ def test_previous_manifest_cannot_delete_outside_output(tmp_path):
     clean.write_bytes(b"clean")
     (tmp_path / audio_delivery.AUDIO_MANIFEST_NAME).write_text(
         json.dumps(
-            {
-                "groups": {
+            _owned_manifest(
+                tmp_path,
+                {
                     "clips": [
                         {
+                            "source_clean_video": "clip.mp4",
                             "artifacts": [
                                 {
                                     "kind": "mixed_video",
@@ -246,7 +706,7 @@ def test_previous_manifest_cannot_delete_outside_output(tmp_path):
                         }
                     ]
                 }
-            }
+            )
         ),
         encoding="utf-8",
     )
@@ -258,6 +718,118 @@ def test_previous_manifest_cannot_delete_outside_output(tmp_path):
             [{"start_sec": 0, "end_sec": 2}],
             options=AudioDeliveryOptions(),
         )
+
+
+def test_previous_manifest_cannot_claim_unrelated_suffixed_video(tmp_path):
+    clean = tmp_path / "clip.mp4"
+    clean.write_bytes(b"clean")
+    victim = tmp_path / "vacation_mixed.mp4"
+    victim.write_bytes(b"USER-VIDEO")
+    manifest = _owned_manifest(
+        tmp_path,
+        {
+            "clips": [
+                {
+                    "source_clean_video": "clip.mp4",
+                    "artifacts": [
+                        {
+                            "kind": "mixed_video",
+                            "file": "vacation_mixed.mp4",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    (tmp_path / audio_delivery.AUDIO_MANIFEST_NAME).write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(AudioDeliveryError, match="clean動画名と一致"):
+        deliver_audio_groups(
+            tmp_path,
+            {"clips": [clean]},
+            [{"start_sec": 0, "end_sec": 2}],
+            options=AudioDeliveryOptions(),
+        )
+
+    assert victim.read_bytes() == b"USER-VIDEO"
+
+
+def test_previous_generated_path_replaced_by_user_is_never_deleted(tmp_path):
+    clean = tmp_path / "clip.mp4"
+    clean.write_bytes(b"clean")
+    generated = tmp_path / "clip_mixed.mp4"
+    generated.write_bytes(b"OLD-GENERATED")
+    manifest = _owned_manifest(
+        tmp_path,
+        {
+            "clips": [
+                {
+                    "source_clean_video": "clip.mp4",
+                    "artifacts": [
+                        {
+                            "kind": "mixed_video",
+                            "file": "clip_mixed.mp4",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    (tmp_path / audio_delivery.AUDIO_MANIFEST_NAME).write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+    generated.write_bytes(b"USER-REPLACEMENT")
+
+    with pytest.raises(AudioDeliveryError, match="別ファイルへ変更"):
+        deliver_audio_groups(
+            tmp_path,
+            {"clips": [clean]},
+            [{"start_sec": 0, "end_sec": 2}],
+            options=AudioDeliveryOptions(),
+        )
+
+    assert generated.read_bytes() == b"USER-REPLACEMENT"
+
+
+def test_rollback_failure_keeps_recovery_backup(tmp_path):
+    clean = tmp_path / "clip.mp4"
+    clean.write_bytes(b"clean")
+    generated = tmp_path / "clip_bgm.wav"
+    generated.write_bytes(b"OLD-STEM")
+    manifest = _owned_manifest(
+        tmp_path,
+        {
+            "clips": [
+                {
+                    "source_clean_video": "clip.mp4",
+                    "artifacts": [
+                        {"kind": "bgm_stem", "file": "clip_bgm.wav"}
+                    ],
+                }
+            ]
+        },
+    )
+    transaction = audio_delivery._AudioDeliveryTransaction(
+        tmp_path,
+        {generated},
+        {clean},
+        protect_clean=False,
+        manage_sidecars=False,
+    )
+    transaction.begin(manifest)
+    generated.mkdir()
+
+    with pytest.raises(AudioDeliveryError, match="復旧用バックアップを保持"):
+        transaction.rollback()
+
+    assert transaction.backup_dir is not None
+    recovery_files = list(transaction.backup_dir.iterdir())
+    assert len(recovery_files) == 1
+    assert recovery_files[0].read_bytes() == b"OLD-STEM"
 
 
 @pytest.mark.parametrize(
@@ -306,10 +878,12 @@ def test_previous_manifest_artifact_symlink_cannot_delete_its_target(tmp_path):
     linked_output.symlink_to(victim)
     (output / audio_delivery.AUDIO_MANIFEST_NAME).write_text(
         json.dumps(
-            {
-                "groups": {
+            _owned_manifest(
+                output,
+                {
                     "clips": [
                         {
+                            "source_clean_video": "clip.mp4",
                             "artifacts": [
                                 {
                                     "kind": "mixed_video",
@@ -319,7 +893,7 @@ def test_previous_manifest_artifact_symlink_cannot_delete_its_target(tmp_path):
                         }
                     ]
                 }
-            }
+            )
         ),
         encoding="utf-8",
     )
@@ -349,10 +923,12 @@ def test_previous_manifest_cannot_follow_symlinked_parent_directory(tmp_path):
     linked_directory.symlink_to(real_directory, target_is_directory=True)
     (output / audio_delivery.AUDIO_MANIFEST_NAME).write_text(
         json.dumps(
-            {
-                "groups": {
+            _owned_manifest(
+                output,
+                {
                     "clips": [
                         {
+                            "source_clean_video": "clip.mp4",
                             "artifacts": [
                                 {
                                     "kind": "mixed_video",
@@ -362,7 +938,7 @@ def test_previous_manifest_cannot_follow_symlinked_parent_directory(tmp_path):
                         }
                     ]
                 }
-            }
+            )
         ),
         encoding="utf-8",
     )
@@ -451,10 +1027,12 @@ def test_previous_artifact_never_deletes_current_clean_input(
     clean.write_bytes(b"current input")
     (tmp_path / audio_delivery.AUDIO_MANIFEST_NAME).write_text(
         json.dumps(
-            {
-                "groups": {
+            _owned_manifest(
+                tmp_path,
+                {
                     "clips": [
                         {
+                            "source_clean_video": "clip.mp4",
                             "artifacts": [
                                 {
                                     "kind": "mixed_video",
@@ -463,8 +1041,9 @@ def test_previous_artifact_never_deletes_current_clean_input(
                             ]
                         }
                     ]
-                }
-            }
+                },
+                notice_content=b"old notice",
+            )
         ),
         encoding="utf-8",
     )
@@ -515,10 +1094,12 @@ def test_transaction_begin_failure_preserves_existing_provenance(tmp_path, monke
     notices_path = tmp_path / audio_delivery.AUDIO_NOTICES_NAME
     manifest_path.write_text(
         json.dumps(
-            {
-                "groups": {
+            _owned_manifest(
+                tmp_path,
+                {
                     "clips": [
                         {
+                            "source_clean_video": "clip.mp4",
                             "artifacts": [
                                 {
                                     "kind": "mixed_video",
@@ -527,8 +1108,9 @@ def test_transaction_begin_failure_preserves_existing_provenance(tmp_path, monke
                             ]
                         }
                     ]
-                }
-            }
+                },
+                notice_content=b"OLD NOTICE",
+            )
         ),
         encoding="utf-8",
     )
@@ -564,11 +1146,12 @@ def test_notice_write_failure_restores_previous_provenance_and_audio_outputs(
     old_sidecar = clips_dir / "clip_audio.json"
     old_stem.write_bytes(b"old stem")
     old_sidecar.write_text('{"asset":"OLD-ASSET"}', encoding="utf-8")
-    old_manifest = {
-        "selected_assets": {"bgm": {"id": "OLD-ASSET"}},
-        "groups": {
+    old_manifest = _owned_manifest(
+        tmp_path,
+        {
             "clips": [
                 {
+                    "source_clean_video": "clips/clip.mp4",
                     "artifacts": [
                         {"kind": "bgm_stem", "file": "clips/clip_bgm.wav"},
                         {
@@ -579,7 +1162,9 @@ def test_notice_write_failure_restores_previous_provenance_and_audio_outputs(
                 }
             ]
         },
-    }
+        notice_content=b"OLD NOTICE FOR OLD-ASSET",
+    )
+    old_manifest["selected_assets"] = {"bgm": {"id": "OLD-ASSET"}}
     manifest_path = tmp_path / audio_delivery.AUDIO_MANIFEST_NAME
     notices_path = tmp_path / audio_delivery.AUDIO_NOTICES_NAME
     manifest_path.write_text(json.dumps(old_manifest), encoding="utf-8")
@@ -643,9 +1228,14 @@ def test_mixed_notice_failure_restores_clean_video_deleted_by_mixer(
     clean.write_bytes(b"original clean video")
     manifest_path = tmp_path / audio_delivery.AUDIO_MANIFEST_NAME
     notices_path = tmp_path / audio_delivery.AUDIO_NOTICES_NAME
-    manifest_path.write_text(
-        '{"selected_assets":{"bgm":{"id":"OLD"}}}', encoding="utf-8"
+    previous_manifest = _owned_manifest(
+        tmp_path,
+        {"clips": []},
+        delivery_mode="mixed",
+        notice_content=b"OLD NOTICE",
     )
+    previous_manifest["selected_assets"] = {"bgm": {"id": "OLD"}}
+    manifest_path.write_text(json.dumps(previous_manifest), encoding="utf-8")
     notices_path.write_text("OLD NOTICE", encoding="utf-8")
     old_manifest_bytes = manifest_path.read_bytes()
     old_notice_bytes = notices_path.read_bytes()
@@ -692,3 +1282,164 @@ def test_mixed_notice_failure_restores_clean_video_deleted_by_mixer(
     assert manifest_path.read_bytes() == old_manifest_bytes
     assert notices_path.read_bytes() == old_notice_bytes
     assert not list(tmp_path.glob(".audio_delivery_transaction-*"))
+
+
+def test_mixed_notice_failure_restores_clean_video_overwritten_by_mixer(
+    tmp_path, monkeypatch
+):
+    clean = tmp_path / "clip.mp4"
+    clean.write_bytes(b"original clean video")
+    bgm = _asset(tmp_path, "NEW-ASSET", "bgm")
+    monkeypatch.setattr(audio_delivery, "get_pack_status", _ready_status)
+    monkeypatch.setattr(audio_delivery, "get_installed_asset", lambda _id: bgm)
+
+    def fake_process(_paths, _highlights, **_kwargs):
+        mixed = tmp_path / "clip_mixed.mp4"
+        mixed.write_bytes(b"new mixed")
+        clean.write_bytes(b"REPLACED")
+        return AudioBatchResult(
+            clips=(
+                AudioOutputResult(
+                    deliverables=(mixed,),
+                    clean_video=None,
+                    mixed_video=mixed,
+                    decoded_peak_4x_dbfs=-2.0,
+                ),
+            )
+        )
+
+    monkeypatch.setattr(audio_delivery, "process_clip_batch", fake_process)
+    monkeypatch.setattr(
+        audio_delivery,
+        "_write_text_atomic",
+        lambda path, _text: (_ for _ in ()).throw(OSError("notice failed"))
+        if path.name == audio_delivery.AUDIO_NOTICES_NAME
+        else None,
+    )
+
+    with pytest.raises(OSError, match="notice failed"):
+        deliver_audio_groups(
+            tmp_path,
+            {"clips": [clean]},
+            [{"title": "clip", "start_sec": 0, "end_sec": 2}],
+            options=AudioDeliveryOptions(delivery_mode="mixed", bgm_asset_id=bgm.id),
+        )
+
+    assert clean.read_bytes() == b"original clean video"
+    assert not (tmp_path / "clip_mixed.mp4").exists()
+    assert not list(tmp_path.glob(".audio_delivery_transaction-*"))
+
+
+def test_mixed_audio_atomically_remaps_effects_manifest_to_final_video(
+    tmp_path, monkeypatch
+):
+    clean = tmp_path / "clip.mp4"
+    clean.write_bytes(b"clean")
+    effects_path = tmp_path / audio_delivery.EFFECTS_MANIFEST_NAME
+    effects_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "generator": "clip-extractor",
+                "clips": [
+                    {
+                        "source_clean_video": "clip.mp4",
+                        "output_file": "clip.mp4",
+                        "enabled": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    bgm = _asset(tmp_path, "BGM", "bgm")
+    monkeypatch.setattr(audio_delivery, "get_pack_status", _ready_status)
+    monkeypatch.setattr(audio_delivery, "get_installed_asset", lambda _id: bgm)
+
+    def fake_process(_paths, _highlights, **_kwargs):
+        mixed = tmp_path / "clip_mixed.mp4"
+        mixed.write_bytes(b"mixed")
+        clean.unlink()
+        return AudioBatchResult(
+            clips=(
+                AudioOutputResult(
+                    deliverables=(mixed,),
+                    clean_video=None,
+                    mixed_video=mixed,
+                    decoded_peak_4x_dbfs=-2.0,
+                ),
+            )
+        )
+
+    monkeypatch.setattr(audio_delivery, "process_clip_batch", fake_process)
+
+    result = deliver_audio_groups(
+        tmp_path,
+        {"clips": [clean]},
+        [{"title": "clip", "start_sec": 0, "end_sec": 2}],
+        options=AudioDeliveryOptions(delivery_mode="mixed", bgm_asset_id=bgm.id),
+        effects_manifest_dirs={"clips": tmp_path},
+    )
+
+    payload = json.loads(effects_path.read_text(encoding="utf-8"))
+    assert result.media_groups["clips"] == (tmp_path / "clip_mixed.mp4",)
+    assert payload["clips"][0]["source_clean_video"] == "clip.mp4"
+    assert payload["clips"][0]["output_file"] == "clip_mixed.mp4"
+
+
+def test_effects_manifest_remap_failure_rolls_back_mixed_audio_and_manifest(
+    tmp_path, monkeypatch
+):
+    clean = tmp_path / "clip.mp4"
+    clean.write_bytes(b"clean")
+    effects_path = tmp_path / audio_delivery.EFFECTS_MANIFEST_NAME
+    original_effects = json.dumps(
+        {
+            "schema_version": 1,
+            "generator": "clip-extractor",
+            "clips": [{"output_file": "clip.mp4", "enabled": True}],
+        }
+    )
+    effects_path.write_text(original_effects, encoding="utf-8")
+    bgm = _asset(tmp_path, "BGM", "bgm")
+    monkeypatch.setattr(audio_delivery, "get_pack_status", _ready_status)
+    monkeypatch.setattr(audio_delivery, "get_installed_asset", lambda _id: bgm)
+
+    def fake_process(_paths, _highlights, **_kwargs):
+        mixed = tmp_path / "clip_mixed.mp4"
+        mixed.write_bytes(b"mixed")
+        clean.unlink()
+        return AudioBatchResult(
+            clips=(
+                AudioOutputResult(
+                    deliverables=(mixed,),
+                    clean_video=None,
+                    mixed_video=mixed,
+                    decoded_peak_4x_dbfs=-2.0,
+                ),
+            )
+        )
+
+    def fail_remap(*_args, **_kwargs):
+        effects_path.write_text("PARTIAL", encoding="utf-8")
+        raise audio_delivery.VideoEffectError("injected remap failure")
+
+    monkeypatch.setattr(audio_delivery, "process_clip_batch", fake_process)
+    monkeypatch.setattr(
+        audio_delivery,
+        "remap_effects_manifest_outputs",
+        fail_remap,
+    )
+
+    with pytest.raises(AudioDeliveryError, match="VFX来歴"):
+        deliver_audio_groups(
+            tmp_path,
+            {"clips": [clean]},
+            [{"title": "clip", "start_sec": 0, "end_sec": 2}],
+            options=AudioDeliveryOptions(delivery_mode="mixed", bgm_asset_id=bgm.id),
+            effects_manifest_dirs={"clips": tmp_path},
+        )
+
+    assert clean.read_bytes() == b"clean"
+    assert not (tmp_path / "clip_mixed.mp4").exists()
+    assert effects_path.read_text(encoding="utf-8") == original_effects

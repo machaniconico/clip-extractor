@@ -1,17 +1,20 @@
 """Resolve optional audio assets and apply them to rendered media groups.
 
 This module is the shared integration boundary for the Web and CLI pipelines.
-It never downloads assets: rendering only accepts a previously installed,
-verified starter pack from :mod:`audio_assets`.
+It never downloads assets: rendering accepts either a previously installed,
+verified starter pack or user-provided files from explicitly configured folders.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
+import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 from typing import Any, Mapping, Sequence
@@ -29,14 +32,30 @@ from audio_mix import (
     AudioMixSettings,
     process_clip_batch,
 )
+from user_media import (
+    UserMediaAsset,
+    UserMediaError,
+    is_user_media_id,
+    resolve_user_media_asset,
+    validate_user_media,
+)
+from video_effects import (
+    EFFECTS_MANIFEST_NAME,
+    VideoEffectError,
+    has_owned_effects_manifest,
+    remap_effects_manifest_outputs,
+)
 
 
 AUDIO_MANIFEST_NAME = "audio_manifest.json"
 AUDIO_NOTICES_NAME = "THIRD_PARTY_NOTICES_AUDIO.txt"
 _TRANSACTION_PREFIX = ".audio_delivery_transaction-"
+_RECOVERY_PREFIX = ".audio_delivery_recovery-"
+_RECOVERY_INDEX_NAME = "RECOVERY.json"
 _GENERATED_AUDIO_KINDS = frozenset(
     {"bgm_stem", "se_stem", "mixed_video", "clip_audio_manifest"}
 )
+logger = logging.getLogger(__name__)
 
 
 class AudioDeliveryError(RuntimeError):
@@ -50,6 +69,8 @@ class AudioDeliveryOptions:
     delivery_mode: AudioDeliveryMode | str = AudioDeliveryMode.BOTH
     bgm_asset_id: str = ""
     se_asset_id: str = ""
+    bgm_user_folder: str = ""
+    se_user_folder: str = ""
     bgm_gain_db: float = -18.0
     se_gain_db: float = -8.0
     se_cue_seconds: float = 0.0
@@ -57,6 +78,8 @@ class AudioDeliveryOptions:
     def __post_init__(self) -> None:
         bgm_id = str(self.bgm_asset_id or "").strip()
         se_id = str(self.se_asset_id or "").strip()
+        bgm_folder = str(self.bgm_user_folder or "").strip()
+        se_folder = str(self.se_user_folder or "").strip()
         # AudioMixSettings owns the canonical mode and numeric validation.
         validated = AudioMixSettings(
             delivery_mode=self.delivery_mode,
@@ -67,6 +90,8 @@ class AudioDeliveryOptions:
         object.__setattr__(self, "delivery_mode", validated.delivery_mode)
         object.__setattr__(self, "bgm_asset_id", bgm_id)
         object.__setattr__(self, "se_asset_id", se_id)
+        object.__setattr__(self, "bgm_user_folder", bgm_folder)
+        object.__setattr__(self, "se_user_folder", se_folder)
         object.__setattr__(self, "bgm_gain_db", validated.bgm_gain_db)
         object.__setattr__(self, "se_gain_db", validated.se_gain_db)
         object.__setattr__(self, "se_cue_seconds", validated.se_cue_seconds)
@@ -97,14 +122,19 @@ class _AudioDeliveryTransaction:
         clean_paths: set[Path],
         *,
         protect_clean: bool,
+        manage_sidecars: bool,
+        protected_paths: set[Path] | None = None,
     ) -> None:
         self.root = root
         self.generated_paths = set(generated_paths)
         self.clean_paths = set(clean_paths)
         self.protect_clean = protect_clean
+        self.manage_sidecars = manage_sidecars
+        self.protected_paths = set(protected_paths or ())
         self.backup_dir: Path | None = None
         self.moved_backups: list[tuple[Path, Path]] = []
         self.clean_backups: list[tuple[Path, Path]] = []
+        self.protected_backups: list[tuple[Path, Path]] = []
         self.active = False
 
     def begin(self, previous_manifest: Mapping[str, Any] | None) -> None:
@@ -112,14 +142,25 @@ class _AudioDeliveryTransaction:
             tempfile.mkdtemp(prefix=_TRANSACTION_PREFIX, dir=str(self.root))
         )
         try:
-            prior_paths = _manifest_generated_paths(self.root, previous_manifest)
-            candidates = self.generated_paths | prior_paths
-            candidates.update(
-                {
-                    self.root / AUDIO_MANIFEST_NAME,
-                    self.root / AUDIO_NOTICES_NAME,
-                }
+            owned_manifest = _is_owned_audio_manifest(previous_manifest)
+            legacy_manifest = _is_legacy_audio_manifest(previous_manifest)
+            recognized_manifest = owned_manifest or legacy_manifest
+            if owned_manifest:
+                _validate_owned_notice(self.root, previous_manifest)
+            prior_paths = _manifest_generated_paths(
+                self.root,
+                previous_manifest,
             )
+            candidates = self.generated_paths | prior_paths
+            sidecars = {
+                self.root / AUDIO_MANIFEST_NAME,
+                self.root / AUDIO_NOTICES_NAME,
+            }
+            if self.manage_sidecars or recognized_manifest:
+                candidates.update(sidecars)
+            owned_paths = set(prior_paths)
+            if recognized_manifest:
+                owned_paths.update(sidecars)
             for path in sorted(candidates, key=str):
                 _reject_managed_link(path, "音声トランザクション対象")
                 if path in self.clean_paths or not path.exists():
@@ -127,6 +168,11 @@ class _AudioDeliveryTransaction:
                 if not path.is_file():
                     raise AudioDeliveryError(
                         f"音声トランザクション対象がファイルではありません: {path}"
+                    )
+                if path not in owned_paths:
+                    raise AudioDeliveryError(
+                        "既存のユーザーファイルと音声生成先が衝突します: "
+                        f"{path}"
                     )
                 backup = self._next_backup("existing", path.suffix)
                 os.replace(path, backup)
@@ -139,11 +185,20 @@ class _AudioDeliveryTransaction:
                             f"ミックス前のclean MP4を保護できません: {clean}"
                         )
                     backup = self._next_backup("clean", clean.suffix)
-                    try:
-                        os.link(clean, backup)
-                    except OSError:
-                        shutil.copy2(clean, backup)
+                    # A hard link is not an independent backup: an in-place
+                    # encoder write would mutate both names.  Keep a physical
+                    # copy so rollback can always restore the original bytes.
+                    shutil.copy2(clean, backup)
                     self.clean_backups.append((backup, clean))
+            for protected in sorted(self.protected_paths, key=str):
+                if not protected.is_file():
+                    raise AudioDeliveryError(
+                        f"音声処理と連動する来歴ファイルを保護できません: {protected}"
+                    )
+                _reject_managed_link(protected, "連動する来歴ファイル")
+                backup = self._next_backup("protected", protected.suffix)
+                shutil.copy2(protected, backup)
+                self.protected_backups.append((backup, protected))
             self.active = True
         except BaseException:
             self._restore(remove_new=False)
@@ -186,27 +241,91 @@ class _AudioDeliveryTransaction:
             try:
                 if not backup.exists():
                     continue
-                if clean.exists():
-                    backup.unlink()
-                else:
-                    clean.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(backup, clean)
+                if _is_managed_link(clean):
+                    clean.unlink()
+                elif clean.exists():
+                    if not clean.is_file():
+                        raise AudioDeliveryError(
+                            f"clean MP4のrollback対象がファイルではありません: {clean}"
+                        )
+                    clean.unlink()
+                clean.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(backup, clean)
             except Exception as exc:
                 rollback_error = rollback_error or exc
 
-        try:
-            _remove_transaction_tree(self.backup_dir, self.root)
-        except Exception as exc:
-            rollback_error = rollback_error or exc
-        self.backup_dir = None
+        for backup, protected in reversed(self.protected_backups):
+            try:
+                if not backup.exists():
+                    continue
+                if _is_managed_link(protected):
+                    protected.unlink()
+                elif protected.exists():
+                    if not protected.is_file():
+                        raise AudioDeliveryError(
+                            "連動する来歴ファイルのrollback対象が"
+                            f"ファイルではありません: {protected}"
+                        )
+                    protected.unlink()
+                protected.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(backup, protected)
+            except Exception as exc:
+                rollback_error = rollback_error or exc
+
         self.active = False
         if rollback_error is not None:
+            recovery_dir = self.backup_dir
             raise AudioDeliveryError(
-                f"音声出力のrollbackに失敗しました: {rollback_error}"
+                "音声出力のrollbackに失敗しました。復旧用バックアップを保持しました: "
+                f"{recovery_dir} ({rollback_error})"
             ) from rollback_error
+        _remove_transaction_tree(self.backup_dir, self.root)
+        self.backup_dir = None
 
     def complete(self) -> None:
         if self.backup_dir is None:
+            return
+        if self.moved_backups:
+            recovery_dir = self.root / f"{_RECOVERY_PREFIX}{uuid.uuid4().hex}"
+            index = {
+                "schema_version": 1,
+                "generator": "clip-extractor",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "reason": (
+                    "Previous audio outputs were moved here before regeneration. "
+                    "They are retained because an in-folder manifest alone is not "
+                    "proof of file ownership."
+                ),
+                "files": [
+                    {
+                        "backup_file": backup.name,
+                        "original_file": original.relative_to(self.root).as_posix(),
+                    }
+                    for backup, original in self.moved_backups
+                ],
+            }
+            (self.backup_dir / _RECOVERY_INDEX_NAME).write_text(
+                json.dumps(index, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(self.backup_dir, recovery_dir)
+            for backup, _original in self.clean_backups + self.protected_backups:
+                try:
+                    (recovery_dir / backup.name).unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "Unable to remove an extra transaction copy from %s",
+                        recovery_dir,
+                    )
+            logger.warning(
+                "Previous audio outputs were retained in recovery: %s",
+                recovery_dir,
+            )
+            self.backup_dir = None
+            self.moved_backups.clear()
+            self.clean_backups.clear()
+            self.protected_backups.clear()
+            self.active = False
             return
         _remove_transaction_tree(self.backup_dir, self.root)
         self.backup_dir = None
@@ -215,7 +334,11 @@ class _AudioDeliveryTransaction:
     def _next_backup(self, category: str, suffix: str) -> Path:
         if self.backup_dir is None:
             raise RuntimeError("audio delivery transaction has not started")
-        index = len(self.moved_backups) + len(self.clean_backups)
+        index = (
+            len(self.moved_backups)
+            + len(self.clean_backups)
+            + len(self.protected_backups)
+        )
         return self.backup_dir / f"{category}-{index}{suffix}"
 
 
@@ -233,6 +356,7 @@ def deliver_audio_groups(
     highlights: Sequence[Mapping[str, Any]],
     *,
     options: AudioDeliveryOptions,
+    effects_manifest_dirs: Mapping[str, str | os.PathLike[str]] | None = None,
 ) -> AudioDeliveryResult:
     """Apply BGM/SE to landscape and/or Shorts media in one shared pass.
 
@@ -250,6 +374,19 @@ def deliver_audio_groups(
         str(name): tuple(_normalize_media_input(root, path) for path in paths)
         for name, paths in media_groups.items()
     }
+    normalized_effect_dirs = _normalize_effect_manifest_dirs(
+        root,
+        normalized_groups,
+        effects_manifest_dirs,
+    )
+    try:
+        protected_effect_manifests = {
+            directory / EFFECTS_MANIFEST_NAME
+            for directory in normalized_effect_dirs.values()
+            if has_owned_effects_manifest(directory)
+        }
+    except VideoEffectError as exc:
+        raise AudioDeliveryError(f"VFX来歴ファイルを保護できません: {exc}") from exc
     current_clean_paths = _current_clean_paths(root, normalized_groups)
     _validate_root_sidecars(root)
     previous_manifest = _read_previous_manifest(root)
@@ -260,13 +397,25 @@ def deliver_audio_groups(
             set(),
             current_clean_paths,
             protect_clean=False,
+            manage_sidecars=False,
+            protected_paths=set(),
         )
         transaction.begin(previous_manifest)
-        transaction.complete()
+        try:
+            transaction.complete()
+        except BaseException:
+            transaction.rollback()
+            raise
         return AudioDeliveryResult(enabled=False, media_groups=normalized_groups)
 
     selection = _resolve_selection(options)
     clean_paths, generated_paths = _potential_generated_paths(root, normalized_groups)
+    _reject_audio_source_output_collisions(
+        root,
+        selection,
+        clean_paths,
+        generated_paths,
+    )
     settings = AudioMixSettings(
         delivery_mode=options.delivery_mode,
         bgm_gain_db=options.bgm_gain_db,
@@ -278,6 +427,8 @@ def deliver_audio_groups(
         generated_paths,
         clean_paths,
         protect_clean=settings.delivery_mode is AudioDeliveryMode.MIXED,
+        manage_sidecars=True,
+        protected_paths=protected_effect_manifests,
     )
     transaction.begin(previous_manifest)
     try:
@@ -287,13 +438,22 @@ def deliver_audio_groups(
             highlights,
             selection=selection,
             settings=settings,
-            previous_manifest=previous_manifest,
-            clean_paths=clean_paths,
         )
+        for group_name, directory in normalized_effect_dirs.items():
+            try:
+                remap_effects_manifest_outputs(
+                    directory,
+                    normalized_groups.get(group_name, ()),
+                    result.media_groups.get(group_name, ()),
+                )
+            except VideoEffectError as exc:
+                raise AudioDeliveryError(
+                    f"音声出力後のVFX来歴を更新できません: {exc}"
+                ) from exc
+        transaction.complete()
     except BaseException:
         transaction.rollback()
         raise
-    transaction.complete()
     return result
 
 
@@ -304,17 +464,31 @@ def _deliver_enabled_audio(
     *,
     selection: Mapping[str, Any],
     settings: AudioMixSettings,
-    previous_manifest: Mapping[str, Any] | None,
-    clean_paths: set[Path],
 ) -> AudioDeliveryResult:
     """Generate one enabled audio delivery inside an active transaction."""
 
-    provenance = {
-        "pack": {
+    selection = dict(selection)
+    for key in ("bgm", "se"):
+        asset = selection.get(key)
+        if isinstance(asset, UserMediaAsset):
+            try:
+                validated = validate_user_media(asset)
+            except UserMediaError as exc:
+                raise AudioDeliveryError(
+                    f"選択した{key.upper()}素材が生成直前に変更されました: {exc}"
+                ) from exc
+            if isinstance(validated, UserMediaAsset):
+                selection[key] = validated
+
+    pack_provenance = None
+    if selection["pack_id"] != "user-provided":
+        pack_provenance = {
             "id": selection["pack_id"],
             "version": selection["pack_version"],
             "license_checked_at": selection["license_checked_at"],
-        },
+        }
+    provenance = {
+        "pack": pack_provenance,
         "bgm": _asset_provenance(selection.get("bgm")),
         "se": _asset_provenance(selection.get("se")),
     }
@@ -322,7 +496,6 @@ def _deliver_enabled_audio(
     primary_groups: dict[str, tuple[Path, ...]] = {}
     deliverables: list[Path] = []
     manifest_groups: dict[str, list[dict[str, Any]]] = {}
-    keep_paths: set[Path] = set(clean_paths)
 
     for group_name, paths in normalized_groups.items():
         if not paths:
@@ -343,7 +516,7 @@ def _deliver_enabled_audio(
         )
         primary_paths: list[Path] = []
         group_records: list[dict[str, Any]] = []
-        for result in batch.clips:
+        for clean_input, result in zip(paths, batch.clips):
             primary = (
                 result.mixed_video
                 if settings.delivery_mode is AudioDeliveryMode.MIXED
@@ -354,16 +527,8 @@ def _deliver_enabled_audio(
             primary_paths.append(primary)
             deliverables.extend(result.deliverables)
             artifacts = _result_artifacts(root, result)
-            for artifact in artifacts:
-                if artifact["kind"] in _GENERATED_AUDIO_KINDS:
-                    keep_paths.add(
-                        _managed_output_path(
-                            root,
-                            root / artifact["file"],
-                            "生成した音声成果物",
-                        )
-                    )
             record: dict[str, Any] = {
+                "source_clean_video": _relative_output(root, clean_input),
                 "primary_video": _relative_output(root, primary),
                 "artifacts": artifacts,
             }
@@ -381,8 +546,11 @@ def _deliver_enabled_audio(
         primary_groups[group_name] = tuple(primary_paths)
         manifest_groups[group_name] = group_records
 
+    notices_text = _third_party_notices(selection)
+    notices_bytes = notices_text.encode("utf-8")
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "generator": "clip-extractor",
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "delivery_mode": settings.delivery_mode.value,
         "settings": {
@@ -401,25 +569,23 @@ def _deliver_enabled_audio(
             )
             if value
         },
+        "notices": {
+            "file": AUDIO_NOTICES_NAME,
+            "size_bytes": len(notices_bytes),
+            "sha256": hashlib.sha256(notices_bytes).hexdigest(),
+        },
         "groups": manifest_groups,
     }
     manifest_path = root / AUDIO_MANIFEST_NAME
     notices_path = root / AUDIO_NOTICES_NAME
 
-    # New outputs are already complete at this point. Remove only prior files
-    # identified by our own manifest and not retained by the current render.
-    _cleanup_previous_artifacts(
-        root,
-        previous_manifest,
-        keep=frozenset(keep_paths),
-    )
     _write_text_atomic(
         manifest_path,
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
     )
     _write_text_atomic(
         notices_path,
-        _third_party_notices(selection),
+        notices_text,
     )
     deliverables.extend((manifest_path, notices_path))
     return AudioDeliveryResult(
@@ -432,43 +598,85 @@ def _deliver_enabled_audio(
 
 
 def _resolve_selection(options: AudioDeliveryOptions) -> dict[str, Any]:
-    status = get_pack_status()
-    if not status.ready:
-        raise AudioDeliveryError(
-            "BGM/SE素材パックが利用できません。Input画面の"
-            "「CC0素材をダウンロード」を先に実行してください。"
-        )
+    builtin_selected = any(
+        asset_id and not is_user_media_id(asset_id)
+        for asset_id in (options.bgm_asset_id, options.se_asset_id)
+    )
     resolved: dict[str, Any] = {
-        "pack_id": status.pack_id,
-        "pack_version": status.version,
+        "pack_id": "user-provided",
+        "pack_version": "",
         "license_checked_at": "",
     }
+    if builtin_selected:
+        status = get_pack_status()
+        if not status.ready:
+            raise AudioDeliveryError(
+                "BGM/SE素材パックが利用できません。Input画面の"
+                "「CC0素材をダウンロード」を先に実行してください。"
+            )
+        resolved["pack_id"] = status.pack_id
+        resolved["pack_version"] = status.version
     try:
-        for key, asset_id, expected_kind in (
-            ("bgm", options.bgm_asset_id, "bgm"),
-            ("se", options.se_asset_id, "se"),
+        for key, asset_id, expected_kind, user_folder in (
+            (
+                "bgm",
+                options.bgm_asset_id,
+                "bgm",
+                options.bgm_user_folder,
+            ),
+            (
+                "se",
+                options.se_asset_id,
+                "se",
+                options.se_user_folder,
+            ),
         ):
             if not asset_id:
                 continue
-            asset = get_installed_asset(asset_id)
+            if is_user_media_id(asset_id):
+                if not user_folder:
+                    raise AudioDeliveryError(
+                        f"{expected_kind.upper()}ユーザー素材の参照フォルダを指定してください"
+                    )
+                asset = resolve_user_media_asset(
+                    user_folder,
+                    asset_id,
+                    expected_kind,
+                )
+                validate_user_media(asset)
+            else:
+                asset = get_installed_asset(asset_id)
             if asset.kind != expected_kind:
                 raise AudioDeliveryError(
                     f"{asset_id} は {expected_kind.upper()} 素材ではありません"
                 )
             resolved[key] = asset
-            resolved["license_checked_at"] = asset.license_checked_at
-    except (AudioAssetError, KeyError) as exc:
+            if isinstance(asset, InstalledAsset):
+                resolved["license_checked_at"] = asset.license_checked_at
+    except (AudioAssetError, UserMediaError, KeyError) as exc:
         raise AudioDeliveryError(f"選択したBGM/SE素材を確認できません: {exc}") from exc
     return resolved
 
 
-def _asset_provenance(asset: InstalledAsset | None) -> dict[str, Any]:
+def _asset_provenance(
+    asset: InstalledAsset | UserMediaAsset | None,
+) -> dict[str, Any]:
     if asset is None:
         return {}
+    if isinstance(asset, UserMediaAsset):
+        return {
+            "id": asset.id,
+            "kind": asset.kind,
+            "source_type": "user_provided",
+            "original_filename": asset.filename,
+            "source_sha256": asset.sha256,
+            "source_size_bytes": asset.size,
+        }
     return {
         "id": asset.id,
         "label": asset.label,
         "kind": asset.kind,
+        "source_type": "bundled_cc0",
         "creator": asset.creator,
         "source_page": asset.source_page,
         "license_id": asset.license_id,
@@ -483,8 +691,37 @@ def _asset_provenance(asset: InstalledAsset | None) -> dict[str, Any]:
     }
 
 
-def _result_artifacts(root: Path, result: Any) -> list[dict[str, str]]:
-    artifacts: list[dict[str, str]] = []
+def _reject_audio_source_output_collisions(
+    root: Path,
+    selection: Mapping[str, Any],
+    clean_paths: set[Path],
+    generated_paths: set[Path],
+) -> None:
+    protected = set(clean_paths) | set(generated_paths)
+    protected.update(
+        {
+            root / AUDIO_MANIFEST_NAME,
+            root / AUDIO_NOTICES_NAME,
+        }
+    )
+    for key in ("bgm", "se"):
+        asset = selection.get(key)
+        if asset is None:
+            continue
+        try:
+            source = Path(asset.path).resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise AudioDeliveryError(
+                f"選択した{key.upper()}素材を確認できません"
+            ) from exc
+        if source in protected:
+            raise AudioDeliveryError(
+                f"選択した{key.upper()}素材が音声生成先と衝突します: {source}"
+            )
+
+
+def _result_artifacts(root: Path, result: Any) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
     for kind, path in (
         ("clean_video", result.clean_video),
         ("mixed_video", result.mixed_video),
@@ -493,8 +730,28 @@ def _result_artifacts(root: Path, result: Any) -> list[dict[str, str]]:
         ("clip_audio_manifest", result.manifest),
     ):
         if path is not None:
-            artifacts.append({"kind": kind, "file": _relative_output(root, path)})
+            record: dict[str, Any] = {
+                "kind": kind,
+                "file": _relative_output(root, path),
+            }
+            if kind in _GENERATED_AUDIO_KINDS:
+                size, digest = _file_fingerprint(Path(path))
+                record["size_bytes"] = size
+                record["sha256"] = digest
+            artifacts.append(record)
     return artifacts
+
+
+def _file_fingerprint(path: Path) -> tuple[int, str]:
+    if path.is_symlink() or not path.is_file():
+        raise AudioDeliveryError(f"生成した音声成果物を確認できません: {path}")
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            size += len(chunk)
+            digest.update(chunk)
+    return size, digest.hexdigest()
 
 
 def _is_managed_link(path: Path) -> bool:
@@ -557,6 +814,42 @@ def _normalize_media_input(
     if not candidate.is_absolute():
         candidate = Path.cwd() / candidate
     return _managed_output_path(root, candidate, "入力動画")
+
+
+def _normalize_effect_manifest_dirs(
+    root: Path,
+    normalized_groups: Mapping[str, tuple[Path, ...]],
+    directories: Mapping[str, str | os.PathLike[str]] | None,
+) -> dict[str, Path]:
+    """Validate optional per-group VFX manifest directories."""
+
+    if not directories:
+        return {}
+    normalized: dict[str, Path] = {}
+    for raw_group, raw_directory in directories.items():
+        group = str(raw_group)
+        if group not in normalized_groups:
+            raise AudioDeliveryError(
+                f"VFX来歴フォルダの出力グループが不明です: {group}"
+            )
+        paths = normalized_groups[group]
+        if not paths:
+            continue
+        directory = _managed_output_path(
+            root,
+            Path(raw_directory).expanduser(),
+            "VFX来歴フォルダ",
+        )
+        if not directory.is_dir():
+            raise AudioDeliveryError(
+                f"VFX来歴フォルダが見つかりません: {directory}"
+            )
+        if any(path.parent != directory for path in paths):
+            raise AudioDeliveryError(
+                f"VFX来歴フォルダと動画の保存先が一致しません: {directory}"
+            )
+        normalized[group] = directory
+    return normalized
 
 
 def _current_clean_paths(
@@ -625,47 +918,152 @@ def _validate_root_sidecars(root: Path) -> None:
         _managed_output_path(root, root / name, "音声来歴ファイル")
 
 
-def _cleanup_previous_artifacts(
-    root: Path,
-    manifest: Mapping[str, Any] | None,
-    *,
-    keep: frozenset[Path],
-) -> None:
-    for candidate in _manifest_generated_paths(root, manifest):
-        if candidate not in keep:
-            candidate.unlink(missing_ok=True)
-
-
 def _manifest_generated_paths(
     root: Path,
     manifest: Mapping[str, Any] | None,
 ) -> set[Path]:
     """Return only generated files referenced by a validated prior manifest."""
 
-    if not manifest:
+    current_manifest = _is_owned_audio_manifest(manifest)
+    if not current_manifest and not _is_legacy_audio_manifest(manifest):
         return set()
+    assert manifest is not None
     groups = manifest.get("groups")
-    if not isinstance(groups, Mapping):
-        return set()
+    assert isinstance(groups, Mapping)
     generated: set[Path] = set()
     for records in groups.values():
         if not isinstance(records, list):
-            continue
+            raise AudioDeliveryError("以前の音声manifestのgroupsが不正です")
         for record in records:
             if not isinstance(record, Mapping):
-                continue
+                raise AudioDeliveryError("以前の音声manifestのrecordが不正です")
+            source_relative = _manifest_source_clean_relative(manifest, record)
+            clean = _safe_manifest_clean_video(root, source_relative)
+            base = clean.with_suffix("")
+            expected_paths = {
+                "bgm_stem": base.with_name(f"{base.name}_bgm.wav"),
+                "se_stem": base.with_name(f"{base.name}_se.wav"),
+                "mixed_video": base.with_name(f"{base.name}_mixed.mp4"),
+                "clip_audio_manifest": base.with_name(f"{base.name}_audio.json"),
+            }
             artifacts = record.get("artifacts")
             if not isinstance(artifacts, list):
-                continue
+                raise AudioDeliveryError("以前の音声manifestのartifactsが不正です")
             for artifact in artifacts:
                 if not isinstance(artifact, Mapping):
-                    continue
+                    raise AudioDeliveryError("以前の音声manifestのartifactが不正です")
                 kind = artifact.get("kind")
                 relative = artifact.get("file")
                 if kind not in _GENERATED_AUDIO_KINDS or not isinstance(relative, str):
                     continue
-                generated.add(_safe_manifest_output(root, relative, str(kind)))
+                candidate = _safe_manifest_output(root, relative, str(kind))
+                if candidate != expected_paths[str(kind)]:
+                    raise AudioDeliveryError(
+                        "以前の音声manifestの生成物がclean動画名と一致しません"
+                    )
+                if current_manifest:
+                    _validate_owned_artifact(candidate, artifact)
+                generated.add(candidate)
     return generated
+
+
+def _is_owned_audio_manifest(
+    manifest: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(manifest, Mapping):
+        return False
+    return bool(
+        manifest.get("schema_version") == 2
+        and manifest.get("generator") == "clip-extractor"
+        and isinstance(manifest.get("groups"), Mapping)
+        and isinstance(manifest.get("notices"), Mapping)
+    )
+
+
+def _is_legacy_audio_manifest(
+    manifest: Mapping[str, Any] | None,
+) -> bool:
+    """Recognize the pre-fingerprint schema for recoverable migration only."""
+
+    if not isinstance(manifest, Mapping):
+        return False
+    return bool(
+        manifest.get("schema_version") == 1
+        and isinstance(manifest.get("groups"), Mapping)
+    )
+
+
+def _manifest_source_clean_relative(
+    manifest: Mapping[str, Any],
+    record: Mapping[str, Any],
+) -> str:
+    source = record.get("source_clean_video")
+    if isinstance(source, str):
+        return source
+    artifacts = record.get("artifacts")
+    if isinstance(artifacts, list):
+        for artifact in artifacts:
+            if (
+                isinstance(artifact, Mapping)
+                and artifact.get("kind") == "clean_video"
+                and isinstance(artifact.get("file"), str)
+            ):
+                return str(artifact["file"])
+    primary = record.get("primary_video")
+    if (
+        manifest.get("delivery_mode") == "mixed"
+        and isinstance(primary, str)
+        and primary.endswith("_mixed.mp4")
+    ):
+        return primary[: -len("_mixed.mp4")] + ".mp4"
+    raise AudioDeliveryError(
+        "以前の音声manifestにsource_clean_videoがありません"
+    )
+
+
+def _safe_manifest_clean_video(root: Path, relative: str) -> Path:
+    rel = Path(relative)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise AudioDeliveryError("以前の音声manifestに安全でないパスがあります")
+    candidate = _managed_output_path(root, root / rel, "以前の音声manifest")
+    if candidate.suffix.lower() != ".mp4":
+        raise AudioDeliveryError("以前の音声manifestのclean動画名が不正です")
+    return candidate
+
+
+def _validate_owned_artifact(
+    path: Path,
+    artifact: Mapping[str, Any],
+) -> None:
+    expected_size = artifact.get("size_bytes")
+    expected_digest = artifact.get("sha256")
+    if (
+        not isinstance(expected_size, int)
+        or expected_size < 0
+        or not isinstance(expected_digest, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+    ):
+        raise AudioDeliveryError("以前の音声manifestに成果物の検証値がありません")
+    if not path.exists():
+        return
+    size, digest = _file_fingerprint(path)
+    if size != expected_size or digest != expected_digest:
+        raise AudioDeliveryError(
+            f"以前の生成物が別ファイルへ変更されているため保持します: {path}"
+        )
+
+
+def _validate_owned_notice(
+    root: Path,
+    manifest: Mapping[str, Any] | None,
+) -> None:
+    if not isinstance(manifest, Mapping):
+        return
+    notice = manifest.get("notices")
+    if not isinstance(notice, Mapping) or notice.get("file") != AUDIO_NOTICES_NAME:
+        raise AudioDeliveryError("以前の音声manifestのnotice情報が不正です")
+    path = root / AUDIO_NOTICES_NAME
+    _validate_owned_artifact(path, notice)
 
 
 def _safe_manifest_output(root: Path, relative: str, kind: str) -> Path:
@@ -708,29 +1106,52 @@ def _third_party_notices(selection: Mapping[str, Any]) -> str:
     lines = [
         "Clip Extractor - optional audio material notices",
         "",
-        f"Pack: {selection['pack_id']} {selection['pack_version']}",
-        f"License review date: {selection['license_checked_at']}",
-        "",
-        "The selected works are provided under CC0 1.0 Universal.",
-        "Attribution is not required, but provenance is retained here.",
-        "https://creativecommons.org/publicdomain/zero/1.0/",
-        "",
     ]
+    installed_assets = [
+        asset
+        for key in ("bgm", "se")
+        if isinstance((asset := selection.get(key)), InstalledAsset)
+    ]
+    if installed_assets:
+        lines.extend(
+            [
+                f"Pack: {selection['pack_id']} {selection['pack_version']}",
+                f"License review date: {selection['license_checked_at']}",
+                "",
+                "The bundled works are provided under CC0 1.0 Universal.",
+                "Attribution is not required, but provenance is retained here.",
+                "https://creativecommons.org/publicdomain/zero/1.0/",
+                "",
+            ]
+        )
     for key, heading in (("bgm", "BGM"), ("se", "SE")):
         asset = selection.get(key)
         if asset is None:
             continue
-        lines.extend(
-            [
-                f"[{heading}] {asset.label}",
-                f"Creator: {asset.creator}",
-                f"Source: {asset.source_page}",
-                f"License: {asset.license_id} ({asset.license_url})",
-                f"Source SHA-256: {asset.sha256}",
-                "Modifications: source unchanged; output gain/loop/cue may be applied.",
-                "",
-            ]
-        )
+        if isinstance(asset, UserMediaAsset):
+            lines.extend(
+                [
+                    f"[{heading}] {asset.filename}",
+                    "User-provided material",
+                    f"Source SHA-256: {asset.sha256}",
+                    "License and permission are managed by the user and were not "
+                    "independently verified by Clip Extractor.",
+                    "Modifications: output gain/loop/cue may be applied.",
+                    "",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    f"[{heading}] {asset.label}",
+                    f"Creator: {asset.creator}",
+                    f"Source: {asset.source_page}",
+                    f"License: {asset.license_id} ({asset.license_url})",
+                    f"Source SHA-256: {asset.sha256}",
+                    "Modifications: source unchanged; output gain/loop/cue may be applied.",
+                    "",
+                ]
+            )
     return "\n".join(lines).rstrip() + "\n"
 
 
