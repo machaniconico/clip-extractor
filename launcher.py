@@ -6,7 +6,7 @@ import subprocess
 import sys
 import webbrowser
 import threading
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 # Ensure working directory is the exe's directory
 import os
@@ -190,7 +190,7 @@ def open_app_page(*, url=SERVER_URL, platform=None):
     if target_platform == "win32":
         browser = _find_windows_default_browser_executable()
         if browser is not None:
-            browser_name = browser.name.lower()
+            browser_name = PureWindowsPath(str(browser)).name.lower()
             if browser_name == "firefox.exe":
                 args = [str(browser), "-new-window", url]
             elif browser_name in {
