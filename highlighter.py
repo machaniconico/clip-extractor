@@ -3,7 +3,6 @@
 import json
 import re
 import subprocess
-import sys
 
 
 SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパートです。
@@ -28,6 +27,64 @@ SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパートで
 - クリップ同士が重複しないように
 - 会話の途中で切れないよう、自然な区切りを意識
 """
+
+GEMINI_SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパートです。
+配信アーカイブのトランスクリプト（タイムスタンプ付き）を分析し、
+ショート動画として切り抜くべき見どころシーンを特定してください。
+
+選定基準：
+- 各クリップは30〜90秒程度
+- 面白い・感動的・印象的・情報価値が高いシーンを優先
+- クリップ同士が重複しないように
+- 会話の途中で切れないよう、自然な区切りを意識
+"""
+
+
+GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
+GEMINI_REQUEST_TIMEOUT_MS = 300_000
+GEMINI_MODEL_CHOICES = (
+    GEMINI_DEFAULT_MODEL,
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    # Keep the stable 2.5 models selectable for existing saved workflows.
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",
+)
+
+HIGHLIGHTS_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "highlights": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start": {
+                        "type": "string",
+                        "description": "クリップ開始時刻（HH:MM:SS.mmm）",
+                    },
+                    "end": {
+                        "type": "string",
+                        "description": "クリップ終了時刻（HH:MM:SS.mmm）",
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "短くキャッチーなクリップタイトル",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "このシーンを選んだ理由",
+                    },
+                },
+                "required": ["start", "end", "title", "reason"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["highlights"],
+    "additionalProperties": False,
+}
 
 
 def _build_user_prompt(transcript, num_clips, min_duration, max_duration, custom_prompt):
@@ -103,31 +160,41 @@ def _call_openai(user_prompt, api_key, model="gpt-4.1"):
     return response.choices[0].message.content
 
 
-def _call_gemini(user_prompt, api_key, model="gemini-2.5-flash"):
+def _call_gemini(user_prompt, api_key, model=GEMINI_DEFAULT_MODEL):
     """Call Google Gemini API.
 
-    `response_mime_type="application/json"` asks Gemini 1.5+ to emit a
-    single JSON value with no prose. Models that don't support it raise
-    at request time — we retry plain and fall back on _extract_json_object.
+    The supported stable models all implement structured output. A schema
+    keeps the response contract explicit, while _extract_json_object remains
+    as a defensive parser for previously saved or externally supplied text.
     """
     try:
-        import google.generativeai as genai
+        from google import genai
+        from google.genai import types
     except ImportError:
-        raise RuntimeError("google-generativeai パッケージが必要です: pip install google-generativeai")
+        raise RuntimeError(
+            "google-genai パッケージが必要です: pip install google-genai"
+        )
 
     print(f"Analyzing transcript with Gemini ({model})...")
-    genai.configure(api_key=api_key)
-    gmodel = genai.GenerativeModel(
-        model_name=model,
-        system_instruction=SYSTEM_PROMPT,
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            timeout=GEMINI_REQUEST_TIMEOUT_MS,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
     )
     try:
-        response = gmodel.generate_content(
-            user_prompt,
-            generation_config={"response_mime_type": "application/json"},
+        response = client.models.generate_content(
+            model=model,
+            contents=user_prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=GEMINI_SYSTEM_PROMPT,
+                response_mime_type="application/json",
+                response_json_schema=HIGHLIGHTS_JSON_SCHEMA,
+            ),
         )
-    except Exception:
-        response = gmodel.generate_content(user_prompt)
+    finally:
+        client.close()
     return response.text
 
 
@@ -207,7 +274,7 @@ def detect_highlights(
         model = ai_model or "gpt-4.1"
         response_text = _call_openai(user_prompt, api_key, model)
     elif ai_provider == "gemini":
-        model = ai_model or "gemini-2.5-flash"
+        model = ai_model or GEMINI_DEFAULT_MODEL
         response_text = _call_gemini(user_prompt, api_key, model)
     else:
         response_text = _call_claude(user_prompt)

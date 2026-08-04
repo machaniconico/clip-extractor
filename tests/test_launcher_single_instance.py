@@ -195,3 +195,16 @@ def test_unrelated_launch_oserror_is_not_hidden(monkeypatch):
 
     with pytest.raises(OSError, match="disk failure"):
         launcher._launch_with_port_reuse(app, {"server_port": 7860})
+
+
+def test_web_server_host_is_loopback_only():
+    assert launcher.SERVER_HOST == "127.0.0.1"
+    launcher_source = Path(launcher.__file__).read_text(encoding="utf-8")
+    web_app_source = (Path(launcher.__file__).parent / "web_app.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "server_name=SERVER_HOST" in launcher_source
+    assert "server_name=WEB_SERVER_HOST" in web_app_source
+    assert 'server_name="0.0.0.0"' not in launcher_source
+    assert 'server_name="0.0.0.0"' not in web_app_source

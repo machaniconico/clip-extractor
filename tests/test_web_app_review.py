@@ -103,6 +103,10 @@ def test_review_edit_session_only_round_trip_preserves_edits(tmp_path):
 
 def test_detect_phase_returns_session_state(monkeypatch, tmp_path):
     source = tmp_path / "downloaded.mp4"
+    key_file = tmp_path / ".gemini_key"
+    key_file.write_text("saved-server-side-key", encoding="utf-8")
+    monkeypatch.setattr(web_app, "GEMINI_KEY_FILE", key_file)
+    captured = {}
 
     def fake_download(url, output_dir):
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -120,10 +124,9 @@ def test_detect_phase_returns_session_state(monkeypatch, tmp_path):
         "transcribe",
         lambda path, model, language: [Segment(start=1.0, end=4.0, text="hello")],
     )
-    monkeypatch.setattr(
-        web_app,
-        "detect_highlights",
-        lambda *args, **kwargs: [
+    def fake_detect_highlights(*args, **kwargs):
+        captured.update(kwargs)
+        return [
             {
                 "start": "00:00:01.000",
                 "end": "00:00:04.000",
@@ -133,8 +136,9 @@ def test_detect_phase_returns_session_state(monkeypatch, tmp_path):
                 "title": "Detected",
                 "reason": "mock",
             }
-        ],
-    )
+        ]
+
+    monkeypatch.setattr(web_app, "detect_highlights", fake_detect_highlights)
     monkeypatch.setattr(web_app.youtube_api, "extract_video_id", lambda url: "abc123")
 
     session, status_md, _panel_update = web_app.detect_phase(
@@ -147,7 +151,7 @@ def test_detect_phase_returns_session_state(monkeypatch, tmp_path):
         1,
         "gemini",
         "gemini-2.5-flash",
-        "key",
+        "",
         1,
         10,
         "tiny",
@@ -164,6 +168,7 @@ def test_detect_phase_returns_session_state(monkeypatch, tmp_path):
     assert session["video_info"]["duration"] == 60.0
     assert session["output_dir"].parent == tmp_path
     assert session["youtube_video_id"] == "abc123"
+    assert captured["api_key"] == "saved-server-side-key"
 
 
 def test_detect_phase_twitch_downloads_and_disables_timestamps(monkeypatch, tmp_path):

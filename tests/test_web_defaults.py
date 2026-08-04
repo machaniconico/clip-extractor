@@ -5,6 +5,7 @@ installed. save_defaults writes SETTINGS_FILE, so we monkeypatch it onto a
 tmp_path file to avoid clobbering the real default_settings.json.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -197,12 +198,49 @@ def test_obs_recording_is_the_default_source(monkeypatch, tmp_path):
     assert web_app.load_defaults()["shorts_blur_strength"] == 20
     assert web_app.load_defaults()["shorts_title_position"] == "top"
     assert web_app.load_defaults()["font_name"] == "Noto Sans JP"
+    assert web_app.load_defaults()["ai_model"] == "gemini-3.5-flash-lite"
     assert web_app._obs_processing_settings_from_defaults()["shorts_blur_strength"] == 20
     assert web_app._obs_processing_settings_from_defaults()["shorts_title_position"] == "top"
     assert AppConfig().obs_stop_event == "record"
     assert AppConfig().shorts_mode == "pad"
     assert AppConfig().shorts_blur_strength == 20
     assert AppConfig().shorts_title_position == "top"
+
+
+def test_blank_saved_gemini_model_migrates_to_current_default(monkeypatch, tmp_path):
+    settings_file = tmp_path / "default_settings.json"
+    settings_file.write_text(
+        '{"ai_provider": "gemini", "ai_model": ""}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(web_app, "SETTINGS_FILE", settings_file)
+
+    defaults = web_app.load_defaults()
+
+    assert defaults["ai_model"] == "gemini-3.5-flash-lite"
+    assert web_app._ai_model_choices("gemini")[:3] == [
+        "gemini-3.5-flash-lite",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+    ]
+    assert "gemini-2.5-flash" in web_app._ai_model_choices("gemini")
+
+
+def test_saved_api_key_is_not_embedded_in_browser_config(monkeypatch, tmp_path):
+    sentinel = "sentinel-secret-must-stay-server-side"
+    key_file = tmp_path / ".gemini_key"
+    key_file.write_text(sentinel, encoding="utf-8")
+    monkeypatch.setattr(web_app, "GEMINI_KEY_FILE", key_file)
+    monkeypatch.setattr(
+        web_app,
+        "SETTINGS_FILE",
+        tmp_path / "missing-default-settings.json",
+    )
+
+    app = web_app.create_ui()
+    client_config = json.dumps(app.get_config_file(), ensure_ascii=False, default=str)
+
+    assert sentinel not in client_config
 
 
 def test_obs_processing_normalises_shorts_visual_settings():

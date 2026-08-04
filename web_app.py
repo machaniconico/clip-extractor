@@ -168,6 +168,7 @@ from config import FontConfig
 SETTINGS_FILE = Path(__file__).parent / "default_settings.json"
 GEMINI_KEY_FILE = Path(__file__).parent / ".gemini_key"
 OBS_PASSWORD_FILE = Path(__file__).parent / ".obs_password"
+WEB_SERVER_HOST = "127.0.0.1"
 
 OBS_CONNECTION_DEFAULTS = {
     "obs_trigger_method": "websocket",
@@ -355,7 +356,13 @@ def load_gemini_api_key(env_var: str = "GEMINI_API_KEY") -> str:
     return ""
 
 
-def save_gemini_api_key(key_text: str) -> None:
+def _resolve_ai_api_key(key_text: str) -> str:
+    """Resolve a request key without ever preloading it into browser state."""
+    entered = (key_text or "").strip()
+    return entered or load_gemini_api_key()
+
+
+def save_gemini_api_key(key_text: str):
     """Persist the Gemini API key to GEMINI_KEY_FILE, or delete the file
     when the textbox is cleared.
 
@@ -368,13 +375,16 @@ def save_gemini_api_key(key_text: str) -> None:
         if text:
             GEMINI_KEY_FILE.write_text(text, encoding="utf-8")
             gr.Info("API キーを .gemini_key に保存しました。次回起動時から自動で読み込まれます。")
+            return gr.update(value="", placeholder="保存済み。変更時のみ新しいキーを入力")
         elif GEMINI_KEY_FILE.exists():
             GEMINI_KEY_FILE.unlink()
             gr.Info("API キーをクリアしました (.gemini_key を削除)。")
+            return gr.update(value="", placeholder="OpenAI / Gemini のAPIキーを入力")
         else:
             gr.Warning("保存する API キーが空です。textbox にキーを入力してから押してください。")
     except Exception as exc:
         gr.Warning(f"API キーの保存に失敗しました: {exc}")
+    return gr.update(value="")
 
 
 def load_obs_password() -> str:
@@ -416,7 +426,7 @@ def _save_obs_password(password: str) -> None:
 def load_defaults() -> dict:
     """Load saved default settings."""
     defaults = {
-        "ai_provider": "gemini", "ai_model": "gemini-2.5-flash",
+        "ai_provider": "gemini", "ai_model": GEMINI_DEFAULT_MODEL,
         "enable_clips": True, "enable_chapters": True,
         "clip_prompt": "", "chapter_prompt": "",
         "auto_append_youtube": False,
@@ -443,6 +453,10 @@ def load_defaults() -> dict:
             defaults.update(saved)
         except Exception:
             pass
+    defaults["ai_model"] = _resolve_ai_model(
+        defaults.get("ai_provider", "gemini"),
+        defaults.get("ai_model", ""),
+    )
     defaults["shorts_blur_strength"] = _normalise_shorts_blur_strength(
         defaults.get("shorts_blur_strength", 20)
     )
@@ -731,7 +745,11 @@ def open_output_folder(current_base: str) -> None:
 from chapters import generate_chapter_text, write_chapter_file
 from downloader import download_video, get_url_source
 from transcriber import transcribe, segments_to_text
-from highlighter import detect_highlights
+from highlighter import (
+    GEMINI_DEFAULT_MODEL,
+    GEMINI_MODEL_CHOICES,
+    detect_highlights,
+)
 from audio_energy import fuse_audio_energy
 import clipper
 from clipper import extract_clips, generate_thumbnails as generate_thumbnail_candidates, get_video_info
@@ -749,6 +767,37 @@ from premiere_bridge import (
 from drive_upload import upload_output_directory, is_configured as drive_is_configured
 from modes import GenerationModes
 import youtube_api
+
+
+OPENAI_MODEL_CHOICES = (
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4.1-nano",
+    "o4-mini",
+    "o3",
+    "o3-mini",
+)
+
+
+def _ai_model_choices(provider: str) -> list[str]:
+    if provider == "gemini":
+        return list(GEMINI_MODEL_CHOICES)
+    if provider == "openai":
+        return list(OPENAI_MODEL_CHOICES)
+    return []
+
+
+def _default_ai_model(provider: str) -> str:
+    if provider == "gemini":
+        return GEMINI_DEFAULT_MODEL
+    if provider == "openai":
+        return OPENAI_MODEL_CHOICES[0]
+    return ""
+
+
+def _resolve_ai_model(provider: str, saved_model: str | None) -> str:
+    model = str(saved_model or "").strip()
+    return model or _default_ai_model(provider)
 
 
 _MIN_REVIEW_CLIP_DURATION_SEC = 0.1
@@ -1090,7 +1139,7 @@ def detect_phase(
             max_duration=max_duration,
             custom_prompt=modes.active_prompt,
             ai_provider=ai_provider,
-            api_key=api_key,
+            api_key=_resolve_ai_api_key(api_key),
             ai_model=ai_model,
         )
 
@@ -3794,7 +3843,7 @@ def _legacy_one_shot_handler(
             max_duration=max_duration,
             custom_prompt=modes.active_prompt,
             ai_provider=ai_provider,
-            api_key=api_key,
+            api_key=_resolve_ai_api_key(api_key),
             ai_model=ai_model,
         )
 
@@ -4158,7 +4207,10 @@ GEMINI_API_KEY_GUIDE_MD = """
 4. 上の「APIキー」欄へ貼り付け、**[💾 このキーを保存]** をクリック
 
 > Gemini APIキーはAI分析用です。YouTube・Drive用の `credentials.json` とは別物です。
-> キーは他人に見せないでください。`429` エラー時は少し待って再実行します。
+> キーは他人に見せないでください。`429` はAI Studioで該当上限とリセット時刻を確認します。
+> 無料枠では字幕と生成結果がGoogleの製品改善に使われ、人が確認する場合があります。
+> 個人情報・機密情報は送信しないでください。利用条件は18歳以上の業務・専門用途です。
+> 通常は1動画=1リクエスト。無料枠はまず1日数本を目安にし、実上限はAI Studioで確認します。
 
 詳しい画面説明が必要な場合は、アプリフォルダの `SETUP_GUIDE.html` を開いてください。
 """
@@ -5069,20 +5121,34 @@ def create_ui():
                             label="AIプロバイダー",
                             info="Claude: CLI(サブスク) / OpenAI: APIキー必要 / Gemini: 無料枠あり",
                         )
+                        initial_ai_model = _resolve_ai_model(
+                            defaults.get("ai_provider", "gemini"),
+                            defaults.get("ai_model", ""),
+                        )
                         ai_model = gr.Dropdown(
-                            choices=[],
-                            value="",
+                            choices=_ai_model_choices(defaults.get("ai_provider", "gemini")),
+                            value=initial_ai_model,
                             label="モデル",
                             allow_custom_value=True,
-                            info="空欄でデフォルト (Claude=CLI, OpenAI=gpt-4.1, Gemini=gemini-2.5-flash)",
+                            info=(
+                                "既定: Gemini=gemini-3.5-flash-lite（低コスト）、"
+                                "OpenAI=gpt-4.1、Claude=CLI"
+                            ),
                         )
-                        saved_api_key = load_gemini_api_key()
+                        has_saved_api_key = bool(load_gemini_api_key())
                         api_key = gr.Textbox(
                             label="APIキー",
-                            value=saved_api_key,
-                            placeholder="OpenAI / Gemini のAPIキーを入力",
+                            value="",
+                            placeholder=(
+                                "保存済み。変更時のみ新しいキーを入力"
+                                if has_saved_api_key
+                                else "OpenAI / Gemini のAPIキーを入力"
+                            ),
                             type="password",
-                            info="Claudeは入力不要。保存すると次回から自動で読み込みます。",
+                            info=(
+                                "Claudeは入力不要。保存済みキーは画面へ再表示しません。"
+                                "空欄のまま保存ボタンを押すと削除します。"
+                            ),
                         )
                         save_api_key_btn = gr.Button(
                             "💾 このキーを保存 (.gemini_key)",
@@ -5092,7 +5158,7 @@ def create_ui():
                         save_api_key_btn.click(
                             fn=save_gemini_api_key,
                             inputs=api_key,
-                            outputs=None,
+                            outputs=api_key,
                         )
                         with gr.Accordion(
                             "📘 Gemini APIキーの取得手順 — 4ステップ",
@@ -5101,12 +5167,10 @@ def create_ui():
                             gr.Markdown(GEMINI_API_KEY_GUIDE_MD)
 
                         def update_models(provider):
-                            if provider == "openai":
-                                return gr.update(choices=["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o4-mini", "o3", "o3-mini"], value="gpt-4.1")
-                            elif provider == "gemini":
-                                return gr.update(choices=["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"], value="gemini-2.5-flash")
-                            else:
-                                return gr.update(choices=[], value="")
+                            return gr.update(
+                                choices=_ai_model_choices(provider),
+                                value=_default_ai_model(provider),
+                            )
 
                         ai_provider.change(fn=update_models, inputs=ai_provider, outputs=ai_model)
 
@@ -5762,7 +5826,7 @@ if __name__ == "__main__":
     app = create_ui()
     app.queue()
     app.launch(**safe_launch_kwargs(
-        server_name="0.0.0.0",
+        server_name=WEB_SERVER_HOST,
         server_port=7860,
         ssr_mode=False,
         **LAUNCH_THEME_KWARGS,

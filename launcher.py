@@ -337,7 +337,7 @@ def main(argv=None):
     app = create_ui()
     app.queue()
     launch_kwargs = safe_launch_kwargs(
-        server_name="0.0.0.0",
+        server_name=SERVER_HOST,
         server_port=SERVER_PORT,
         ssr_mode=False,
         inbrowser=False,  # we handle browser open ourselves
