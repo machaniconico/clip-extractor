@@ -5,6 +5,7 @@ installed. save_defaults writes SETTINGS_FILE, so we monkeypatch it onto a
 tmp_path file to avoid clobbering the real default_settings.json.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -49,6 +50,12 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         obs_launch_on_startup=False,
         obs_auto_connect_on_startup=False,
         obs_executable_path="",
+        audio_delivery_mode="both",
+        bgm_asset_id="",
+        se_asset_id="",
+        bgm_gain_db=-18.0,
+        se_gain_db=-8.0,
+        se_cue_seconds=0.0,
     )
     args.update(overrides)
 
@@ -72,6 +79,12 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         args["obs_launch_on_startup"],
         args["obs_executable_path"],
         args["obs_auto_connect_on_startup"],
+        args["audio_delivery_mode"],
+        args["bgm_asset_id"],
+        args["se_asset_id"],
+        args["bgm_gain_db"],
+        args["se_gain_db"],
+        args["se_cue_seconds"],
     )
     assert settings_file.exists(), "save_defaults should write SETTINGS_FILE"
     return web_app.load_defaults()
@@ -92,6 +105,26 @@ def test_roundtrip_shorts_fields(monkeypatch, tmp_path):
     assert loaded["shorts_title"] is False, loaded
     assert loaded["shorts_blur_strength"] == 37, loaded
     assert loaded["shorts_title_position"] == "bottom", loaded
+
+
+def test_roundtrip_audio_delivery_fields(monkeypatch, tmp_path):
+    loaded = _save_with(
+        monkeypatch,
+        tmp_path,
+        audio_delivery_mode="separate",
+        bgm_asset_id="bgm-brand-new-wisdom",
+        se_asset_id="se-interface-confirmation",
+        bgm_gain_db=-21,
+        se_gain_db=-7,
+        se_cue_seconds=1.25,
+    )
+
+    assert loaded["audio_delivery_mode"] == "separate"
+    assert loaded["bgm_asset_id"] == "bgm-brand-new-wisdom"
+    assert loaded["se_asset_id"] == "se-interface-confirmation"
+    assert loaded["bgm_gain_db"] == -21
+    assert loaded["se_gain_db"] == -7
+    assert loaded["se_cue_seconds"] == 1.25
 
 
 def test_obs_processing_profile_is_separate_from_archive_defaults(
@@ -197,12 +230,124 @@ def test_obs_recording_is_the_default_source(monkeypatch, tmp_path):
     assert web_app.load_defaults()["shorts_blur_strength"] == 20
     assert web_app.load_defaults()["shorts_title_position"] == "top"
     assert web_app.load_defaults()["font_name"] == "Noto Sans JP"
+    assert web_app.load_defaults()["ai_model"] == "gemini-3.5-flash-lite"
     assert web_app._obs_processing_settings_from_defaults()["shorts_blur_strength"] == 20
     assert web_app._obs_processing_settings_from_defaults()["shorts_title_position"] == "top"
     assert AppConfig().obs_stop_event == "record"
     assert AppConfig().shorts_mode == "pad"
     assert AppConfig().shorts_blur_strength == 20
     assert AppConfig().shorts_title_position == "top"
+
+
+def test_blank_saved_gemini_model_migrates_to_current_default(monkeypatch, tmp_path):
+    settings_file = tmp_path / "default_settings.json"
+    settings_file.write_text(
+        '{"ai_provider": "gemini", "ai_model": ""}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(web_app, "SETTINGS_FILE", settings_file)
+
+    defaults = web_app.load_defaults()
+
+    assert defaults["ai_model"] == "gemini-3.5-flash-lite"
+    assert web_app._ai_model_choices("gemini")[:3] == [
+        "gemini-3.5-flash-lite",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+    ]
+    assert "gemini-2.5-flash" in web_app._ai_model_choices("gemini")
+
+
+def test_local_provider_is_hidden_until_explicitly_enabled(monkeypatch):
+    monkeypatch.delenv(web_app.LOCAL_LLM_ENABLE_ENV, raising=False)
+
+    assert "local" not in web_app._available_ai_providers()
+    assert web_app._default_ai_model("gemini") == "gemini-3.5-flash-lite"
+
+
+def test_local_provider_uses_environment_model_when_enabled(monkeypatch):
+    monkeypatch.setenv(web_app.LOCAL_LLM_ENABLE_ENV, "1")
+    monkeypatch.setenv(web_app.LOCAL_LLM_MODEL_ENV, "gemma-4-31b-it")
+
+    assert "local" in web_app._available_ai_providers()
+    assert web_app._ai_model_choices("local") == ["gemma-4-31b-it"]
+    assert web_app._default_ai_model("local") == "gemma-4-31b-it"
+
+
+def test_saved_local_provider_falls_back_in_memory_when_feature_is_off(
+    monkeypatch, tmp_path
+):
+    settings_file = tmp_path / "default_settings.json"
+    original = '{"ai_provider":"local","ai_model":"local-model"}'
+    settings_file.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(web_app, "SETTINGS_FILE", settings_file)
+    monkeypatch.delenv(web_app.LOCAL_LLM_ENABLE_ENV, raising=False)
+
+    defaults = web_app.load_defaults()
+
+    assert defaults["ai_provider"] == "gemini"
+    assert defaults["ai_model"] == "gemini-3.5-flash-lite"
+    assert settings_file.read_text(encoding="utf-8") == original
+
+
+def test_local_provider_never_resolves_saved_cloud_key(monkeypatch):
+    monkeypatch.setattr(
+        web_app,
+        "load_gemini_api_key",
+        lambda: pytest.fail("local provider must not load a cloud API key"),
+    )
+
+    assert web_app._resolve_provider_api_key("local", "browser-value") == ""
+
+
+@pytest.mark.parametrize(
+    ("enabled", "expected_local"),
+    [(False, False), (True, True)],
+)
+def test_local_provider_visibility_reaches_gradio_config(
+    monkeypatch, tmp_path, enabled, expected_local
+):
+    monkeypatch.setattr(
+        web_app,
+        "SETTINGS_FILE",
+        tmp_path / "missing-default-settings.json",
+    )
+    if enabled:
+        monkeypatch.setenv(web_app.LOCAL_LLM_ENABLE_ENV, "1")
+    else:
+        monkeypatch.delenv(web_app.LOCAL_LLM_ENABLE_ENV, raising=False)
+
+    config = web_app.create_ui().get_config_file()
+    provider_components = [
+        component
+        for component in config.get("components", [])
+        if component.get("props", {}).get("label") == "AIプロバイダー"
+    ]
+    assert len(provider_components) == 1
+    values = {
+        choice[1]
+        for choice in provider_components[0]["props"]["choices"]
+    }
+    assert ("local" in values) is expected_local
+    serialized = json.dumps(config, ensure_ascii=False, default=str)
+    assert (web_app.LOCAL_LLM_ENABLE_ENV in serialized) is expected_local
+
+
+def test_saved_api_key_is_not_embedded_in_browser_config(monkeypatch, tmp_path):
+    sentinel = "sentinel-secret-must-stay-server-side"
+    key_file = tmp_path / ".gemini_key"
+    key_file.write_text(sentinel, encoding="utf-8")
+    monkeypatch.setattr(web_app, "GEMINI_KEY_FILE", key_file)
+    monkeypatch.setattr(
+        web_app,
+        "SETTINGS_FILE",
+        tmp_path / "missing-default-settings.json",
+    )
+
+    app = web_app.create_ui()
+    client_config = json.dumps(app.get_config_file(), ensure_ascii=False, default=str)
+
+    assert sentinel not in client_config
 
 
 def test_obs_processing_normalises_shorts_visual_settings():

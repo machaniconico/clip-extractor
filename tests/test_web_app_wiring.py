@@ -1,6 +1,7 @@
 """AST regression tests for web_app function/input ordering."""
 
 import ast
+import re
 from pathlib import Path
 
 
@@ -149,6 +150,19 @@ def _string_constant(module: ast.Module, name: str) -> str:
     raise AssertionError(f"String constant not found: {name}")
 
 
+def _css_properties(css: str, selector: str) -> dict[str, str]:
+    properties: dict[str, str] = {}
+    for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        if selector not in {item.strip() for item in selectors.split(",")}:
+            continue
+        for declaration in body.split(";"):
+            if ":" not in declaration:
+                continue
+            name, value = declaration.split(":", 1)
+            properties[name.strip()] = value.strip()
+    return properties
+
+
 def _top_level_tab_labels(module: ast.Module) -> list[str]:
     for node in module.body:
         if not isinstance(node, ast.FunctionDef) or node.name != "create_ui":
@@ -209,11 +223,17 @@ def test_render_phase_signature_matches_render_inputs():
     assert args[0] == "session"
     assert render_inputs[0] == "session_state"
     assert args[1:] == render_inputs[1:]
-    assert args[-4:] == [
+    assert args[-10:] == [
         "generate_thumbnails",
         "karaoke",
         "shorts_blur_strength",
         "shorts_title_position",
+        "audio_delivery_mode",
+        "bgm_asset_id",
+        "se_asset_id",
+        "bgm_gain_db",
+        "se_gain_db",
+        "se_cue_seconds",
     ]
     assert "shorts_blur_strength" in args
     assert "shorts_title_position" in args
@@ -223,13 +243,41 @@ def test_save_defaults_signature_matches_save_button_inputs():
     module = _module()
     args = _function_args(module, "save_defaults")
     assert args == _click_input_names(module, "save_defaults_btn")
-    assert args[-3:] == [
+    assert args[-9:] == [
         "obs_launch_on_startup",
         "obs_executable_path",
         "obs_auto_connect_on_startup",
+        "audio_delivery_mode",
+        "bgm_asset_id",
+        "se_asset_id",
+        "bgm_gain_db",
+        "se_gain_db",
+        "se_cue_seconds",
     ]
     assert "shorts_blur_strength" in args
     assert "shorts_title_position" in args
+
+
+def test_audio_delivery_controls_are_persisted_and_rendered():
+    module = _module()
+    source = WEB_APP.read_text(encoding="utf-8")
+    expected = [
+        "audio_delivery_mode",
+        "bgm_asset_id",
+        "se_asset_id",
+        "bgm_gain_db",
+        "se_gain_db",
+        "se_cue_seconds",
+    ]
+
+    assert "fn=install_audio_pack_ui" in source
+    assert "fn=refresh_audio_pack_ui" in source
+    assert 'label="BGM・SEの出力方法"' in source
+    for event_name in ("render_phase", "maybe_render_phase"):
+        event_inputs = _event_input_names(module, event_name, "then")
+        assert event_inputs[-6:] == expected
+    for button in ("save_defaults_btn", "input_save_defaults_btn"):
+        assert _click_input_names(module, button)[-6:] == expected
 
 
 def test_shorts_visual_controls_are_available_for_input_and_obs():
@@ -270,6 +318,276 @@ def test_input_tab_exposes_default_save_button_with_same_settings():
     assert _click_output_names(module, "input_save_defaults_btn") == [
         "input_save_defaults_msg",
     ]
+
+
+def test_input_workspace_fills_desktop_width_without_reordering_mobile_flow():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    input_tab = source.index('with gr.Tab("Input / 入力")')
+    obs_tab = source.index('with gr.Tab("OBS連携 / OBS")')
+    source_row = source.index(
+        'with gr.Row(elem_classes="input-source-row")',
+        input_tab,
+    )
+    url_column = source.index(
+        'elem_classes="input-url-column"',
+        source_row,
+    )
+    file_column = source.index(
+        'elem_classes="input-file-column"',
+        url_column,
+    )
+    settings_grid = source.index(
+        'with gr.Row(elem_classes="input-settings-grid")',
+        file_column,
+    )
+    core_settings = source.index(
+        'elem_classes="input-core-settings-column"',
+        settings_grid,
+    )
+    shorts_settings = source.index(
+        'elem_classes="input-shorts-settings-column"',
+        core_settings,
+    )
+    actions_column = source.index(
+        'with gr.Column(elem_classes="input-actions-column"):',
+        shorts_settings,
+    )
+    review_panel = source.index("as review_panel:", actions_column)
+
+    assert input_tab < source_row < url_column < file_column < settings_grid
+    assert settings_grid < core_settings < shorts_settings < actions_column
+    assert actions_column < review_panel < obs_tab
+
+    url_controls = source[url_column:file_column]
+    assert "input_url = gr.Textbox(" in url_controls
+    assert "input_file = gr.File(" not in url_controls
+
+    file_controls = source[file_column:settings_grid]
+    assert "input_file = gr.File(" in file_controls
+    assert "height=128" in file_controls
+
+    core_controls = source[core_settings:shorts_settings]
+    for control in (
+        "num_clips = gr.Number(",
+        "min_duration = gr.Number(",
+        "max_duration = gr.Number(",
+        "output_mode = gr.Radio(",
+        "generate_thumbnails = gr.Checkbox(",
+        "audio_fusion = gr.Checkbox(",
+        "audio_alpha = gr.Slider(",
+        "generate_zip = gr.Checkbox(",
+        "upload_to_drive = gr.Checkbox(",
+    ):
+        assert control in core_controls
+
+    shorts_controls = source[shorts_settings:actions_column]
+    for control in (
+        "generate_shorts = gr.Checkbox(",
+        "shorts_mode = gr.Radio(",
+        "shorts_blur_strength = gr.Slider(",
+        "shorts_crop = gr.Radio(",
+        "shorts_title = gr.Checkbox(",
+        "shorts_title_position = gr.Radio(",
+        "karaoke = gr.Checkbox(",
+    ):
+        assert control in shorts_controls
+
+    action_controls = source[actions_column:review_panel]
+    for control in (
+        "detect_btn = gr.Button(",
+        "render_btn = gr.Button(",
+        "auto_run_both = gr.Checkbox(",
+        "input_save_defaults_btn = gr.Button(",
+        "input_save_defaults_msg = gr.Textbox(",
+    ):
+        assert control in action_controls
+
+    assert 'gap: var(--input-workspace-gap);' in source
+    assert "@media (max-width: 899px)" in source
+    for responsive_class in (
+        ".input-source-row",
+        ".input-settings-grid",
+        ".input-url-column",
+        ".input-file-column",
+        ".input-core-settings-column",
+        ".input-shorts-settings-column",
+    ):
+        assert responsive_class in source
+
+
+def test_input_workspace_separates_sources_and_hides_native_scroll_controls():
+    css = _string_constant(_module(), "APP_CSS")
+
+    root = _css_properties(css, ".gradio-container")
+    assert root["--input-source-settings-gap"] == "1.25rem"
+    assert "var(--block-background-fill)" in root["--input-source-tint"]
+    assert "var(--primary-500)" in root["--input-source-tint"]
+    assert "var(--border-color-primary)" in root["--input-source-border"]
+
+    settings = _css_properties(css, ".input-settings-grid")
+    assert settings["margin-top"] == "var(--input-source-settings-gap)"
+
+    for selector in (
+        ".input-core-settings-column > .input-settings-title",
+        ".input-shorts-settings-column > .input-settings-title",
+    ):
+        settings_title = _css_properties(css, selector)
+        assert settings_title["overflow"] == "visible !important"
+
+    source_control = _css_properties(css, ".input-source-control")
+    assert source_control["background"] == "var(--input-source-tint) !important"
+    assert source_control["border-color"] == "var(--input-source-border) !important"
+    assert WEB_APP.read_text(encoding="utf-8").count(
+        'elem_classes="input-source-control"'
+    ) == 2
+
+    number_input = _css_properties(
+        css,
+        '.input-settings-grid input[type="number"]',
+    )
+    assert number_input["-moz-appearance"] == "textfield"
+    for selector in (
+        '.input-settings-grid input[type="number"]::-webkit-inner-spin-button',
+        '.input-settings-grid input[type="number"]::-webkit-outer-spin-button',
+    ):
+        properties = _css_properties(css, selector)
+        assert properties["-webkit-appearance"] == "none"
+        assert properties["margin"] == "0"
+
+
+def test_obs_connection_workspace_uses_left_space_without_reordering_mobile_flow():
+    module = _module()
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    obs_tab = source.index('with gr.Tab("OBS連携 / OBS")')
+    settings_tab = source.index('with gr.Tab("Settings / 設定")')
+    workspace = source.index(
+        'with gr.Row(elem_classes="obs-connection-workspace")',
+        obs_tab,
+    )
+    trigger_column = source.index(
+        'elem_classes="obs-trigger-column"',
+        workspace,
+    )
+    connection_column = source.index(
+        'elem_classes="obs-connection-settings-column"',
+        trigger_column,
+    )
+    actions_column = source.index(
+        'elem_classes="obs-connection-actions-column"',
+        connection_column,
+    )
+    processing_settings = source.index(
+        '"OBS自動処理の生成設定"',
+        actions_column,
+    )
+
+    assert obs_tab < workspace < trigger_column < connection_column
+    assert connection_column < actions_column < processing_settings < settings_tab
+
+    trigger_controls = source[trigger_column:connection_column]
+    for control in (
+        "obs_trigger_radio =",
+        "obs_stop_event_radio =",
+        "obs_auto_process =",
+        "obs_retry_btn =",
+    ):
+        assert control in trigger_controls
+    assert 'elem_classes="obs-trigger-retry-layout"' in trigger_controls
+    assert 'elem_classes="obs-retry-panel"' in trigger_controls
+    assert trigger_controls.index("obs_auto_process =") < trigger_controls.index(
+        "obs_retry_btn ="
+    )
+
+    connection_controls = source[connection_column:actions_column]
+    for control in (
+        "obs_host =",
+        "obs_port =",
+        "obs_save_password =",
+        "obs_password =",
+        "obs_watch_folder =",
+        "obs_browse_folder_btn =",
+    ):
+        assert control in connection_controls
+
+    action_controls = source[actions_column:processing_settings]
+    for control in (
+        "obs_start_btn =",
+        "obs_stop_btn =",
+        "obs_refresh_btn =",
+        "obs_status_box =",
+    ):
+        assert control in action_controls
+    assert "lines=8" in action_controls
+
+    css = _string_constant(module, "APP_CSS")
+    workspace_css = _css_properties(css, ".obs-connection-workspace")
+    assert workspace_css["grid-template-areas"] == (
+        '"trigger connection" "actions connection"'
+    )
+    assert workspace_css["grid-template-rows"] == "max-content 1fr"
+    assert workspace_css["flex-direction"] == "column !important"
+    assert _css_properties(css, ".obs-trigger-column")["grid-area"] == "trigger"
+    assert (
+        _css_properties(css, ".obs-trigger-retry-layout")["align-items"]
+        == "stretch !important"
+    )
+    assert (
+        _css_properties(css, ".obs-trigger-retry-layout")["flex-direction"]
+        == "column !important"
+    )
+    assert _css_properties(css, ".obs-retry-button button")["min-height"] == "3rem"
+    assert (
+        _css_properties(css, ".obs-connection-settings-column")["grid-area"]
+        == "connection"
+    )
+    assert (
+        _css_properties(css, ".obs-connection-actions-column")["grid-area"]
+        == "actions"
+    )
+
+    assert _click_output_names(module, "obs_start_btn") == ["obs_status_box"]
+    assert _click_output_names(module, "obs_stop_btn") == ["obs_status_box"]
+    assert _click_output_names(module, "obs_refresh_btn") == ["obs_status_box"]
+    assert _click_input_names(module, "obs_retry_btn") == []
+    assert _click_output_names(module, "obs_retry_btn") == ["obs_status_box"]
+    assert "concurrency_limit=1" in source[
+        source.index("obs_retry_btn.click(") : source.index(
+            "obs_refresh_btn.click(",
+            source.index("obs_retry_btn.click("),
+        )
+    ]
+
+
+def test_clip_duration_controls_live_in_their_workflow_tabs():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    input_tab = source.index('with gr.Tab("Input / 入力")')
+    obs_tab = source.index('with gr.Tab("OBS連携 / OBS")')
+    settings_tab = source.index('with gr.Tab("Settings / 設定")')
+    output_tab = source.index('with gr.Tab("Output / 出力")')
+
+    input_min = source.index("min_duration = gr.Number(", input_tab)
+    input_max = source.index("max_duration = gr.Number(", input_min)
+    obs_min = source.index("obs_min_duration = gr.Number(", obs_tab)
+    obs_max = source.index("obs_max_duration = gr.Number(", obs_min)
+
+    assert input_tab < input_min < input_max < obs_tab
+    assert obs_tab < obs_min < obs_max < settings_tab
+    assert 'value=defaults["min_duration"]' in source[input_min:input_max]
+    assert 'value=defaults["max_duration"]' in source[input_max:obs_tab]
+    assert (
+        'value=obs_processing_defaults["min_duration"]'
+        in source[obs_min:obs_max]
+    )
+    assert (
+        'value=obs_processing_defaults["max_duration"]'
+        in source[obs_max:settings_tab]
+    )
+    settings_source = source[settings_tab:output_tab]
+    assert "min_duration = gr.Number(" not in settings_source
+    assert "max_duration = gr.Number(" not in settings_source
 
 
 def test_settings_exposes_obs_startup_checkbox_and_executable_path():

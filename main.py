@@ -12,6 +12,18 @@ from downloader import download_video, get_url_source
 from transcriber import transcribe, segments_to_text
 from highlighter import detect_highlights
 from audio_energy import fuse_audio_energy
+from audio_assets import (
+    AudioAssetError,
+    get_pack_status as get_audio_pack_status,
+    install_pack as install_audio_pack,
+    list_catalog_assets,
+)
+from audio_delivery import (
+    AudioDeliveryError,
+    AudioDeliveryOptions,
+    deliver_audio_groups,
+    validate_audio_selection,
+)
 from clipper import extract_clips, generate_thumbnails, get_video_info
 from subtitles import (
     generate_all_karaoke_ass,
@@ -42,7 +54,9 @@ def main():
     parser.add_argument("input", nargs="?", default=None,
                         help="YouTube/Twitch URL or local video file path "
                              "(--youtube-setup/--youtube-revoke/--youtube-status "
-                             "--drive-setup/--drive-revoke/--drive-status 時は不要)")
+                             "--drive-setup/--drive-revoke/--drive-status/"
+                             "--install-audio-pack/--audio-pack-status/"
+                             "--list-audio-assets 時は不要)")
     parser.add_argument("-o", "--output", default=None, help="Output directory (default: auto-generated)")
     parser.add_argument("-n", "--clips", type=int, default=5, help="Number of clips to extract (default: 5)")
     parser.add_argument("-m", "--mode", choices=["combined", "individual"], default="combined",
@@ -68,6 +82,37 @@ def main():
                         help="音声の盛り上がりをハイライト順位に融合 / Fuse audio excitement into ranking")
     parser.add_argument("--audio-alpha", type=float, default=0.35,
                         help="音声重み alpha (0.0-1.0, default: 0.35) / Audio fusion weight")
+    parser.add_argument(
+        "--install-audio-pack",
+        action="store_true",
+        help="検証済みCC0 BGM/SE素材を明示的にダウンロードして終了",
+    )
+    parser.add_argument(
+        "--audio-pack-status",
+        action="store_true",
+        help="CC0 BGM/SE素材パックの導入状態を表示して終了",
+    )
+    parser.add_argument(
+        "--list-audio-assets",
+        action="store_true",
+        help="選択可能なBGM/SE素材IDを表示して終了",
+    )
+    parser.add_argument("--bgm", default="", metavar="ASSET_ID",
+                        help="追加するBGM素材ID (--list-audio-assets で確認)")
+    parser.add_argument("--se", default="", metavar="ASSET_ID",
+                        help="追加するSE素材ID (--list-audio-assets で確認)")
+    parser.add_argument("--bgm-gain-db", type=float, default=-18.0,
+                        help="BGM出力ゲイン (default: -18 dB)")
+    parser.add_argument("--se-gain-db", type=float, default=-8.0,
+                        help="SE出力ゲイン (default: -8 dB)")
+    parser.add_argument("--se-cue-seconds", type=float, default=0.0,
+                        help="各クリップ先頭からSEを鳴らす相対秒 (default: 0)")
+    parser.add_argument(
+        "--audio-delivery",
+        choices=["separate", "mixed", "both"],
+        default="both",
+        help="BGM/SE出力: separate=別WAV, mixed=完成MP4, both=両方",
+    )
     parser.add_argument("--karaoke", action="store_true",
                         help="ショート動画にワード単位カラオケ字幕を焼き込み / Burn word-level karaoke captions into Shorts")
     parser.add_argument("-p", "--prompt", default="", help="Custom prompt for highlight detection")
@@ -98,6 +143,41 @@ def main():
                         help="現在の Drive 認証ステータスを表示して終了")
 
     args = parser.parse_args()
+
+    if args.list_audio_assets:
+        for kind in ("bgm", "se"):
+            print(kind.upper())
+            for asset in list_catalog_assets():
+                if asset.kind == kind:
+                    print(
+                        f"  {asset.id}: {asset.label} "
+                        f"({asset.creator}, {asset.license_id})"
+                    )
+        sys.exit(0)
+    if args.audio_pack_status:
+        try:
+            status = get_audio_pack_status()
+        except AudioAssetError as exc:
+            print(f"Audio pack error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(
+            f"Audio pack {status.pack_id} {status.version}: "
+            f"{status.state} ({status.asset_count} assets)"
+        )
+        print(status.message)
+        sys.exit(0)
+    if args.install_audio_pack:
+        try:
+            status = install_audio_pack()
+        except (AudioAssetError, OSError) as exc:
+            print(f"Audio pack install failed: {exc}", file=sys.stderr)
+            sys.exit(1)
+        print(
+            f"Audio pack installed: {status.pack_id} {status.version} "
+            f"({status.asset_count} assets)"
+        )
+        print(status.path)
+        sys.exit(0)
 
     # Handle auth-only subcommands before anything else. They don't need
     # an `input` argument and should return immediately after.
@@ -159,7 +239,9 @@ def main():
     if args.input is None:
         parser.error("input (YouTube/Twitch URL or local video file path) is required "
                      "unless one of --youtube-setup / --youtube-revoke / --youtube-status "
-                     "/ --drive-setup / --drive-revoke / --drive-status is used")
+                     "/ --drive-setup / --drive-revoke / --drive-status / "
+                     "--install-audio-pack / --audio-pack-status / "
+                     "--list-audio-assets is used")
 
     input_source = get_url_source(args.input)
 
@@ -191,6 +273,21 @@ def main():
     except ValueError as mode_err:
         parser.error(str(mode_err))
     print(f"Modes: clips={modes.enable_clips}, chapters={modes.enable_chapters}")
+    try:
+        audio_options = AudioDeliveryOptions(
+            delivery_mode=args.audio_delivery,
+            bgm_asset_id=args.bgm,
+            se_asset_id=args.se,
+            bgm_gain_db=args.bgm_gain_db,
+            se_gain_db=args.se_gain_db,
+            se_cue_seconds=args.se_cue_seconds,
+        )
+        if modes.enable_clips:
+            validate_audio_selection(audio_options)
+        elif audio_options.enabled:
+            print("[Skip audio] 動画生成が無効のためBGM/SE出力をスキップします")
+    except (AudioDeliveryError, TypeError, ValueError) as audio_err:
+        parser.error(f"Audio settings: {audio_err}")
 
     # Setup config
     font_config = FontConfig()
@@ -340,6 +437,28 @@ def main():
             print(f"Generated {len(thumbnail_paths)} thumbnail candidates")
     else:
         print("\n[Skip 5-7] Clip generation disabled (--no-clips) — chapters-only run")
+
+    if modes.enable_clips and (clip_paths or shorts_paths):
+        print("\n--- BGM / SE Delivery ---")
+        try:
+            audio_result = deliver_audio_groups(
+                output_dir,
+                {"clips": clip_paths, "shorts": shorts_paths},
+                highlights,
+                options=audio_options,
+            )
+        except AudioDeliveryError as audio_err:
+            print(f"Audio delivery failed: {audio_err}", file=sys.stderr)
+            sys.exit(1)
+        clip_paths = list(audio_result.media_groups.get("clips", ()))
+        shorts_paths = list(audio_result.media_groups.get("shorts", ()))
+        if audio_result.enabled:
+            print(
+                f"Audio mode: {audio_options.delivery_mode.value} "
+                f"({len(audio_result.deliverables)} output files)"
+            )
+        else:
+            print("BGM/SE not selected; clean MP4 output is unchanged")
 
     # Step 8: Export Premiere Pro XML (only when clips are enabled)
     if modes.enable_clips:

@@ -1,0 +1,15 @@
+CC0 1.0 Universal
+=================
+
+The audio files in the cc0-starter pack are identified by their source pages
+as released under the Creative Commons CC0 1.0 Universal public-domain
+dedication.
+
+Official summary:
+https://creativecommons.org/publicdomain/zero/1.0/
+
+Official legal code:
+https://creativecommons.org/publicdomain/zero/1.0/legalcode
+
+CC0 does not require attribution. Source and creator metadata is retained in
+the installed manifest for provenance and voluntary credit.

@@ -164,10 +164,23 @@ def get_system_fonts_cached():
 
 
 from config import FontConfig
+from audio_assets import (
+    AudioAssetError,
+    get_pack_status as get_audio_pack_status,
+    install_pack as install_audio_pack,
+    list_catalog_assets,
+)
+from audio_delivery import (
+    AudioDeliveryError,
+    AudioDeliveryOptions,
+    deliver_audio_groups,
+    validate_audio_selection,
+)
 
 SETTINGS_FILE = Path(__file__).parent / "default_settings.json"
 GEMINI_KEY_FILE = Path(__file__).parent / ".gemini_key"
 OBS_PASSWORD_FILE = Path(__file__).parent / ".obs_password"
+WEB_SERVER_HOST = "127.0.0.1"
 
 OBS_CONNECTION_DEFAULTS = {
     "obs_trigger_method": "websocket",
@@ -355,7 +368,20 @@ def load_gemini_api_key(env_var: str = "GEMINI_API_KEY") -> str:
     return ""
 
 
-def save_gemini_api_key(key_text: str) -> None:
+def _resolve_ai_api_key(key_text: str) -> str:
+    """Resolve a request key without ever preloading it into browser state."""
+    entered = (key_text or "").strip()
+    return entered or load_gemini_api_key()
+
+
+def _resolve_provider_api_key(ai_provider: str, key_text: str) -> str:
+    """Keep saved cloud credentials out of local and CLI provider calls."""
+    if ai_provider in {"gemini", "openai"}:
+        return _resolve_ai_api_key(key_text)
+    return ""
+
+
+def save_gemini_api_key(key_text: str):
     """Persist the Gemini API key to GEMINI_KEY_FILE, or delete the file
     when the textbox is cleared.
 
@@ -368,13 +394,16 @@ def save_gemini_api_key(key_text: str) -> None:
         if text:
             GEMINI_KEY_FILE.write_text(text, encoding="utf-8")
             gr.Info("API キーを .gemini_key に保存しました。次回起動時から自動で読み込まれます。")
+            return gr.update(value="", placeholder="保存済み。変更時のみ新しいキーを入力")
         elif GEMINI_KEY_FILE.exists():
             GEMINI_KEY_FILE.unlink()
             gr.Info("API キーをクリアしました (.gemini_key を削除)。")
+            return gr.update(value="", placeholder="OpenAI / Gemini のAPIキーを入力")
         else:
             gr.Warning("保存する API キーが空です。textbox にキーを入力してから押してください。")
     except Exception as exc:
         gr.Warning(f"API キーの保存に失敗しました: {exc}")
+    return gr.update(value="")
 
 
 def load_obs_password() -> str:
@@ -416,7 +445,7 @@ def _save_obs_password(password: str) -> None:
 def load_defaults() -> dict:
     """Load saved default settings."""
     defaults = {
-        "ai_provider": "gemini", "ai_model": "gemini-2.5-flash",
+        "ai_provider": "gemini", "ai_model": GEMINI_DEFAULT_MODEL,
         "enable_clips": True, "enable_chapters": True,
         "clip_prompt": "", "chapter_prompt": "",
         "auto_append_youtube": False,
@@ -427,6 +456,10 @@ def load_defaults() -> dict:
         "shorts_title": True, "shorts_title_position": "top",
         "generate_thumbnails": False,
         "audio_fusion": False, "audio_alpha": 0.35,
+        "audio_delivery_mode": "both",
+        "bgm_asset_id": "", "se_asset_id": "",
+        "bgm_gain_db": -18.0, "se_gain_db": -8.0,
+        "se_cue_seconds": 0.0,
         "karaoke": False,
         "whisper_model": "large-v3", "language": "ja",
         "font_name": "Noto Sans JP", "font_size": 96, "font_color": "#FFFFFF",
@@ -443,11 +476,39 @@ def load_defaults() -> dict:
             defaults.update(saved)
         except Exception:
             pass
+    if defaults.get("ai_provider") not in _available_ai_providers():
+        defaults["ai_provider"] = "gemini"
+        defaults["ai_model"] = GEMINI_DEFAULT_MODEL
+    defaults["ai_model"] = _resolve_ai_model(
+        defaults.get("ai_provider", "gemini"),
+        defaults.get("ai_model", ""),
+    )
     defaults["shorts_blur_strength"] = _normalise_shorts_blur_strength(
         defaults.get("shorts_blur_strength", 20)
     )
     defaults["shorts_title_position"] = _normalise_shorts_title_position(
         defaults.get("shorts_title_position", "top")
+    )
+    try:
+        audio_defaults = AudioDeliveryOptions(
+            delivery_mode=defaults.get("audio_delivery_mode", "both"),
+            bgm_asset_id=defaults.get("bgm_asset_id", ""),
+            se_asset_id=defaults.get("se_asset_id", ""),
+            bgm_gain_db=defaults.get("bgm_gain_db", -18.0),
+            se_gain_db=defaults.get("se_gain_db", -8.0),
+            se_cue_seconds=defaults.get("se_cue_seconds", 0.0),
+        )
+    except (TypeError, ValueError):
+        audio_defaults = AudioDeliveryOptions()
+    defaults.update(
+        {
+            "audio_delivery_mode": audio_defaults.delivery_mode.value,
+            "bgm_asset_id": audio_defaults.bgm_asset_id,
+            "se_asset_id": audio_defaults.se_asset_id,
+            "bgm_gain_db": audio_defaults.bgm_gain_db,
+            "se_gain_db": audio_defaults.se_gain_db,
+            "se_cue_seconds": audio_defaults.se_cue_seconds,
+        }
     )
     # Secrets are loaded only inside start_obs_watch(). Returning one here can
     # expose it in Gradio's component configuration when the app is LAN-bound.
@@ -507,7 +568,13 @@ def save_defaults(ai_provider, ai_model,
                   premiere_executable_path="",
                   obs_launch_on_startup=False,
                   obs_executable_path="",
-                  obs_auto_connect_on_startup=True):
+                  obs_auto_connect_on_startup=True,
+                  audio_delivery_mode="both",
+                  bgm_asset_id="",
+                  se_asset_id="",
+                  bgm_gain_db=-18.0,
+                  se_gain_db=-8.0,
+                  se_cue_seconds=0.0):
     """Save current settings as defaults."""
     loaded_defaults = load_defaults()
     saved_obs = {
@@ -539,6 +606,17 @@ def save_defaults(ai_provider, ai_model,
         "generate_thumbnails": bool(generate_thumbnails),
         "audio_fusion": bool(audio_fusion),
         "audio_alpha": float(audio_alpha),
+        "audio_delivery_mode": AudioDeliveryOptions(
+            delivery_mode=audio_delivery_mode,
+            bgm_gain_db=bgm_gain_db,
+            se_gain_db=se_gain_db,
+            se_cue_seconds=se_cue_seconds,
+        ).delivery_mode.value,
+        "bgm_asset_id": str(bgm_asset_id or "").strip(),
+        "se_asset_id": str(se_asset_id or "").strip(),
+        "bgm_gain_db": float(bgm_gain_db),
+        "se_gain_db": float(se_gain_db),
+        "se_cue_seconds": float(se_cue_seconds),
         "karaoke": bool(karaoke),
         "premiere_executable_path": (premiere_executable_path or "").strip(),
         "obs_launch_on_startup": bool(obs_launch_on_startup),
@@ -731,7 +809,15 @@ def open_output_folder(current_base: str) -> None:
 from chapters import generate_chapter_text, write_chapter_file
 from downloader import download_video, get_url_source
 from transcriber import transcribe, segments_to_text
-from highlighter import detect_highlights
+from highlighter import (
+    GEMINI_DEFAULT_MODEL,
+    GEMINI_MODEL_CHOICES,
+    LOCAL_LLM_ENABLE_ENV,
+    LOCAL_LLM_MODEL_ENV,
+    detect_highlights,
+    local_llm_default_model,
+    local_llm_enabled,
+)
 from audio_energy import fuse_audio_energy
 import clipper
 from clipper import extract_clips, generate_thumbnails as generate_thumbnail_candidates, get_video_info
@@ -749,6 +835,71 @@ from premiere_bridge import (
 from drive_upload import upload_output_directory, is_configured as drive_is_configured
 from modes import GenerationModes
 import youtube_api
+
+
+OPENAI_MODEL_CHOICES = (
+    "gpt-4.1",
+    "gpt-4.1-mini",
+    "gpt-4.1-nano",
+    "o4-mini",
+    "o3",
+    "o3-mini",
+)
+
+
+def _available_ai_providers() -> list[str]:
+    providers = ["claude", "openai", "gemini"]
+    if local_llm_enabled():
+        providers.append("local")
+    return providers
+
+
+def _ai_provider_info() -> str:
+    base = "Claude: CLI / OpenAI: APIキー / Gemini: 無料枠あり"
+    if local_llm_enabled():
+        return f"{base}。Local: 実験機能 ({LOCAL_LLM_ENABLE_ENV}=1)"
+    return base
+
+
+def _ai_model_info() -> str:
+    base = "既定: Gemini=gemini-3.5-flash-lite（低コスト）、OpenAI=gpt-4.1、Claude=CLI"
+    if local_llm_enabled():
+        return f"{base}。LocalはモデルIDまたは {LOCAL_LLM_MODEL_ENV} で設定"
+    return base
+
+
+def _api_key_info() -> str:
+    no_key_providers = "ClaudeとLocal" if local_llm_enabled() else "Claude"
+    return (
+        f"{no_key_providers}は入力不要。保存済みキーは画面へ再表示しません。"
+        "空欄のまま保存ボタンを押すと削除します。"
+    )
+
+
+def _ai_model_choices(provider: str) -> list[str]:
+    if provider == "gemini":
+        return list(GEMINI_MODEL_CHOICES)
+    if provider == "openai":
+        return list(OPENAI_MODEL_CHOICES)
+    if provider == "local":
+        model = local_llm_default_model()
+        return [model] if model else []
+    return []
+
+
+def _default_ai_model(provider: str) -> str:
+    if provider == "gemini":
+        return GEMINI_DEFAULT_MODEL
+    if provider == "openai":
+        return OPENAI_MODEL_CHOICES[0]
+    if provider == "local":
+        return local_llm_default_model()
+    return ""
+
+
+def _resolve_ai_model(provider: str, saved_model: str | None) -> str:
+    model = str(saved_model or "").strip()
+    return model or _default_ai_model(provider)
 
 
 _MIN_REVIEW_CLIP_DURATION_SEC = 0.1
@@ -1081,7 +1232,12 @@ def detect_phase(
         log(f"  Transcription complete: {len(segments)} segments")
 
         progress(0.5, desc="[Step 3/3] Detecting highlights...")
-        provider_name = {"claude": "Claude", "openai": "ChatGPT", "gemini": "Gemini"}.get(ai_provider, ai_provider)
+        provider_name = {
+            "claude": "Claude",
+            "openai": "ChatGPT",
+            "gemini": "Gemini",
+            "local": "Local LLM",
+        }.get(ai_provider, ai_provider)
         log(f"[Step 3/3] Analyzing with {provider_name}...")
         highlights = detect_highlights(
             transcript_text,
@@ -1090,7 +1246,7 @@ def detect_phase(
             max_duration=max_duration,
             custom_prompt=modes.active_prompt,
             ai_provider=ai_provider,
-            api_key=api_key,
+            api_key=_resolve_provider_api_key(ai_provider, api_key),
             ai_model=ai_model,
         )
 
@@ -1172,6 +1328,12 @@ def render_phase(
     karaoke: bool,
     shorts_blur_strength=20,
     shorts_title_position: str = "top",
+    audio_delivery_mode: str = "both",
+    bgm_asset_id: str = "",
+    se_asset_id: str = "",
+    bgm_gain_db: float = -18.0,
+    se_gain_db: float = -8.0,
+    se_cue_seconds: float = 0.0,
     progress=gr.Progress(),
 ):
     """Render phase: replay downstream output generation with edited highlights."""
@@ -1215,6 +1377,22 @@ def render_phase(
             modes.validate()
         except ValueError as mode_err:
             return ProcessResult(log=f"Error: {mode_err}").as_gradio_outputs()
+
+        try:
+            audio_options = AudioDeliveryOptions(
+                delivery_mode=audio_delivery_mode,
+                bgm_asset_id=bgm_asset_id,
+                se_asset_id=se_asset_id,
+                bgm_gain_db=bgm_gain_db,
+                se_gain_db=se_gain_db,
+                se_cue_seconds=se_cue_seconds,
+            )
+            if modes.enable_clips or modes.enable_shorts:
+                validate_audio_selection(audio_options)
+        except (AudioDeliveryError, TypeError, ValueError) as audio_err:
+            return ProcessResult(
+                log="\n".join(logs + [f"Error: 音声出力設定を確認してください: {audio_err}"])
+            ).as_gradio_outputs()
 
         if source_kind == "twitch" and auto_append_youtube:
             log("Twitch入力ではタイムスタンプとYouTube概要欄への追記をスキップ")
@@ -1325,6 +1503,25 @@ def render_phase(
                 f"{len(shorts_srt_paths) + len(shorts_title_srt_paths)} "
                 "editable Short SRT files (archive + title)"
             )
+
+        if clip_paths or shorts_paths:
+            progress(0.79, desc="Applying BGM / SE delivery settings...")
+            audio_result = deliver_audio_groups(
+                output_dir,
+                {"clips": clip_paths, "shorts": shorts_paths},
+                highlights,
+                options=audio_options,
+            )
+            clip_paths = list(audio_result.media_groups.get("clips", ()))
+            shorts_paths = list(audio_result.media_groups.get("shorts", ()))
+            obs_render_outcome["clip_paths"] = [str(path) for path in clip_paths]
+            obs_render_outcome["shorts_paths"] = [str(path) for path in shorts_paths]
+            if audio_result.enabled:
+                log(
+                    "  BGM/SE audio exported: "
+                    f"mode={audio_options.delivery_mode.value}, "
+                    f"files={len(audio_result.deliverables)}"
+                )
 
         if generate_thumbnails and (modes.enable_clips or modes.enable_shorts):
             progress(0.8, desc="Generating thumbnail candidates...")
@@ -1498,6 +1695,12 @@ def maybe_render_phase(
     karaoke: bool,
     shorts_blur_strength=20,
     shorts_title_position: str = "top",
+    audio_delivery_mode: str = "both",
+    bgm_asset_id: str = "",
+    se_asset_id: str = "",
+    bgm_gain_db: float = -18.0,
+    se_gain_db: float = -8.0,
+    se_cue_seconds: float = 0.0,
     progress=gr.Progress(),
 ):
     """Chain STEP 2 right after STEP 1 when the 'run both' checkbox is on.
@@ -1528,6 +1731,12 @@ def maybe_render_phase(
         karaoke,
         shorts_blur_strength=shorts_blur_strength,
         shorts_title_position=shorts_title_position,
+        audio_delivery_mode=audio_delivery_mode,
+        bgm_asset_id=bgm_asset_id,
+        se_asset_id=se_asset_id,
+        bgm_gain_db=bgm_gain_db,
+        se_gain_db=se_gain_db,
+        se_cue_seconds=se_cue_seconds,
         progress=progress,
     )
 
@@ -1556,6 +1765,7 @@ class _DummyProgress:
 # _obs_status_poll() on a Timer / button — no component writes from threads.
 _obs_watcher = None
 _obs_watcher_lock = threading.Lock()
+_obs_retry_handler: Callable[[], str] | None = None
 _obs_start_lock = threading.Lock()
 _obs_auto_connect_cancel = threading.Event()
 _obs_auto_connect_thread: threading.Thread | None = None
@@ -1685,6 +1895,25 @@ def _obs_status_text() -> str:
 
 def _obs_status_poll() -> str:
     """Gradio Timer/btn target: return the current shared status text."""
+    return _obs_status_text()
+
+
+def retry_obs_detection_flow() -> str:
+    """Retry the active OBS session's last folder/archive detection flow."""
+    with _obs_watcher_lock:
+        retry_handler = _obs_retry_handler
+    if retry_handler is None:
+        _obs_append_status(
+            "再試行できるOBS連携がありません。先に「OBS連携 開始」を押してください"
+        )
+        return _obs_status_text()
+
+    try:
+        message = retry_handler()
+    except Exception as exc:
+        logger.exception("OBS detection retry failed")
+        message = f"OBS再試行エラー: {exc}"
+    _obs_append_status(message)
     return _obs_status_text()
 
 
@@ -1938,7 +2167,7 @@ def _run_obs_detect_render(
             _coerce_int(s.get("num_clips", 5), 5),
             s.get("ai_provider", "gemini"),
             s.get("ai_model", ""),
-            load_gemini_api_key(),
+            _resolve_provider_api_key(s.get("ai_provider", "gemini"), ""),
             _coerce_int(s.get("min_duration", 30), 30),
             _coerce_int(s.get("max_duration", 90), 90),
             s.get("whisper_model", "large-v3"),
@@ -1983,6 +2212,14 @@ def _run_obs_detect_render(
             ),
             shorts_title_position=_normalise_shorts_title_position(
                 s.get("shorts_title_position", "top")
+            ),
+            audio_delivery_mode=s.get("audio_delivery_mode", "both"),
+            bgm_asset_id=s.get("bgm_asset_id", ""),
+            se_asset_id=s.get("se_asset_id", ""),
+            bgm_gain_db=_coerce_float(s.get("bgm_gain_db", -18.0), -18.0),
+            se_gain_db=_coerce_float(s.get("se_gain_db", -8.0), -8.0),
+            se_cue_seconds=_coerce_float(
+                s.get("se_cue_seconds", 0.0), 0.0
             ),
             progress=progress,
         )
@@ -2357,6 +2594,7 @@ def _obs_make_stream_pipeline_callbacks(
         "claimed_ids": set(),
         "processed_ids": set(),
         "recording_reservations": {},
+        "recording_candidate_epochs": {},
         "seen_record_paths": set(),
     }
 
@@ -2394,6 +2632,10 @@ def _obs_make_stream_pipeline_callbacks(
             "confirmation_decision": None,
             "processing_settings": None,
             "source_claim": None,
+            "finish_observed": False,
+            "stopped_at": None,
+            "last_recording_candidate": "",
+            "last_recording_candidate_stable": False,
         }
 
     def _on_recording_stopped(video_path: str) -> None:
@@ -2406,6 +2648,10 @@ def _obs_make_stream_pipeline_callbacks(
             event_key = (epoch, key)
             if event_key in state["seen_record_paths"]:
                 return
+            state["recording_candidate_epochs"][key] = epoch
+            while len(state["recording_candidate_epochs"]) > 128:
+                oldest_key = next(iter(state["recording_candidate_epochs"]))
+                state["recording_candidate_epochs"].pop(oldest_key, None)
             if epoch in state["completed_epochs"]:
                 state["seen_record_paths"].add(event_key)
                 _obs_append_status(
@@ -2420,10 +2666,14 @@ def _obs_make_stream_pipeline_callbacks(
                     capture_complete=True,
                 )
                 state["streams"][epoch] = stream_state
-            if (
-                stream_state.get("source_claim") == "archive"
-                or stream_state["recording_ready"].is_set()
-            ):
+            if stream_state.get("last_recording_candidate") != video_path:
+                stream_state["last_recording_candidate"] = video_path
+                stream_state["last_recording_candidate_stable"] = False
+            if stream_state.get("source_claim") == "archive":
+                # Keep the raw candidate, but let the later stability-checked
+                # finished callback promote it for a manual retry.
+                return
+            if stream_state["recording_ready"].is_set():
                 state["seen_record_paths"].add(event_key)
                 return
             state["recording_reservations"].setdefault(key, epoch)
@@ -2438,9 +2688,12 @@ def _obs_make_stream_pipeline_callbacks(
 
         key = _recording_key(video_path)
         with state_lock:
-            epoch = state["recording_reservations"].get(
+            epoch = state["recording_candidate_epochs"].pop(
                 key,
-                state["epoch"],
+                state["recording_reservations"].get(
+                    key,
+                    state["epoch"],
+                ),
             )
             event_key = (epoch, key)
             if event_key in state["seen_record_paths"]:
@@ -2461,6 +2714,8 @@ def _obs_make_stream_pipeline_callbacks(
                     capture_complete=True,
                 )
                 state["streams"][epoch] = stream_state
+            stream_state["last_recording_candidate"] = video_path
+            stream_state["last_recording_candidate_stable"] = True
             if stream_state.get("source_claim") == "archive":
                 state["seen_record_paths"].add(event_key)
                 _obs_append_status(
@@ -2620,17 +2875,18 @@ def _obs_make_stream_pipeline_callbacks(
 
         _spawn(_capture_worker)
 
-    def _on_stream_finished() -> None:
+    def _queue_stream_finished(*, observed: bool) -> None:
         if not _is_current():
             return
-        if recording_primary:
-            _obs_append_status("配信終了を検知 — OBS録画の完了を確認します")
-        else:
-            _obs_append_status("配信終了を検知 — YouTubeアーカイブを待機します")
+        if observed:
+            if recording_primary:
+                _obs_append_status("配信終了を検知 — OBS録画の完了を確認します")
+            else:
+                _obs_append_status("配信終了を検知 — YouTubeアーカイブを待機します")
         if not auto_process:
             _obs_append_status("自動処理が無効のため検知のみ記録しました")
             return
-        stopped_at = datetime.now(timezone.utc)
+        detected_stopped_at = datetime.now(timezone.utc)
         with state_lock:
             epoch = state["epoch"]
             if epoch in state["completed_epochs"]:
@@ -2639,15 +2895,25 @@ def _obs_make_stream_pipeline_callbacks(
             if epoch in state["finishing_epochs"]:
                 _obs_append_status("同じ配信終了イベントは既に処理中のためスキップしました")
                 return
-            state["finishing_epochs"].add(epoch)
             stream_state = state["streams"].get(epoch)
             if stream_state is None:
                 stream_state = _new_stream_state(
-                    stopped_at,
+                    detected_stopped_at,
                     observed_start=False,
                     capture_complete=True,
                 )
                 state["streams"][epoch] = stream_state
+            if observed:
+                stream_state["finish_observed"] = True
+                if stream_state.get("stopped_at") is None:
+                    stream_state["stopped_at"] = detected_stopped_at
+            elif not stream_state.get("finish_observed"):
+                _obs_append_status(
+                    "このOBS連携では、まだ配信終了または録画終了を検知していません"
+                )
+                return
+            stopped_at = stream_state.get("stopped_at") or detected_stopped_at
+            state["finishing_epochs"].add(epoch)
 
         def _finish_worker() -> None:
             video_id = ""
@@ -2955,6 +3221,89 @@ def _obs_make_stream_pipeline_callbacks(
 
         _spawn(_finish_worker)
 
+    def _on_stream_finished() -> None:
+        _queue_stream_finished(observed=True)
+
+    def _retry_detection_flow() -> str:
+        if not _is_current():
+            return "OBS連携設定が更新されたため、この再試行は無効です"
+        if not auto_process:
+            return (
+                "自動処理がOFFです。ONにしてOBS連携を再開始してから再試行してください"
+            )
+
+        retry_recording_path = ""
+        finish_observed = False
+        recording_already_succeeded = False
+        with state_lock:
+            epoch = state["epoch"]
+            if epoch in state["completed_epochs"]:
+                return "直近の検知対象は処理済みです"
+            if epoch in state["finishing_epochs"]:
+                return "直近の検知対象は現在処理中です"
+            stream_state = state["streams"].get(epoch)
+            if stream_state is None:
+                return "まだ配信終了を検知していないため再試行できません"
+            finish_observed = bool(stream_state.get("finish_observed"))
+
+            candidate = str(stream_state.get("last_recording_candidate") or "")
+            candidate_stable = bool(
+                stream_state.get("last_recording_candidate_stable")
+            )
+            recording_ready = stream_state["recording_ready"].is_set()
+            recording_done = stream_state["recording_done"].is_set()
+            recording_outcome = stream_state.get("recording_outcome")
+
+            if recording_primary and recording_ready and not recording_done:
+                return "OBS録画からの生成はまだ処理中です"
+
+            recording_already_succeeded = bool(
+                recording_primary
+                and recording_done
+                and recording_outcome is not None
+                and getattr(recording_outcome, "success", False)
+            )
+            can_retry_recording = bool(
+                recording_primary
+                and not recording_already_succeeded
+                and candidate
+                and candidate_stable
+                and Path(candidate).is_file()
+            )
+            if can_retry_recording:
+                retry_recording_path = candidate
+                path_key = _recording_key(candidate)
+                state["seen_record_paths"].discard((epoch, path_key))
+                state["recording_reservations"][path_key] = epoch
+                stream_state["source_claim"] = None
+                stream_state["recording_path"] = ""
+                stream_state["recording_outcome"] = None
+                stream_state["confirmation_decision"] = None
+                stream_state["processing_settings"] = None
+                stream_state["recording_ready"] = threading.Event()
+                stream_state["recording_done"] = threading.Event()
+            elif not finish_observed:
+                if recording_already_succeeded:
+                    return "直近のOBS録画は処理済みです"
+                if candidate and not candidate_stable:
+                    return "OBS録画ファイルの安定完了をまだ確認できていません"
+                return "まだ配信終了を検知していないため再試行できません"
+
+        if retry_recording_path:
+            _on_recording_finished(retry_recording_path)
+            if finish_observed:
+                _queue_stream_finished(observed=False)
+            return f"最新のOBS録画を再検出して生成を再試行します: {retry_recording_path}"
+
+        _queue_stream_finished(observed=False)
+        if recording_already_succeeded:
+            return "録画からの生成は完了済みのため、アーカイブ連携だけを再試行します"
+        if recording_primary:
+            return "安定したOBS録画がないため、検知済みの完成アーカイブを再試行します"
+        return "検知済みの完成アーカイブから生成を再試行します"
+
+    setattr(_on_stream_finished, "_retry_detection_flow", _retry_detection_flow)
+
     return (
         _on_recording_finished if recording_primary else None,
         _on_recording_stopped if recording_primary else None,
@@ -3017,6 +3366,10 @@ def _obs_make_callback(
     generation, so a stale callback never runs the pipeline with old settings.
     Callbacks built directly (generation=None, e.g. in tests) skip that gate.
     """
+    state_lock = threading.Lock()
+    inflight_paths: set[str] = set()
+    completed_paths: set[str] = set()
+
     def _is_current() -> bool:
         return generation is None or generation == _obs_generation
 
@@ -3027,6 +3380,16 @@ def _obs_make_callback(
         if not auto_process:
             _obs_append_status("自動処理が無効のため検知のみ記録しました")
             return
+
+        path_key = os.path.normcase(os.path.abspath(str(video_path)))
+        with state_lock:
+            if path_key in completed_paths:
+                _obs_append_status("同じ録画は処理済みのためスキップしました")
+                return
+            if path_key in inflight_paths:
+                _obs_append_status("同じ録画は既に処理中のためスキップしました")
+                return
+            inflight_paths.add(path_key)
 
         def _worker():
             try:
@@ -3042,12 +3405,16 @@ def _obs_make_callback(
                         _obs_append_status(
                             f"自動生成をスキップしました: {video_path}"
                         )
+                        with state_lock:
+                            completed_paths.add(path_key)
                     return
                 _obs_append_status(f"自動パイプライン開始: {video_path}")
                 outcome = _run_obs_auto_pipeline_outcome(video_path, local_settings)
                 _obs_append_status(outcome.log)
                 if not outcome.success:
                     raise RuntimeError(outcome.error or outcome.log)
+                with state_lock:
+                    completed_paths.add(path_key)
                 _obs_append_status(f"自動処理完了: {video_path}")
             except Exception as e:
                 logger.exception("OBS auto pipeline worker crashed")
@@ -3056,6 +3423,8 @@ def _obs_make_callback(
                 except Exception:
                     pass
             finally:
+                with state_lock:
+                    inflight_paths.discard(path_key)
                 _unregister_obs_worker(threading.current_thread())
 
         t = threading.Thread(target=_worker, daemon=True)
@@ -3065,12 +3434,52 @@ def _obs_make_callback(
     return _callback
 
 
+def _obs_make_active_retry_handler(
+    trigger_method: str,
+    auto_process: bool,
+    generation: int,
+    watcher,
+    archive_finished: Callable[[], None] | None,
+) -> Callable[[], str]:
+    """Bind retry behavior to one active watcher generation."""
+
+    def _is_active() -> bool:
+        with _obs_watcher_lock:
+            return generation == _obs_generation and _obs_watcher is watcher
+
+    def _retry() -> str:
+        if not _is_active():
+            return "OBS連携が停止または更新されたため再試行できません"
+        if not auto_process:
+            return (
+                "自動処理がOFFです。ONにしてOBS連携を再開始してから再試行してください"
+            )
+        if trigger_method == "folder":
+            retry_latest = getattr(watcher, "retry_latest", None)
+            if not callable(retry_latest):
+                return "このフォルダ監視では再検出を利用できません"
+            return str(retry_latest())
+
+        if archive_finished is None:
+            return "再試行できる配信終了イベントがありません"
+        retry_archive = getattr(
+            archive_finished,
+            "_retry_detection_flow",
+            archive_finished,
+        )
+        result = retry_archive()
+        return str(result or "検知済みの完成アーカイブから生成を再試行します")
+
+    return _retry
+
+
 def _stop_obs_watch_impl() -> str:
     """Stop the active watcher while the caller owns lifecycle serialization."""
-    global _obs_watcher, _obs_generation
+    global _obs_watcher, _obs_generation, _obs_retry_handler
     with _obs_watcher_lock:
         watcher = _obs_watcher
         _obs_watcher = None
+        _obs_retry_handler = None
         _obs_generation += 1
     _obs_cancel_pending_confirmation()
     if watcher is None:
@@ -3113,7 +3522,7 @@ def _start_obs_watch_impl(
     obs_processing_settings: dict | None = None,
 ) -> str:
     """Implementation shared by manual and automatic OBS connection starts."""
-    global _obs_watcher, _obs_generation
+    global _obs_watcher, _obs_generation, _obs_retry_handler
     # Stop any existing watcher first so re-clicking Start reconfigures cleanly.
     _stop_obs_watch_impl()
 
@@ -3322,6 +3731,24 @@ def _start_obs_watch_impl(
         return f"OBS連携開始エラー: {e}"
     status = watcher.status
     _obs_append_status(f"OBS連携を開始: {status}")
+    status_text = str(status)
+    status_lower = status_text.lower()
+    retry_ready = (
+        status_lower.startswith("connected")
+        or status_lower.startswith("watching")
+        or status_text.startswith("監視中")
+    )
+    if retry_ready:
+        retry_handler = _obs_make_active_retry_handler(
+            trigger_method,
+            bool(auto_process),
+            gen,
+            watcher,
+            archive_finished,
+        )
+        with _obs_watcher_lock:
+            if _obs_watcher is watcher and _obs_generation == gen:
+                _obs_retry_handler = retry_handler
     if (
         archive_started is not None
         and str(status).lower().startswith("connected")
@@ -3779,7 +4206,12 @@ def _legacy_one_shot_handler(
 
         # Step 3: Highlight detection
         progress(0.5, desc="[Step 3/6] Detecting highlights...")
-        provider_name = {"claude": "Claude", "openai": "ChatGPT", "gemini": "Gemini"}.get(ai_provider, ai_provider)
+        provider_name = {
+            "claude": "Claude",
+            "openai": "ChatGPT",
+            "gemini": "Gemini",
+            "local": "Local LLM",
+        }.get(ai_provider, ai_provider)
         log(f"[Step 3/6] Analyzing with {provider_name}...")
         font_config = FontConfig(
             font_name=font_name,
@@ -3794,7 +4226,7 @@ def _legacy_one_shot_handler(
             max_duration=max_duration,
             custom_prompt=modes.active_prompt,
             ai_provider=ai_provider,
-            api_key=api_key,
+            api_key=_resolve_provider_api_key(ai_provider, api_key),
             ai_model=ai_model,
         )
 
@@ -4048,6 +4480,157 @@ APP_CSS = """
             margin: 0 !important;
             white-space: nowrap;
         }
+        .gradio-container {
+            --input-workspace-gap: 1rem;
+            --input-source-settings-gap: 1.25rem;
+            --input-source-tint: color-mix(
+                in srgb,
+                var(--block-background-fill) 90%,
+                var(--primary-500) 10%
+            );
+            --input-source-border: color-mix(
+                in srgb,
+                var(--border-color-primary) 65%,
+                var(--primary-500) 35%
+            );
+        }
+        .input-source-row,
+        .input-settings-grid {
+            align-items: stretch;
+            gap: var(--input-workspace-gap);
+        }
+        .input-settings-grid {
+            margin-top: var(--input-source-settings-gap);
+        }
+        .input-source-control {
+            background: var(--input-source-tint) !important;
+            border-color: var(--input-source-border) !important;
+        }
+        .input-url-column,
+        .input-file-column,
+        .input-core-settings-column,
+        .input-shorts-settings-column,
+        .input-actions-column,
+        .obs-trigger-column,
+        .obs-connection-settings-column,
+        .obs-connection-actions-column {
+            min-width: 0 !important;
+        }
+        .input-settings-grid input[type="number"] {
+            -moz-appearance: textfield;
+        }
+        .input-settings-grid input[type="number"]::-webkit-inner-spin-button,
+        .input-settings-grid input[type="number"]::-webkit-outer-spin-button {
+            -webkit-appearance: none;
+            margin: 0;
+        }
+        .input-settings-title {
+            margin: 0.1rem 0 -0.15rem !important;
+        }
+        .input-core-settings-column > .input-settings-title,
+        .input-shorts-settings-column > .input-settings-title {
+            overflow: visible !important;
+        }
+        .input-settings-title h3 {
+            font-size: 1rem !important;
+            line-height: 1.4 !important;
+            margin: 0 !important;
+        }
+        .input-actions-column {
+            margin-top: 0.5rem;
+        }
+        .obs-trigger-retry-layout {
+            align-items: stretch !important;
+            gap: var(--input-workspace-gap);
+        }
+        .obs-trigger-controls,
+        .obs-retry-panel {
+            min-width: 0 !important;
+        }
+        .obs-retry-panel {
+            align-self: stretch;
+            justify-content: center;
+            padding: 1rem !important;
+            border: 1px solid color-mix(
+                in srgb,
+                var(--border-color-primary) 58%,
+                var(--primary-500) 42%
+            );
+            border-radius: 0.75rem;
+            background: color-mix(
+                in srgb,
+                var(--block-background-fill) 92%,
+                var(--primary-500) 8%
+            );
+        }
+        .obs-retry-panel h3 {
+            margin: 0 0 0.35rem !important;
+            font-size: 1rem !important;
+            line-height: 1.4 !important;
+        }
+        .obs-retry-panel p {
+            margin-bottom: 0 !important;
+            line-height: 1.55 !important;
+        }
+        .obs-retry-button button {
+            min-height: 3rem;
+            font-weight: 650;
+        }
+        .obs-retry-note {
+            opacity: 0.78;
+            font-size: 0.86rem !important;
+        }
+        @media (min-width: 900px) {
+            .obs-connection-workspace {
+                display: grid !important;
+                grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+                grid-template-areas: "trigger connection" "actions connection";
+                grid-template-rows: max-content 1fr;
+                align-items: start;
+                gap: var(--input-workspace-gap);
+            }
+            .obs-trigger-column {
+                grid-area: trigger;
+            }
+            .obs-connection-settings-column {
+                grid-area: connection;
+            }
+            .obs-connection-actions-column {
+                grid-area: actions;
+            }
+        }
+        @media (min-width: 900px) and (max-width: 1499px) {
+            .obs-trigger-retry-layout {
+                flex-direction: column !important;
+            }
+            .obs-trigger-controls,
+            .obs-retry-panel {
+                flex: 1 1 auto !important;
+                width: 100% !important;
+            }
+        }
+        @media (max-width: 899px) {
+            .input-source-row,
+            .input-settings-grid,
+            .obs-connection-workspace,
+            .obs-trigger-retry-layout {
+                flex-direction: column !important;
+            }
+            .input-url-column,
+            .input-file-column,
+            .input-core-settings-column,
+            .input-shorts-settings-column,
+            .input-actions-column,
+            .obs-trigger-column,
+            .obs-trigger-controls,
+            .obs-retry-panel,
+            .obs-connection-settings-column,
+            .obs-connection-actions-column {
+                flex: 1 1 auto !important;
+                min-width: 0 !important;
+                width: 100% !important;
+            }
+        }
         footer { display: none !important; }
         a[href*="gradio.app"] { display: none !important; }
         """
@@ -4061,7 +4644,10 @@ GEMINI_API_KEY_GUIDE_MD = """
 4. 上の「APIキー」欄へ貼り付け、**[💾 このキーを保存]** をクリック
 
 > Gemini APIキーはAI分析用です。YouTube・Drive用の `credentials.json` とは別物です。
-> キーは他人に見せないでください。`429` エラー時は少し待って再実行します。
+> キーは他人に見せないでください。`429` はAI Studioで該当上限とリセット時刻を確認します。
+> 無料枠では字幕と生成結果がGoogleの製品改善に使われ、人が確認する場合があります。
+> 個人情報・機密情報は送信しないでください。利用条件は18歳以上の業務・専門用途です。
+> 通常は1動画=1リクエスト。無料枠はまず1日数本を目安にし、実上限はAI Studioで確認します。
 
 詳しい画面説明が必要な場合は、アプリフォルダの `SETUP_GUIDE.html` を開いてください。
 """
@@ -4205,10 +4791,88 @@ def _startup_auth_status_for_ui() -> str:
     return summary
 
 
+def _audio_asset_choices(kind: str) -> list[tuple[str, str]]:
+    """Return stable catalog choices without touching the network or cache."""
+    choices = [("使用しない", "")]
+    choices.extend(
+        (f"{asset.label} — {asset.creator}", asset.id)
+        for asset in list_catalog_assets()
+        if asset.kind == kind
+    )
+    return choices
+
+
+def _audio_pack_status_text() -> str:
+    try:
+        status = get_audio_pack_status()
+    except AudioAssetError as exc:
+        return f"⚠️ **素材カタログを確認できません:** {exc}"
+    if status.ready:
+        return (
+            f"✅ **CC0素材パック {status.version} は利用可能です** "
+            f"（BGM 4曲・SE 16点 / {status.asset_count}素材）"
+        )
+    if status.state == "invalid":
+        return f"⚠️ **素材パックの再導入が必要です:** {status.message}"
+    return (
+        "**CC0素材パックは未導入です。** "
+        "必要な場合だけ下のボタンから一度ダウンロードします。"
+    )
+
+
+def _audio_pack_control_updates(current_bgm="", current_se="", *, install=False):
+    """Refresh status and enable selectors only for a verified install."""
+    error = ""
+    if install:
+        try:
+            install_audio_pack()
+        except (AudioAssetError, OSError) as exc:
+            error = f"⚠️ **素材パックのダウンロードに失敗しました:** {exc}"
+    try:
+        status = get_audio_pack_status()
+        ready = status.ready
+    except AudioAssetError as exc:
+        ready = False
+        if not error:
+            error = f"⚠️ **素材パックを確認できません:** {exc}"
+    bgm_choices = _audio_asset_choices("bgm")
+    se_choices = _audio_asset_choices("se")
+    bgm_ids = {value for _label, value in bgm_choices}
+    se_ids = {value for _label, value in se_choices}
+    bgm_value = current_bgm if current_bgm in bgm_ids else ""
+    se_value = current_se if current_se in se_ids else ""
+    return (
+        error or _audio_pack_status_text(),
+        gr.update(choices=bgm_choices, value=bgm_value, interactive=ready),
+        gr.update(choices=se_choices, value=se_value, interactive=ready),
+    )
+
+
+def install_audio_pack_ui(current_bgm="", current_se=""):
+    """Explicit UI-only download entry point; render functions never call it."""
+    return _audio_pack_control_updates(current_bgm, current_se, install=True)
+
+
+def refresh_audio_pack_ui(current_bgm="", current_se=""):
+    return _audio_pack_control_updates(current_bgm, current_se, install=False)
+
+
 def create_ui():
     """Create the Gradio web interface."""
     defaults = load_defaults()
     obs_processing_defaults = _obs_processing_settings_from_defaults(defaults)
+    try:
+        audio_pack_ready = get_audio_pack_status().ready
+    except AudioAssetError:
+        audio_pack_ready = False
+    bgm_choices = _audio_asset_choices("bgm")
+    se_choices = _audio_asset_choices("se")
+    bgm_default = defaults.get("bgm_asset_id", "")
+    se_default = defaults.get("se_asset_id", "")
+    if bgm_default not in {value for _label, value in bgm_choices}:
+        bgm_default = ""
+    if se_default not in {value for _label, value in se_choices}:
+        se_default = ""
 
     with gr.Blocks(
         title="Clip Extractor - 配信切り抜き自動生成",
@@ -4290,32 +4954,95 @@ def create_ui():
 """
                         )
 
-                with gr.Row():
-                    with gr.Column(scale=2):
+                with gr.Row(elem_classes="input-source-row"):
+                    with gr.Column(
+                        scale=1,
+                        elem_classes="input-url-column",
+                    ):
                         input_url = gr.Textbox(
                             label="動画URL（YouTube / Twitch）",
                             placeholder="https://youtube.com/... または https://twitch.tv/videos/...",
                             info="YouTube/TwitchのURLを貼り付けると自動でダウンロードします。Twitch入力ではタイムスタンプを生成しません",
+                            elem_classes="input-source-control",
                         )
-                        gr.HTML("<p style='text-align:center; color:#999;'>または</p>")
+                    with gr.Column(
+                        scale=1,
+                        elem_classes="input-file-column",
+                    ):
                         input_file = gr.File(
                             label="ローカルファイル",
                             file_types=["video"],
                             type="filepath",
+                            height=128,
+                            elem_classes="input-source-control",
                         )
 
-                    with gr.Column(scale=1):
+                with gr.Row(elem_classes="input-settings-grid"):
+                    with gr.Column(
+                        scale=1,
+                        elem_classes="input-core-settings-column",
+                    ):
+                        gr.Markdown(
+                            "### クリップ・出力設定",
+                            elem_classes="input-settings-title",
+                        )
                         num_clips = gr.Number(
                             minimum=1, maximum=50, value=defaults["num_clips"],
                             precision=0,
                             label="クリップ数",
                             info="1〜50 個。大きくしすぎると面白くないシーンも混ざりやすくなります (推奨: 3〜10)",
                         )
+                        with gr.Row():
+                            min_duration = gr.Number(
+                                label="最小クリップ長 (秒)",
+                                value=defaults["min_duration"],
+                                precision=0,
+                            )
+                            max_duration = gr.Number(
+                                label="最大クリップ長 (秒)",
+                                value=defaults["max_duration"],
+                                precision=0,
+                            )
                         output_mode = gr.Radio(
                             choices=["combined", "individual"],
                             value=defaults.get("output_mode", "combined"),
                             label="出力モード",
                             info="combined: 1つのXMLに全シーケンス / individual: クリップごとに別XML",
+                        )
+                        generate_thumbnails = gr.Checkbox(
+                            label="サムネイル候補を生成 / Generate thumbnail candidates",
+                            value=defaults.get("generate_thumbnails", False),
+                            info="各クリップからタイトル入りの代表フレーム画像を生成します",
+                        )
+                        audio_fusion = gr.Checkbox(
+                            label="音声盛り上がり融合 / Audio excitement fusion",
+                            value=defaults.get("audio_fusion", False),
+                            info="音量や急な盛り上がりを使ってクリップ順位を再調整します / Re-rank clips using loudness and sudden audio peaks",
+                        )
+                        audio_alpha = gr.Slider(
+                            0.0, 1.0,
+                            value=defaults.get("audio_alpha", 0.35),
+                            step=0.05,
+                            label="音声重み alpha / Audio weight",
+                        )
+                        generate_zip = gr.Checkbox(
+                            label="ZIPファイルを生成",
+                            value=False,
+                            info="出力をZIPにまとめてダウンロード可能にする",
+                        )
+                        upload_to_drive = gr.Checkbox(
+                            label="Google Drive にアップロード",
+                            value=False,
+                            info="要: credentials.json の設定",
+                        )
+
+                    with gr.Column(
+                        scale=1,
+                        elem_classes="input-shorts-settings-column",
+                    ):
+                        gr.Markdown(
+                            "### ショート動画設定",
+                            elem_classes="input-settings-title",
                         )
                         generate_shorts = gr.Checkbox(
                             label="ショート動画 (9:16) を生成",
@@ -4363,72 +5090,127 @@ def create_ui():
                             label="タイトルの配置",
                             info="pad/blurでは上下の余白か映像中央を選択。cropでは画面上部・下部・中央になります",
                         )
-                        generate_thumbnails = gr.Checkbox(
-                            label="サムネイル候補を生成 / Generate thumbnail candidates",
-                            value=defaults.get("generate_thumbnails", False),
-                            info="各クリップからタイトル入りの代表フレーム画像を生成します",
-                        )
-                        audio_fusion = gr.Checkbox(
-                            label="音声盛り上がり融合 / Audio excitement fusion",
-                            value=defaults.get("audio_fusion", False),
-                            info="音量や急な盛り上がりを使ってクリップ順位を再調整します / Re-rank clips using loudness and sudden audio peaks",
-                        )
-                        audio_alpha = gr.Slider(
-                            0.0, 1.0,
-                            value=defaults.get("audio_alpha", 0.35),
-                            step=0.05,
-                            label="音声重み alpha / Audio weight",
-                        )
                         karaoke = gr.Checkbox(
                             label="ワード単位カラオケ字幕 / Word-level karaoke captions",
                             value=defaults.get("karaoke", False),
                             info="ショート動画の焼き込み字幕を単語ごとにハイライトします / Highlight burned-in Shorts captions word by word",
                         )
-                        generate_zip = gr.Checkbox(
-                            label="ZIPファイルを生成",
-                            value=False,
-                            info="出力をZIPにまとめてダウンロード可能にする",
+
+                with gr.Group(elem_classes="audio-delivery-panel"):
+                    gr.Markdown(
+                        "### BGM・SE素材と出力\n"
+                        "素材は生成時に自動取得しません。必要な場合だけ一度導入し、"
+                        "以後は検証済みローカルキャッシュを使います。"
+                    )
+                    audio_pack_status = gr.Markdown(_audio_pack_status_text())
+                    with gr.Row():
+                        install_audio_pack_btn = gr.Button(
+                            "CC0素材をダウンロード（約3.2 MB）",
+                            variant="secondary",
                         )
-                        upload_to_drive = gr.Checkbox(
-                            label="Google Drive にアップロード",
-                            value=False,
-                            info="要: credentials.json の設定",
+                        refresh_audio_pack_btn = gr.Button(
+                            "素材の状態を更新",
+                            variant="secondary",
+                        )
+                    with gr.Row():
+                        bgm_asset_id = gr.Dropdown(
+                            choices=bgm_choices,
+                            value=bgm_default,
+                            label="BGM",
+                            info="4曲のCC0ループ素材。未選択ならBGMは追加しません",
+                            interactive=audio_pack_ready,
+                        )
+                        se_asset_id = gr.Dropdown(
+                            choices=se_choices,
+                            value=se_default,
+                            label="SE",
+                            info="16点のCC0効果音。未選択ならSEは追加しません",
+                            interactive=audio_pack_ready,
+                        )
+                    with gr.Row():
+                        bgm_gain_db = gr.Slider(
+                            minimum=-36,
+                            maximum=0,
+                            step=1,
+                            value=defaults.get("bgm_gain_db", -18.0),
+                            label="BGM音量 (dB)",
+                            info="元の会話音声は変更しません。推奨: -18 dB",
+                        )
+                        se_gain_db = gr.Slider(
+                            minimum=-36,
+                            maximum=0,
+                            step=1,
+                            value=defaults.get("se_gain_db", -8.0),
+                            label="SE音量 (dB)",
+                            info="推奨: -8 dB",
+                        )
+                    with gr.Row():
+                        se_cue_seconds = gr.Number(
+                            minimum=0,
+                            value=defaults.get("se_cue_seconds", 0.0),
+                            label="SEを鳴らす位置 (秒)",
+                            info="各クリップ先頭からの相対時刻。範囲外なら無音になります",
+                        )
+                        audio_delivery_mode = gr.Radio(
+                            choices=[
+                                ("別ファイル（編集向け）", "separate"),
+                                ("動画へミックス", "mixed"),
+                                ("両方", "both"),
+                            ],
+                            value=defaults.get("audio_delivery_mode", "both"),
+                            label="BGM・SEの出力方法",
+                            info=(
+                                "別ファイル=clean MP4 + 48kHz WAV + JSON / "
+                                "ミックス=完成MP4 / 両方=すべて"
+                            ),
+                        )
+                    install_audio_pack_btn.click(
+                        fn=install_audio_pack_ui,
+                        inputs=[bgm_asset_id, se_asset_id],
+                        outputs=[audio_pack_status, bgm_asset_id, se_asset_id],
+                        concurrency_limit=1,
+                    )
+                    refresh_audio_pack_btn.click(
+                        fn=refresh_audio_pack_ui,
+                        inputs=[bgm_asset_id, se_asset_id],
+                        outputs=[audio_pack_status, bgm_asset_id, se_asset_id],
+                    )
+
+                with gr.Column(elem_classes="input-actions-column"):
+                    with gr.Row():
+                        detect_btn = gr.Button(
+                            "STEP 1：AIがおすすめ箇所を抽出",
+                            variant="primary",
+                            size="lg",
+                        )
+                        render_btn = gr.Button(
+                            "STEP 2：クリップを書き出し",
+                            variant="secondary",
+                            size="lg",
+                        )
+
+                    auto_run_both = gr.Checkbox(
+                        label="STEP 1 のあと STEP 2 まで自動で実行する",
+                        value=False,
+                        info="チェックすると、AI抽出 (STEP 1) が終わり次第そのままクリップ書き出し (STEP 2) まで一気に進めます。レビューで手直ししたい場合はオフのままにしてください。",
+                    )
+
+                    with gr.Row():
+                        input_save_defaults_btn = gr.Button(
+                            "現在のInput設定をデフォルトに保存",
+                            variant="secondary",
+                            size="sm",
+                        )
+                        input_save_defaults_msg = gr.Textbox(
+                            label="",
+                            interactive=False,
+                            show_label=False,
+                            lines=1,
                         )
 
                 session_state = gr.State({})
                 highlights_state = gr.State([])
                 premiere_job_state = gr.State(None)
-
-                with gr.Row():
-                    detect_btn = gr.Button(
-                        "STEP 1：AIがおすすめ箇所を抽出",
-                        variant="primary",
-                        size="lg",
-                    )
-                    render_btn = gr.Button(
-                        "STEP 2：クリップを書き出し",
-                        variant="secondary",
-                        size="lg",
-                    )
-
-                auto_run_both = gr.Checkbox(
-                    label="STEP 1 のあと STEP 2 まで自動で実行する",
-                    value=False,
-                    info="チェックすると、AI抽出 (STEP 1) が終わり次第そのままクリップ書き出し (STEP 2) まで一気に進めます。レビューで手直ししたい場合はオフのままにしてください。",
-                )
-
-                with gr.Row():
-                    input_save_defaults_btn = gr.Button(
-                        "現在のInput設定をデフォルトに保存",
-                        variant="secondary",
-                        size="sm",
-                    )
-                    input_save_defaults_msg = gr.Textbox(
-                        label="",
-                        interactive=False,
-                        show_label=False,
-                        lines=1,
-                    )
 
                 with gr.Group(visible=False) as review_panel:
                     gr.Markdown("## クリップレビュー / Clip Review")
@@ -4572,37 +5354,76 @@ def create_ui():
                         " **Settings / 設定 → OBS Studio 起動・自動連携** "
                         "でそれぞれON/OFFできます。"
                     )
-                with gr.Row():
-                    with gr.Column(scale=1):
-                        obs_trigger_radio = gr.Radio(
-                            ["websocket", "folder"],
-                            label="検知方式 / Trigger",
-                            value=defaults.get("obs_trigger_method", "websocket"),
-                            info="websocket=OBS WebSocket, folder=フォルダ監視",
-                        )
-                        obs_stop_event_radio = gr.Radio(
-                            [
-                                (
-                                    "OBS録画優先：失敗時のみ完成アーカイブ",
-                                    "record",
-                                ),
-                                (
-                                    "YouTube完成アーカイブのみ：再エンコード後",
-                                    "stream",
-                                ),
-                            ],
-                            label="自動処理の取得元",
-                            value=defaults.get("obs_stop_event", "record"),
-                            info=(
-                                "推奨: record=OBS録画を即処理し、失敗時だけ"
-                                "完成アーカイブを使用"
-                            ),
-                        )
-                        obs_auto_process = gr.Checkbox(
-                            label="検知後に自動で切り抜き/チャプター生成まで実行",
-                            value=bool(defaults.get("obs_auto_process", True)),
-                        )
-                    with gr.Column(scale=1):
+                with gr.Row(elem_classes="obs-connection-workspace"):
+                    with gr.Column(
+                        scale=1,
+                        elem_classes="obs-trigger-column",
+                    ):
+                        with gr.Row(elem_classes="obs-trigger-retry-layout"):
+                            with gr.Column(
+                                scale=3,
+                                elem_classes="obs-trigger-controls",
+                            ):
+                                obs_trigger_radio = gr.Radio(
+                                    ["websocket", "folder"],
+                                    label="検知方式 / Trigger",
+                                    value=defaults.get(
+                                        "obs_trigger_method",
+                                        "websocket",
+                                    ),
+                                    info=(
+                                        "websocket=OBS WebSocket, "
+                                        "folder=フォルダ監視"
+                                    ),
+                                )
+                                obs_stop_event_radio = gr.Radio(
+                                    [
+                                        (
+                                            "OBS録画優先：失敗時のみ完成アーカイブ",
+                                            "record",
+                                        ),
+                                        (
+                                            "YouTube完成アーカイブのみ：再エンコード後",
+                                            "stream",
+                                        ),
+                                    ],
+                                    label="自動処理の取得元",
+                                    value=defaults.get("obs_stop_event", "record"),
+                                    info=(
+                                        "推奨: record=OBS録画を即処理し、失敗時だけ"
+                                        "完成アーカイブを使用"
+                                    ),
+                                )
+                                obs_auto_process = gr.Checkbox(
+                                    label=(
+                                        "検知後に自動で切り抜き/チャプター生成まで実行"
+                                    ),
+                                    value=bool(defaults.get("obs_auto_process", True)),
+                                )
+                            with gr.Column(
+                                scale=2,
+                                min_width=280,
+                                elem_classes="obs-retry-panel",
+                            ):
+                                gr.Markdown(
+                                    "### 検知・生成を再試行\n"
+                                    "監視中のフォルダから最新録画を再検出するか、"
+                                    "検知済みの完成アーカイブでもう一度生成します。"
+                                )
+                                obs_retry_btn = gr.Button(
+                                    "録画 / アーカイブを再検知して再試行",
+                                    variant="secondary",
+                                    elem_classes="obs-retry-button",
+                                )
+                                gr.Markdown(
+                                    "OBS連携中の設定をそのまま使用します。"
+                                    "処理中・処理済みの対象は二重実行しません。",
+                                    elem_classes="obs-retry-note",
+                                )
+                    with gr.Column(
+                        scale=1,
+                        elem_classes="obs-connection-settings-column",
+                    ):
                         obs_host = gr.Textbox(
                             label="WebSocket Host",
                             value=defaults.get("obs_host", "localhost"),
@@ -4655,6 +5476,25 @@ def create_ui():
                             fn=pick_obs_watch_folder_dialog,
                             inputs=obs_watch_folder,
                             outputs=obs_watch_folder,
+                        )
+
+                    with gr.Column(
+                        scale=1,
+                        elem_classes="obs-connection-actions-column",
+                    ):
+                        with gr.Row():
+                            obs_start_btn = gr.Button(
+                                "OBS連携 開始",
+                                variant="primary",
+                            )
+                            obs_stop_btn = gr.Button("OBS連携 停止")
+                            obs_refresh_btn = gr.Button("状態を更新")
+
+                        obs_status_box = gr.Textbox(
+                            label="OBS連携ステータス",
+                            lines=8,
+                            interactive=False,
+                            value="",
                         )
 
                 with gr.Accordion(
@@ -4852,18 +5692,6 @@ def create_ui():
                         outputs=obs_save_processing_msg,
                     )
 
-                with gr.Row():
-                    obs_start_btn = gr.Button("OBS連携 開始", variant="primary")
-                    obs_stop_btn = gr.Button("OBS連携 停止")
-                    obs_refresh_btn = gr.Button("状態を更新")
-
-                obs_status_box = gr.Textbox(
-                    label="OBS連携ステータス",
-                    lines=12,
-                    interactive=False,
-                    value="",
-                )
-
                 with gr.Group(visible=False) as obs_confirmation_group:
                     obs_confirmation_message = gr.Markdown("")
                     obs_confirmation_prompt = gr.Textbox(
@@ -4916,25 +5744,33 @@ def create_ui():
                     with gr.Column():
                         gr.HTML("<h3>AI Model / 分析AI</h3>")
                         ai_provider = gr.Dropdown(
-                            choices=["claude", "openai", "gemini"],
+                            choices=_available_ai_providers(),
                             value=defaults["ai_provider"],
                             label="AIプロバイダー",
-                            info="Claude: CLI(サブスク) / OpenAI: APIキー必要 / Gemini: 無料枠あり",
+                            info=_ai_provider_info(),
+                        )
+                        initial_ai_model = _resolve_ai_model(
+                            defaults.get("ai_provider", "gemini"),
+                            defaults.get("ai_model", ""),
                         )
                         ai_model = gr.Dropdown(
-                            choices=[],
-                            value="",
+                            choices=_ai_model_choices(defaults.get("ai_provider", "gemini")),
+                            value=initial_ai_model,
                             label="モデル",
                             allow_custom_value=True,
-                            info="空欄でデフォルト (Claude=CLI, OpenAI=gpt-4.1, Gemini=gemini-2.5-flash)",
+                            info=_ai_model_info(),
                         )
-                        saved_api_key = load_gemini_api_key()
+                        has_saved_api_key = bool(load_gemini_api_key())
                         api_key = gr.Textbox(
                             label="APIキー",
-                            value=saved_api_key,
-                            placeholder="OpenAI / Gemini のAPIキーを入力",
+                            value="",
+                            placeholder=(
+                                "保存済み。変更時のみ新しいキーを入力"
+                                if has_saved_api_key
+                                else "OpenAI / Gemini のAPIキーを入力"
+                            ),
                             type="password",
-                            info="Claudeは入力不要。保存すると次回から自動で読み込みます。",
+                            info=_api_key_info(),
                         )
                         save_api_key_btn = gr.Button(
                             "💾 このキーを保存 (.gemini_key)",
@@ -4944,7 +5780,7 @@ def create_ui():
                         save_api_key_btn.click(
                             fn=save_gemini_api_key,
                             inputs=api_key,
-                            outputs=None,
+                            outputs=api_key,
                         )
                         with gr.Accordion(
                             "📘 Gemini APIキーの取得手順 — 4ステップ",
@@ -4953,31 +5789,15 @@ def create_ui():
                             gr.Markdown(GEMINI_API_KEY_GUIDE_MD)
 
                         def update_models(provider):
-                            if provider == "openai":
-                                return gr.update(choices=["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o4-mini", "o3", "o3-mini"], value="gpt-4.1")
-                            elif provider == "gemini":
-                                return gr.update(choices=["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"], value="gemini-2.5-flash")
-                            else:
-                                return gr.update(choices=[], value="")
+                            return gr.update(
+                                choices=_ai_model_choices(provider),
+                                value=_default_ai_model(provider),
+                            )
 
                         ai_provider.change(fn=update_models, inputs=ai_provider, outputs=ai_model)
 
                     with gr.Column():
-                        gr.HTML("<h3>Highlight Detection</h3>")
-                        gr.HTML(
-                            "<p style='color:#666; margin-top:-0.5em;'>"
-                            "プロンプトは Input タブの各モード欄で指定します。ここでは"
-                            "切り抜きの長さ範囲だけ指定。</p>"
-                        )
-                        with gr.Row():
-                            min_duration = gr.Number(
-                                label="最小クリップ長 (秒)", value=defaults["min_duration"], precision=0,
-                            )
-                            max_duration = gr.Number(
-                                label="最大クリップ長 (秒)", value=defaults["max_duration"], precision=0,
-                            )
-
-                        gr.HTML("<h3 style='margin-top: 1.5em;'>出力先 / Output Destination</h3>")
+                        gr.HTML("<h3>出力先 / Output Destination</h3>")
                         _saved_base = (defaults.get("output_base_dir", "") or "").strip()
                         _initial_path = _saved_base or str(resolve_output_base(""))
                         with gr.Row():
@@ -5243,7 +6063,13 @@ def create_ui():
                             premiere_executable_path,
                             obs_launch_on_startup,
                             obs_executable_path,
-                            obs_auto_connect_on_startup],
+                            obs_auto_connect_on_startup,
+                            audio_delivery_mode,
+                            bgm_asset_id,
+                            se_asset_id,
+                            bgm_gain_db,
+                            se_gain_db,
+                            se_cue_seconds],
                     outputs=save_defaults_msg,
                 )
 
@@ -5265,7 +6091,13 @@ def create_ui():
                             premiere_executable_path,
                             obs_launch_on_startup,
                             obs_executable_path,
-                            obs_auto_connect_on_startup],
+                            obs_auto_connect_on_startup,
+                            audio_delivery_mode,
+                            bgm_asset_id,
+                            se_asset_id,
+                            bgm_gain_db,
+                            se_gain_db,
+                            se_cue_seconds],
                     outputs=input_save_defaults_msg,
                 )
 
@@ -5403,6 +6235,12 @@ def create_ui():
                 karaoke,
                 shorts_blur_strength,
                 shorts_title_position,
+                audio_delivery_mode,
+                bgm_asset_id,
+                se_asset_id,
+                bgm_gain_db,
+                se_gain_db,
+                se_cue_seconds,
             ],
             outputs=[
                 log_output,
@@ -5437,6 +6275,12 @@ def create_ui():
                 karaoke,
                 shorts_blur_strength,
                 shorts_title_position,
+                audio_delivery_mode,
+                bgm_asset_id,
+                se_asset_id,
+                bgm_gain_db,
+                se_gain_db,
+                se_cue_seconds,
             ],
             outputs=[
                 log_output,
@@ -5498,6 +6342,12 @@ def create_ui():
             fn=_obs_status_poll,
             inputs=[],
             outputs=obs_status_box,
+        )
+        obs_retry_btn.click(
+            fn=retry_obs_detection_flow,
+            inputs=[],
+            outputs=obs_status_box,
+            concurrency_limit=1,
         )
         obs_refresh_btn.click(
             fn=_obs_confirmation_poll,
@@ -5628,7 +6478,7 @@ if __name__ == "__main__":
     app = create_ui()
     app.queue()
     app.launch(**safe_launch_kwargs(
-        server_name="0.0.0.0",
+        server_name=WEB_SERVER_HOST,
         server_port=7860,
         ssr_mode=False,
         **LAUNCH_THEME_KWARGS,

@@ -6,6 +6,7 @@ cleanly (lazy imports) and the watchers must report missing deps via
 file-stability helper directly and stub the third-party libs where needed.
 """
 
+import os
 import sys
 import threading
 import types
@@ -92,6 +93,82 @@ def test_folder_watcher_ignores_non_video_extensions(tmp_path, monkeypatch):
     # window then assert nothing arrived.
     assert not received
     w.stop()
+
+
+def test_folder_watcher_retry_latest_dispatches_newest_supported_file(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(oi.time, "sleep", lambda *a, **k: None)
+    older = tmp_path / "older.mp4"
+    newer = tmp_path / "newer.mkv"
+    ignored = tmp_path / "newest.txt"
+    older.write_bytes(b"older-video")
+    newer.write_bytes(b"newer-video")
+    ignored.write_bytes(b"not-a-video")
+    os.utime(older, (1, 1))
+    os.utime(newer, (2, 2))
+    os.utime(ignored, (3, 3))
+
+    received: list[str] = []
+    done = threading.Event()
+
+    def cb(path):
+        received.append(path)
+        done.set()
+
+    watcher = oi.FolderWatcher(tmp_path, cb)
+    outcome = watcher.retry_latest()
+
+    assert "最新録画を再検出" in outcome
+    assert done.wait(timeout=5), "retry callback did not fire"
+    assert received == [str(newer.resolve())]
+    watcher.stop()
+
+
+def test_folder_watcher_retry_latest_reports_empty_supported_set(tmp_path):
+    (tmp_path / "notes.txt").write_bytes(b"not-a-video")
+    received: list[str] = []
+    watcher = oi.FolderWatcher(tmp_path, received.append)
+
+    outcome = watcher.retry_latest()
+
+    assert "再試行対象の録画ファイルがありません" in outcome
+    assert received == []
+    watcher.stop()
+
+
+@pytest.mark.parametrize("remove_before_check", [False, True])
+def test_folder_watcher_retry_latest_rejects_unstable_or_missing_file(
+    tmp_path,
+    monkeypatch,
+    remove_before_check,
+):
+    recording = tmp_path / "latest.mp4"
+    recording.write_bytes(b"video")
+    received: list[str] = []
+    stability_checked = threading.Event()
+
+    def unstable_or_missing(path, *args, **kwargs):
+        if remove_before_check:
+            Path(path).unlink()
+        stability_checked.set()
+        return False
+
+    monkeypatch.setattr(oi, "wait_until_file_stable", unstable_or_missing)
+    watcher = oi.FolderWatcher(tmp_path, received.append)
+
+    outcome = watcher.retry_latest()
+
+    assert "最新録画を再検出" in outcome
+    assert stability_checked.wait(timeout=5), "stability validation did not run"
+    with watcher._workers_lock:
+        workers = list(watcher._workers)
+    for worker in workers:
+        worker.join(timeout=5)
+    assert received == []
+    assert "ファイルが安定しません" in watcher.status
+    watcher.stop()
 
 
 def test_folder_watcher_start_missing_dep(tmp_path, monkeypatch):
