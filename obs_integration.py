@@ -422,6 +422,48 @@ class FolderWatcher(_WorkerMixin):
         self._join_workers()
         self._status = "stopped"
 
+    def retry_latest(self) -> str:
+        """Re-scan the watched folder and dispatch its newest recording.
+
+        The existing observer is left untouched. The selected file follows the
+        same extension filter, stability wait, and callback path as a normal
+        watchdog event. Only direct children are considered because the live
+        observer is configured with ``recursive=False`` as well.
+        """
+        watch_dir = Path(self._dir)
+        if not self._dir or not watch_dir.is_dir():
+            self._status = f"再検出できません: 監視フォルダが見つかりません: {self._dir}"
+            logger.warning(self._status)
+            return self._status
+
+        candidates: list[tuple[int, str, Path]] = []
+        try:
+            for path in watch_dir.iterdir():
+                try:
+                    if not path.is_file() or path.suffix.lower() not in self._extensions:
+                        continue
+                    candidates.append((path.stat().st_mtime_ns, path.name, path))
+                except OSError:
+                    # A file may disappear or become unreadable while OBS is
+                    # finalising/moving it. Other candidates can still retry.
+                    continue
+        except OSError as exc:
+            self._status = f"監視フォルダの再検出に失敗しました: {exc}"
+            logger.warning(self._status)
+            return self._status
+
+        if not candidates:
+            self._status = f"再試行対象の録画ファイルがありません: {self._dir}"
+            logger.info(self._status)
+            return self._status
+
+        latest = max(candidates, key=lambda item: (item[0], item[1]))[2].resolve()
+        outcome = f"最新録画を再検出: {latest}"
+        self._status = outcome
+        logger.info(outcome)
+        self._handle_event(str(latest))
+        return outcome
+
     # --- internals --------------------------------------------------------
 
     def _handle_event(self, path: Optional[str]) -> None:

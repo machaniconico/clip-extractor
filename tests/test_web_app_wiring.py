@@ -491,8 +491,14 @@ def test_obs_connection_workspace_uses_left_space_without_reordering_mobile_flow
         "obs_trigger_radio =",
         "obs_stop_event_radio =",
         "obs_auto_process =",
+        "obs_retry_btn =",
     ):
         assert control in trigger_controls
+    assert 'elem_classes="obs-trigger-retry-layout"' in trigger_controls
+    assert 'elem_classes="obs-retry-panel"' in trigger_controls
+    assert trigger_controls.index("obs_auto_process =") < trigger_controls.index(
+        "obs_retry_btn ="
+    )
 
     connection_controls = source[connection_column:actions_column]
     for control in (
@@ -524,6 +530,15 @@ def test_obs_connection_workspace_uses_left_space_without_reordering_mobile_flow
     assert workspace_css["flex-direction"] == "column !important"
     assert _css_properties(css, ".obs-trigger-column")["grid-area"] == "trigger"
     assert (
+        _css_properties(css, ".obs-trigger-retry-layout")["align-items"]
+        == "stretch !important"
+    )
+    assert (
+        _css_properties(css, ".obs-trigger-retry-layout")["flex-direction"]
+        == "column !important"
+    )
+    assert _css_properties(css, ".obs-retry-button button")["min-height"] == "3rem"
+    assert (
         _css_properties(css, ".obs-connection-settings-column")["grid-area"]
         == "connection"
     )
@@ -535,6 +550,14 @@ def test_obs_connection_workspace_uses_left_space_without_reordering_mobile_flow
     assert _click_output_names(module, "obs_start_btn") == ["obs_status_box"]
     assert _click_output_names(module, "obs_stop_btn") == ["obs_status_box"]
     assert _click_output_names(module, "obs_refresh_btn") == ["obs_status_box"]
+    assert _click_input_names(module, "obs_retry_btn") == []
+    assert _click_output_names(module, "obs_retry_btn") == ["obs_status_box"]
+    assert "concurrency_limit=1" in source[
+        source.index("obs_retry_btn.click(") : source.index(
+            "obs_refresh_btn.click(",
+            source.index("obs_retry_btn.click("),
+        )
+    ]
 
 
 def test_clip_duration_controls_live_in_their_workflow_tabs():

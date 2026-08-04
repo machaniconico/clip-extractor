@@ -1765,6 +1765,7 @@ class _DummyProgress:
 # _obs_status_poll() on a Timer / button — no component writes from threads.
 _obs_watcher = None
 _obs_watcher_lock = threading.Lock()
+_obs_retry_handler: Callable[[], str] | None = None
 _obs_start_lock = threading.Lock()
 _obs_auto_connect_cancel = threading.Event()
 _obs_auto_connect_thread: threading.Thread | None = None
@@ -1894,6 +1895,25 @@ def _obs_status_text() -> str:
 
 def _obs_status_poll() -> str:
     """Gradio Timer/btn target: return the current shared status text."""
+    return _obs_status_text()
+
+
+def retry_obs_detection_flow() -> str:
+    """Retry the active OBS session's last folder/archive detection flow."""
+    with _obs_watcher_lock:
+        retry_handler = _obs_retry_handler
+    if retry_handler is None:
+        _obs_append_status(
+            "再試行できるOBS連携がありません。先に「OBS連携 開始」を押してください"
+        )
+        return _obs_status_text()
+
+    try:
+        message = retry_handler()
+    except Exception as exc:
+        logger.exception("OBS detection retry failed")
+        message = f"OBS再試行エラー: {exc}"
+    _obs_append_status(message)
     return _obs_status_text()
 
 
@@ -2574,6 +2594,7 @@ def _obs_make_stream_pipeline_callbacks(
         "claimed_ids": set(),
         "processed_ids": set(),
         "recording_reservations": {},
+        "recording_candidate_epochs": {},
         "seen_record_paths": set(),
     }
 
@@ -2611,6 +2632,10 @@ def _obs_make_stream_pipeline_callbacks(
             "confirmation_decision": None,
             "processing_settings": None,
             "source_claim": None,
+            "finish_observed": False,
+            "stopped_at": None,
+            "last_recording_candidate": "",
+            "last_recording_candidate_stable": False,
         }
 
     def _on_recording_stopped(video_path: str) -> None:
@@ -2623,6 +2648,10 @@ def _obs_make_stream_pipeline_callbacks(
             event_key = (epoch, key)
             if event_key in state["seen_record_paths"]:
                 return
+            state["recording_candidate_epochs"][key] = epoch
+            while len(state["recording_candidate_epochs"]) > 128:
+                oldest_key = next(iter(state["recording_candidate_epochs"]))
+                state["recording_candidate_epochs"].pop(oldest_key, None)
             if epoch in state["completed_epochs"]:
                 state["seen_record_paths"].add(event_key)
                 _obs_append_status(
@@ -2637,10 +2666,14 @@ def _obs_make_stream_pipeline_callbacks(
                     capture_complete=True,
                 )
                 state["streams"][epoch] = stream_state
-            if (
-                stream_state.get("source_claim") == "archive"
-                or stream_state["recording_ready"].is_set()
-            ):
+            if stream_state.get("last_recording_candidate") != video_path:
+                stream_state["last_recording_candidate"] = video_path
+                stream_state["last_recording_candidate_stable"] = False
+            if stream_state.get("source_claim") == "archive":
+                # Keep the raw candidate, but let the later stability-checked
+                # finished callback promote it for a manual retry.
+                return
+            if stream_state["recording_ready"].is_set():
                 state["seen_record_paths"].add(event_key)
                 return
             state["recording_reservations"].setdefault(key, epoch)
@@ -2655,9 +2688,12 @@ def _obs_make_stream_pipeline_callbacks(
 
         key = _recording_key(video_path)
         with state_lock:
-            epoch = state["recording_reservations"].get(
+            epoch = state["recording_candidate_epochs"].pop(
                 key,
-                state["epoch"],
+                state["recording_reservations"].get(
+                    key,
+                    state["epoch"],
+                ),
             )
             event_key = (epoch, key)
             if event_key in state["seen_record_paths"]:
@@ -2678,6 +2714,8 @@ def _obs_make_stream_pipeline_callbacks(
                     capture_complete=True,
                 )
                 state["streams"][epoch] = stream_state
+            stream_state["last_recording_candidate"] = video_path
+            stream_state["last_recording_candidate_stable"] = True
             if stream_state.get("source_claim") == "archive":
                 state["seen_record_paths"].add(event_key)
                 _obs_append_status(
@@ -2837,17 +2875,18 @@ def _obs_make_stream_pipeline_callbacks(
 
         _spawn(_capture_worker)
 
-    def _on_stream_finished() -> None:
+    def _queue_stream_finished(*, observed: bool) -> None:
         if not _is_current():
             return
-        if recording_primary:
-            _obs_append_status("配信終了を検知 — OBS録画の完了を確認します")
-        else:
-            _obs_append_status("配信終了を検知 — YouTubeアーカイブを待機します")
+        if observed:
+            if recording_primary:
+                _obs_append_status("配信終了を検知 — OBS録画の完了を確認します")
+            else:
+                _obs_append_status("配信終了を検知 — YouTubeアーカイブを待機します")
         if not auto_process:
             _obs_append_status("自動処理が無効のため検知のみ記録しました")
             return
-        stopped_at = datetime.now(timezone.utc)
+        detected_stopped_at = datetime.now(timezone.utc)
         with state_lock:
             epoch = state["epoch"]
             if epoch in state["completed_epochs"]:
@@ -2856,15 +2895,25 @@ def _obs_make_stream_pipeline_callbacks(
             if epoch in state["finishing_epochs"]:
                 _obs_append_status("同じ配信終了イベントは既に処理中のためスキップしました")
                 return
-            state["finishing_epochs"].add(epoch)
             stream_state = state["streams"].get(epoch)
             if stream_state is None:
                 stream_state = _new_stream_state(
-                    stopped_at,
+                    detected_stopped_at,
                     observed_start=False,
                     capture_complete=True,
                 )
                 state["streams"][epoch] = stream_state
+            if observed:
+                stream_state["finish_observed"] = True
+                if stream_state.get("stopped_at") is None:
+                    stream_state["stopped_at"] = detected_stopped_at
+            elif not stream_state.get("finish_observed"):
+                _obs_append_status(
+                    "このOBS連携では、まだ配信終了または録画終了を検知していません"
+                )
+                return
+            stopped_at = stream_state.get("stopped_at") or detected_stopped_at
+            state["finishing_epochs"].add(epoch)
 
         def _finish_worker() -> None:
             video_id = ""
@@ -3172,6 +3221,89 @@ def _obs_make_stream_pipeline_callbacks(
 
         _spawn(_finish_worker)
 
+    def _on_stream_finished() -> None:
+        _queue_stream_finished(observed=True)
+
+    def _retry_detection_flow() -> str:
+        if not _is_current():
+            return "OBS連携設定が更新されたため、この再試行は無効です"
+        if not auto_process:
+            return (
+                "自動処理がOFFです。ONにしてOBS連携を再開始してから再試行してください"
+            )
+
+        retry_recording_path = ""
+        finish_observed = False
+        recording_already_succeeded = False
+        with state_lock:
+            epoch = state["epoch"]
+            if epoch in state["completed_epochs"]:
+                return "直近の検知対象は処理済みです"
+            if epoch in state["finishing_epochs"]:
+                return "直近の検知対象は現在処理中です"
+            stream_state = state["streams"].get(epoch)
+            if stream_state is None:
+                return "まだ配信終了を検知していないため再試行できません"
+            finish_observed = bool(stream_state.get("finish_observed"))
+
+            candidate = str(stream_state.get("last_recording_candidate") or "")
+            candidate_stable = bool(
+                stream_state.get("last_recording_candidate_stable")
+            )
+            recording_ready = stream_state["recording_ready"].is_set()
+            recording_done = stream_state["recording_done"].is_set()
+            recording_outcome = stream_state.get("recording_outcome")
+
+            if recording_primary and recording_ready and not recording_done:
+                return "OBS録画からの生成はまだ処理中です"
+
+            recording_already_succeeded = bool(
+                recording_primary
+                and recording_done
+                and recording_outcome is not None
+                and getattr(recording_outcome, "success", False)
+            )
+            can_retry_recording = bool(
+                recording_primary
+                and not recording_already_succeeded
+                and candidate
+                and candidate_stable
+                and Path(candidate).is_file()
+            )
+            if can_retry_recording:
+                retry_recording_path = candidate
+                path_key = _recording_key(candidate)
+                state["seen_record_paths"].discard((epoch, path_key))
+                state["recording_reservations"][path_key] = epoch
+                stream_state["source_claim"] = None
+                stream_state["recording_path"] = ""
+                stream_state["recording_outcome"] = None
+                stream_state["confirmation_decision"] = None
+                stream_state["processing_settings"] = None
+                stream_state["recording_ready"] = threading.Event()
+                stream_state["recording_done"] = threading.Event()
+            elif not finish_observed:
+                if recording_already_succeeded:
+                    return "直近のOBS録画は処理済みです"
+                if candidate and not candidate_stable:
+                    return "OBS録画ファイルの安定完了をまだ確認できていません"
+                return "まだ配信終了を検知していないため再試行できません"
+
+        if retry_recording_path:
+            _on_recording_finished(retry_recording_path)
+            if finish_observed:
+                _queue_stream_finished(observed=False)
+            return f"最新のOBS録画を再検出して生成を再試行します: {retry_recording_path}"
+
+        _queue_stream_finished(observed=False)
+        if recording_already_succeeded:
+            return "録画からの生成は完了済みのため、アーカイブ連携だけを再試行します"
+        if recording_primary:
+            return "安定したOBS録画がないため、検知済みの完成アーカイブを再試行します"
+        return "検知済みの完成アーカイブから生成を再試行します"
+
+    setattr(_on_stream_finished, "_retry_detection_flow", _retry_detection_flow)
+
     return (
         _on_recording_finished if recording_primary else None,
         _on_recording_stopped if recording_primary else None,
@@ -3234,6 +3366,10 @@ def _obs_make_callback(
     generation, so a stale callback never runs the pipeline with old settings.
     Callbacks built directly (generation=None, e.g. in tests) skip that gate.
     """
+    state_lock = threading.Lock()
+    inflight_paths: set[str] = set()
+    completed_paths: set[str] = set()
+
     def _is_current() -> bool:
         return generation is None or generation == _obs_generation
 
@@ -3244,6 +3380,16 @@ def _obs_make_callback(
         if not auto_process:
             _obs_append_status("自動処理が無効のため検知のみ記録しました")
             return
+
+        path_key = os.path.normcase(os.path.abspath(str(video_path)))
+        with state_lock:
+            if path_key in completed_paths:
+                _obs_append_status("同じ録画は処理済みのためスキップしました")
+                return
+            if path_key in inflight_paths:
+                _obs_append_status("同じ録画は既に処理中のためスキップしました")
+                return
+            inflight_paths.add(path_key)
 
         def _worker():
             try:
@@ -3259,12 +3405,16 @@ def _obs_make_callback(
                         _obs_append_status(
                             f"自動生成をスキップしました: {video_path}"
                         )
+                        with state_lock:
+                            completed_paths.add(path_key)
                     return
                 _obs_append_status(f"自動パイプライン開始: {video_path}")
                 outcome = _run_obs_auto_pipeline_outcome(video_path, local_settings)
                 _obs_append_status(outcome.log)
                 if not outcome.success:
                     raise RuntimeError(outcome.error or outcome.log)
+                with state_lock:
+                    completed_paths.add(path_key)
                 _obs_append_status(f"自動処理完了: {video_path}")
             except Exception as e:
                 logger.exception("OBS auto pipeline worker crashed")
@@ -3273,6 +3423,8 @@ def _obs_make_callback(
                 except Exception:
                     pass
             finally:
+                with state_lock:
+                    inflight_paths.discard(path_key)
                 _unregister_obs_worker(threading.current_thread())
 
         t = threading.Thread(target=_worker, daemon=True)
@@ -3282,12 +3434,52 @@ def _obs_make_callback(
     return _callback
 
 
+def _obs_make_active_retry_handler(
+    trigger_method: str,
+    auto_process: bool,
+    generation: int,
+    watcher,
+    archive_finished: Callable[[], None] | None,
+) -> Callable[[], str]:
+    """Bind retry behavior to one active watcher generation."""
+
+    def _is_active() -> bool:
+        with _obs_watcher_lock:
+            return generation == _obs_generation and _obs_watcher is watcher
+
+    def _retry() -> str:
+        if not _is_active():
+            return "OBS連携が停止または更新されたため再試行できません"
+        if not auto_process:
+            return (
+                "自動処理がOFFです。ONにしてOBS連携を再開始してから再試行してください"
+            )
+        if trigger_method == "folder":
+            retry_latest = getattr(watcher, "retry_latest", None)
+            if not callable(retry_latest):
+                return "このフォルダ監視では再検出を利用できません"
+            return str(retry_latest())
+
+        if archive_finished is None:
+            return "再試行できる配信終了イベントがありません"
+        retry_archive = getattr(
+            archive_finished,
+            "_retry_detection_flow",
+            archive_finished,
+        )
+        result = retry_archive()
+        return str(result or "検知済みの完成アーカイブから生成を再試行します")
+
+    return _retry
+
+
 def _stop_obs_watch_impl() -> str:
     """Stop the active watcher while the caller owns lifecycle serialization."""
-    global _obs_watcher, _obs_generation
+    global _obs_watcher, _obs_generation, _obs_retry_handler
     with _obs_watcher_lock:
         watcher = _obs_watcher
         _obs_watcher = None
+        _obs_retry_handler = None
         _obs_generation += 1
     _obs_cancel_pending_confirmation()
     if watcher is None:
@@ -3330,7 +3522,7 @@ def _start_obs_watch_impl(
     obs_processing_settings: dict | None = None,
 ) -> str:
     """Implementation shared by manual and automatic OBS connection starts."""
-    global _obs_watcher, _obs_generation
+    global _obs_watcher, _obs_generation, _obs_retry_handler
     # Stop any existing watcher first so re-clicking Start reconfigures cleanly.
     _stop_obs_watch_impl()
 
@@ -3539,6 +3731,24 @@ def _start_obs_watch_impl(
         return f"OBS連携開始エラー: {e}"
     status = watcher.status
     _obs_append_status(f"OBS連携を開始: {status}")
+    status_text = str(status)
+    status_lower = status_text.lower()
+    retry_ready = (
+        status_lower.startswith("connected")
+        or status_lower.startswith("watching")
+        or status_text.startswith("監視中")
+    )
+    if retry_ready:
+        retry_handler = _obs_make_active_retry_handler(
+            trigger_method,
+            bool(auto_process),
+            gen,
+            watcher,
+            archive_finished,
+        )
+        with _obs_watcher_lock:
+            if _obs_watcher is watcher and _obs_generation == gen:
+                _obs_retry_handler = retry_handler
     if (
         archive_started is not None
         and str(status).lower().startswith("connected")
@@ -4329,6 +4539,47 @@ APP_CSS = """
         .input-actions-column {
             margin-top: 0.5rem;
         }
+        .obs-trigger-retry-layout {
+            align-items: stretch !important;
+            gap: var(--input-workspace-gap);
+        }
+        .obs-trigger-controls,
+        .obs-retry-panel {
+            min-width: 0 !important;
+        }
+        .obs-retry-panel {
+            align-self: stretch;
+            justify-content: center;
+            padding: 1rem !important;
+            border: 1px solid color-mix(
+                in srgb,
+                var(--border-color-primary) 58%,
+                var(--primary-500) 42%
+            );
+            border-radius: 0.75rem;
+            background: color-mix(
+                in srgb,
+                var(--block-background-fill) 92%,
+                var(--primary-500) 8%
+            );
+        }
+        .obs-retry-panel h3 {
+            margin: 0 0 0.35rem !important;
+            font-size: 1rem !important;
+            line-height: 1.4 !important;
+        }
+        .obs-retry-panel p {
+            margin-bottom: 0 !important;
+            line-height: 1.55 !important;
+        }
+        .obs-retry-button button {
+            min-height: 3rem;
+            font-weight: 650;
+        }
+        .obs-retry-note {
+            opacity: 0.78;
+            font-size: 0.86rem !important;
+        }
         @media (min-width: 900px) {
             .obs-connection-workspace {
                 display: grid !important;
@@ -4348,10 +4599,21 @@ APP_CSS = """
                 grid-area: actions;
             }
         }
+        @media (min-width: 900px) and (max-width: 1499px) {
+            .obs-trigger-retry-layout {
+                flex-direction: column !important;
+            }
+            .obs-trigger-controls,
+            .obs-retry-panel {
+                flex: 1 1 auto !important;
+                width: 100% !important;
+            }
+        }
         @media (max-width: 899px) {
             .input-source-row,
             .input-settings-grid,
-            .obs-connection-workspace {
+            .obs-connection-workspace,
+            .obs-trigger-retry-layout {
                 flex-direction: column !important;
             }
             .input-url-column,
@@ -4360,6 +4622,8 @@ APP_CSS = """
             .input-shorts-settings-column,
             .input-actions-column,
             .obs-trigger-column,
+            .obs-trigger-controls,
+            .obs-retry-panel,
             .obs-connection-settings-column,
             .obs-connection-actions-column {
                 flex: 1 1 auto !important;
@@ -5095,34 +5359,67 @@ def create_ui():
                         scale=1,
                         elem_classes="obs-trigger-column",
                     ):
-                        obs_trigger_radio = gr.Radio(
-                            ["websocket", "folder"],
-                            label="検知方式 / Trigger",
-                            value=defaults.get("obs_trigger_method", "websocket"),
-                            info="websocket=OBS WebSocket, folder=フォルダ監視",
-                        )
-                        obs_stop_event_radio = gr.Radio(
-                            [
-                                (
-                                    "OBS録画優先：失敗時のみ完成アーカイブ",
-                                    "record",
-                                ),
-                                (
-                                    "YouTube完成アーカイブのみ：再エンコード後",
-                                    "stream",
-                                ),
-                            ],
-                            label="自動処理の取得元",
-                            value=defaults.get("obs_stop_event", "record"),
-                            info=(
-                                "推奨: record=OBS録画を即処理し、失敗時だけ"
-                                "完成アーカイブを使用"
-                            ),
-                        )
-                        obs_auto_process = gr.Checkbox(
-                            label="検知後に自動で切り抜き/チャプター生成まで実行",
-                            value=bool(defaults.get("obs_auto_process", True)),
-                        )
+                        with gr.Row(elem_classes="obs-trigger-retry-layout"):
+                            with gr.Column(
+                                scale=3,
+                                elem_classes="obs-trigger-controls",
+                            ):
+                                obs_trigger_radio = gr.Radio(
+                                    ["websocket", "folder"],
+                                    label="検知方式 / Trigger",
+                                    value=defaults.get(
+                                        "obs_trigger_method",
+                                        "websocket",
+                                    ),
+                                    info=(
+                                        "websocket=OBS WebSocket, "
+                                        "folder=フォルダ監視"
+                                    ),
+                                )
+                                obs_stop_event_radio = gr.Radio(
+                                    [
+                                        (
+                                            "OBS録画優先：失敗時のみ完成アーカイブ",
+                                            "record",
+                                        ),
+                                        (
+                                            "YouTube完成アーカイブのみ：再エンコード後",
+                                            "stream",
+                                        ),
+                                    ],
+                                    label="自動処理の取得元",
+                                    value=defaults.get("obs_stop_event", "record"),
+                                    info=(
+                                        "推奨: record=OBS録画を即処理し、失敗時だけ"
+                                        "完成アーカイブを使用"
+                                    ),
+                                )
+                                obs_auto_process = gr.Checkbox(
+                                    label=(
+                                        "検知後に自動で切り抜き/チャプター生成まで実行"
+                                    ),
+                                    value=bool(defaults.get("obs_auto_process", True)),
+                                )
+                            with gr.Column(
+                                scale=2,
+                                min_width=280,
+                                elem_classes="obs-retry-panel",
+                            ):
+                                gr.Markdown(
+                                    "### 検知・生成を再試行\n"
+                                    "監視中のフォルダから最新録画を再検出するか、"
+                                    "検知済みの完成アーカイブでもう一度生成します。"
+                                )
+                                obs_retry_btn = gr.Button(
+                                    "録画 / アーカイブを再検知して再試行",
+                                    variant="secondary",
+                                    elem_classes="obs-retry-button",
+                                )
+                                gr.Markdown(
+                                    "OBS連携中の設定をそのまま使用します。"
+                                    "処理中・処理済みの対象は二重実行しません。",
+                                    elem_classes="obs-retry-note",
+                                )
                     with gr.Column(
                         scale=1,
                         elem_classes="obs-connection-settings-column",
@@ -6045,6 +6342,12 @@ def create_ui():
             fn=_obs_status_poll,
             inputs=[],
             outputs=obs_status_box,
+        )
+        obs_retry_btn.click(
+            fn=retry_obs_detection_flow,
+            inputs=[],
+            outputs=obs_status_box,
+            concurrency_limit=1,
         )
         obs_refresh_btn.click(
             fn=_obs_confirmation_poll,
