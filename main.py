@@ -85,12 +85,12 @@ def main():
     parser.add_argument(
         "--install-audio-pack",
         action="store_true",
-        help="検証済みCC0 BGM/SE素材を明示的にダウンロードして終了",
+        help="検証済み日本語ショート向けBGM/SE素材を明示的にダウンロードして終了",
     )
     parser.add_argument(
         "--audio-pack-status",
         action="store_true",
-        help="CC0 BGM/SE素材パックの導入状態を表示して終了",
+        help="日本語ショート向けBGM/SE素材パックの導入状態を表示して終了",
     )
     parser.add_argument(
         "--list-audio-assets",
@@ -149,9 +149,10 @@ def main():
             print(kind.upper())
             for asset in list_catalog_assets():
                 if asset.kind == kind:
+                    credit_note = ", 要クレジット" if asset.attribution_required else ""
                     print(
                         f"  {asset.id}: {asset.label} "
-                        f"({asset.creator}, {asset.license_id})"
+                        f"({asset.creator}, {asset.license_id}{credit_note})"
                     )
         sys.exit(0)
     if args.audio_pack_status:

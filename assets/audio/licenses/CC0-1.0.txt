@@ -1,9 +1,10 @@
 CC0 1.0 Universal
 =================
 
-The audio files in the cc0-starter pack are identified by their source pages
-as released under the Creative Commons CC0 1.0 Universal public-domain
-dedication.
+The CC0 audio files in the short-video-starter pack are identified by their
+source pages as released under the Creative Commons CC0 1.0 Universal
+public-domain dedication. Other files in this pack can use a different
+license; see SOURCES.md and the installed manifest for each asset.
 
 Official summary:
 https://creativecommons.org/publicdomain/zero/1.0/

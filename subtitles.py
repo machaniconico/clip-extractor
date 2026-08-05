@@ -18,6 +18,47 @@ from transcriber import Segment
 _SHORT_TITLE_DURATION_SEC = 4.0
 
 
+def _plan_unique_sidecar_paths(
+    highlights: list[dict],
+    output_dir: Path,
+    *,
+    shorts: bool,
+    asset_suffix: str,
+    extension: str,
+    include_title: bool = True,
+) -> list[Path]:
+    """Plan deterministic, Windows-safe sidecar paths for one output batch."""
+    paths: list[Path] = []
+    used_names: set[str] = set()
+
+    for highlight in highlights:
+        range_str = format_time_range(
+            highlight["start_sec"],
+            highlight["end_sec"],
+        )
+        title = highlight.get("title", "") if include_title else ""
+        collision_index = 1
+        while True:
+            duplicate_suffix = (
+                "" if collision_index == 1 else f"_dup{collision_index:02d}"
+            )
+            name = _build_clip_filename(
+                range_str,
+                title,
+                shorts,
+                asset_suffix=f"{duplicate_suffix}{asset_suffix}",
+                extension=extension,
+            )
+            folded_name = name.casefold()
+            if folded_name not in used_names:
+                used_names.add(folded_name)
+                paths.append(output_dir / name)
+                break
+            collision_index += 1
+
+    return paths
+
+
 def generate_srt(
     segments: list[Segment],
     clip_start: float,
@@ -54,20 +95,15 @@ def generate_all_srts(
     shorts: bool = False,
 ) -> list[Path]:
     """Generate SRT files for all clips."""
-    srt_paths = []
-    for h in highlights:
-        range_str = format_time_range(h["start_sec"], h["end_sec"])
-        asset_suffix = "_archive" if shorts else ""
-        srt_name = _build_clip_filename(
-            range_str,
-            h.get("title", ""),
-            shorts,
-            asset_suffix=asset_suffix,
-            extension=".srt",
-        )
-        srt_path = output_dir / srt_name
+    srt_paths = _plan_unique_sidecar_paths(
+        highlights,
+        output_dir,
+        shorts=shorts,
+        asset_suffix="_archive" if shorts else "",
+        extension=".srt",
+    )
+    for h, srt_path in zip(highlights, srt_paths):
         generate_srt(segments, h["start_sec"], h["end_sec"], srt_path)
-        srt_paths.append(srt_path)
     return srt_paths
 
 
@@ -96,26 +132,19 @@ def generate_all_short_title_srts(
     output_dir: Path,
 ) -> list[Path]:
     """Generate one independently editable title SRT for every Short."""
-    title_srt_paths: list[Path] = []
-    for highlight in highlights:
-        range_str = format_time_range(
-            highlight["start_sec"],
-            highlight["end_sec"],
-        )
-        srt_name = _build_clip_filename(
-            range_str,
-            highlight.get("title", ""),
-            True,
-            asset_suffix="_title",
-            extension=".srt",
-        )
-        srt_path = output_dir / srt_name
+    title_srt_paths = _plan_unique_sidecar_paths(
+        highlights,
+        output_dir,
+        shorts=True,
+        asset_suffix="_title",
+        extension=".srt",
+    )
+    for highlight, srt_path in zip(highlights, title_srt_paths):
         generate_short_title_srt(
             highlight.get("title", ""),
             float(highlight["end_sec"]) - float(highlight["start_sec"]),
             srt_path,
         )
-        title_srt_paths.append(srt_path)
     return title_srt_paths
 
 
@@ -182,12 +211,16 @@ def generate_all_karaoke_ass(
     font_config,
 ) -> list[Path]:
     """Generate ASS karaoke subtitle files for all clips."""
-    ass_paths = []
-    for h in highlights:
-        range_str = format_time_range(h["start_sec"], h["end_sec"])
-        ass_path = output_dir / f"{range_str}.ass"
+    ass_paths = _plan_unique_sidecar_paths(
+        highlights,
+        output_dir,
+        shorts=False,
+        asset_suffix="",
+        extension=".ass",
+        include_title=False,
+    )
+    for h, ass_path in zip(highlights, ass_paths):
         generate_karaoke_ass(segments, h["start_sec"], h["end_sec"], ass_path, font_config)
-        ass_paths.append(ass_path)
     return ass_paths
 
 

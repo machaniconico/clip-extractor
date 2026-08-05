@@ -56,6 +56,18 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         bgm_gain_db=-18.0,
         se_gain_db=-8.0,
         se_cue_seconds=0.0,
+        bgm_user_folder="",
+        se_user_folder="",
+        vfx_user_folder="",
+        vfx_asset_id="",
+        effect_preset="none",
+        vfx_automatic=False,
+        vfx_cue_seconds=0.0,
+        vfx_duration_seconds=1.0,
+        vfx_anchor="center",
+        vfx_scale_percent=100.0,
+        vfx_opacity_percent=100.0,
+        vfx_target="both",
     )
     args.update(overrides)
 
@@ -85,6 +97,18 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         args["bgm_gain_db"],
         args["se_gain_db"],
         args["se_cue_seconds"],
+        args["bgm_user_folder"],
+        args["se_user_folder"],
+        args["vfx_user_folder"],
+        args["vfx_asset_id"],
+        args["effect_preset"],
+        args["vfx_automatic"],
+        args["vfx_cue_seconds"],
+        args["vfx_duration_seconds"],
+        args["vfx_anchor"],
+        args["vfx_scale_percent"],
+        args["vfx_opacity_percent"],
+        args["vfx_target"],
     )
     assert settings_file.exists(), "save_defaults should write SETTINGS_FILE"
     return web_app.load_defaults()
@@ -125,6 +149,38 @@ def test_roundtrip_audio_delivery_fields(monkeypatch, tmp_path):
     assert loaded["bgm_gain_db"] == -21
     assert loaded["se_gain_db"] == -7
     assert loaded["se_cue_seconds"] == 1.25
+
+
+def test_roundtrip_user_media_and_vfx_fields(monkeypatch, tmp_path):
+    loaded = _save_with(
+        monkeypatch,
+        tmp_path,
+        bgm_user_folder="D:/Media/BGM",
+        se_user_folder="D:/Media/SE",
+        vfx_user_folder="D:/Media/VFX",
+        vfx_asset_id="user:vfx:" + ("a" * 64),
+        effect_preset="punch",
+        vfx_automatic=True,
+        vfx_cue_seconds=1.25,
+        vfx_duration_seconds=2.5,
+        vfx_anchor="bottom-right",
+        vfx_scale_percent=65,
+        vfx_opacity_percent=80,
+        vfx_target="shorts",
+    )
+
+    assert loaded["bgm_user_folder"] == "D:/Media/BGM"
+    assert loaded["se_user_folder"] == "D:/Media/SE"
+    assert loaded["vfx_user_folder"] == "D:/Media/VFX"
+    assert loaded["vfx_asset_id"] == "user:vfx:" + ("a" * 64)
+    assert loaded["effect_preset"] == "punch"
+    assert loaded["vfx_automatic"] is True
+    assert loaded["vfx_cue_seconds"] == 1.25
+    assert loaded["vfx_duration_seconds"] == 2.5
+    assert loaded["vfx_anchor"] == "bottom-right"
+    assert loaded["vfx_scale_percent"] == 65
+    assert loaded["vfx_opacity_percent"] == 80
+    assert loaded["vfx_target"] == "shorts"
 
 
 def test_obs_processing_profile_is_separate_from_archive_defaults(

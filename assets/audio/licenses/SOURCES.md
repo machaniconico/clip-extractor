@@ -1,4 +1,4 @@
-# CC0 starter pack sources
+# Short-video starter pack sources
 
 The installer verifies every downloaded source and selected file against the
 byte size and SHA-256 stored in `catalog.json`. The installed `manifest.json`
@@ -21,8 +21,37 @@ archives. No audio modification is performed during installation.
 The four selected OGG files are downloaded byte-for-byte from the files linked
 on that source page. No audio modification is performed during installation.
 
-## License
+## Japanese short-video material
 
-All selected files are marked CC0 1.0 on their source pages. Attribution is
-not required, but retaining provenance is recommended:
+OtoLogic (https://otologic.jp/) provides the following selected files under
+CC BY 4.0. Each is extracted byte-for-byte from the ZIP linked on its official
+material page:
+
+- Camera Motion 11, short Whoosh:
+  https://otologic.jp/free/se/camera-motion01.html
+- Quiz Ding Dong 05, fast/short correct answer:
+  https://otologic.jp/free/se/quiz01.html
+- Quiz Buzzer 05, short wrong answer:
+  https://otologic.jp/free/se/quiz01.html
+- Short Accent 06, dry pop transition:
+  https://otologic.jp/free/se/short-accent01.html
+- `bo-tto hidamari-Narr`, bright narration-friendly BGM:
+  https://otologic.jp/free/bgm/pop-music01.html
+
+OtoLogic license and FAQ:
+
+- https://otologic.jp/free/license.html
+- https://otologic.jp/free/faq.html
+
+## Licenses
+
+The Kenney and OpenGameArt files are marked CC0 1.0 on their source pages.
+Attribution is not required, but retaining provenance is recommended:
 https://creativecommons.org/publicdomain/zero/1.0/
+
+The OtoLogic files are CC BY 4.0 and require this publication credit:
+
+> 音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0
+
+See `OtoLogic-CC-BY-4.0.md` for the full pack notice and official legal-code
+link.

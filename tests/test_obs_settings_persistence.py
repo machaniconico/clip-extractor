@@ -4,6 +4,7 @@ import ast
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,107 @@ class _FakeWatcher:
 
     def stop(self):
         self.status = "stopped"
+
+
+def test_obs_render_settings_reload_latest_media_and_clear_stale_in_memory(
+    monkeypatch,
+):
+    bgm_id = "user:bgm:" + ("a" * 64)
+    stale_vfx_id = "user:vfx:" + ("b" * 64)
+    monkeypatch.setattr(
+        web_app,
+        "load_defaults",
+        lambda: {
+            "bgm_asset_id": bgm_id,
+            "bgm_user_folder": "D:/media/bgm",
+            "se_asset_id": "se-missing-pack",
+            "vfx_asset_id": stale_vfx_id,
+            "vfx_user_folder": "D:/media/vfx",
+            "vfx_automatic": True,
+            "vfx_anchor": "bottom-right",
+        },
+    )
+
+    def resolve(_folder, _asset_id, kind):
+        if kind == "bgm":
+            return SimpleNamespace(kind="bgm")
+        raise web_app.UserMediaError("missing")
+
+    monkeypatch.setattr(web_app, "resolve_user_media_asset", resolve)
+    monkeypatch.setattr(web_app, "scan_optional_user_media", lambda *_args: ())
+    monkeypatch.setattr(
+        web_app,
+        "get_installed_asset",
+        lambda _asset_id: (_ for _ in ()).throw(
+            web_app.AudioAssetError("pack missing")
+        ),
+    )
+    statuses = []
+    monkeypatch.setattr(web_app, "_obs_append_status", statuses.append)
+
+    refreshed = web_app._obs_settings_for_render(
+        {
+            "num_clips": 12,
+            "bgm_asset_id": "old",
+            web_app._OBS_RELOAD_MEDIA_DEFAULTS_KEY: True,
+        }
+    )
+
+    assert refreshed["num_clips"] == 12
+    assert refreshed["bgm_asset_id"] == bgm_id
+    assert refreshed["se_asset_id"] == ""
+    assert refreshed["vfx_asset_id"] == ""
+    assert refreshed["vfx_automatic"] is True
+    assert refreshed["vfx_anchor"] == "bottom-right"
+    assert web_app._OBS_RELOAD_MEDIA_DEFAULTS_KEY not in refreshed
+    assert any("SE素材" in message for message in statuses)
+    assert any("VFX素材" in message for message in statuses)
+
+
+def test_obs_render_settings_auto_vfx_missing_folder_uses_builtin_effects(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        web_app,
+        "load_defaults",
+        lambda: {
+            "vfx_user_folder": "D:/removed/vfx",
+            "vfx_asset_id": "",
+            "vfx_automatic": True,
+            "effect_preset": "none",
+        },
+    )
+    monkeypatch.setattr(
+        web_app,
+        "scan_optional_user_media",
+        lambda *_args: (_ for _ in ()).throw(
+            web_app.UserMediaError("folder was removed")
+        ),
+    )
+    statuses = []
+    monkeypatch.setattr(web_app, "_obs_append_status", statuses.append)
+
+    refreshed = web_app._obs_settings_for_render(
+        {web_app._OBS_RELOAD_MEDIA_DEFAULTS_KEY: True}
+    )
+
+    assert refreshed["vfx_automatic"] is True
+    assert refreshed["vfx_user_folder"] == ""
+    assert refreshed["vfx_asset_id"] == ""
+    assert any("内蔵エフェクトのみ" in message for message in statuses)
+
+
+def test_obs_render_settings_without_reload_marker_preserve_direct_call(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        web_app,
+        "load_defaults",
+        lambda: pytest.fail("direct compatibility calls must not reload defaults"),
+    )
+    original = {"bgm_asset_id": "direct", "num_clips": 3}
+
+    assert web_app._obs_settings_for_render(original) == original
 
 
 def test_start_obs_watch_persists_password_for_next_launch(monkeypatch, tmp_path):

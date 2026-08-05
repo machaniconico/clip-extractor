@@ -1,17 +1,92 @@
 """Video clip extraction using FFmpeg."""
 
 import logging
+import os
 import re
+import shutil
 import subprocess
+import tempfile
 import unicodedata
+import uuid
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
+
+from user_media import UserMediaAsset, validate_user_media
+
+from video_effects import (
+    ClipEffectPlan,
+    EffectPreset,
+    VfxAnchor,
+    VfxOptions,
+    has_owned_effects_manifest,
+    prepare_vfx_assets,
+    resolve_clip_effect_plan,
+    validate_effects_manifest_target,
+    write_effects_manifest,
+)
 
 if TYPE_CHECKING:
     from config import FontConfig
 
 logger = logging.getLogger(__name__)
+
+
+class _VfxBatchTransaction:
+    """Restore the previous clip set if an effect batch fails part-way."""
+
+    def __init__(self, output_dir: Path, output_paths: Sequence[Path]) -> None:
+        self.output_dir = output_dir.resolve()
+        self.output_paths = tuple(path.resolve() for path in output_paths)
+        self.backup_dir: Path | None = None
+        self.backups: list[tuple[Path, Path]] = []
+        self.preexisting: set[Path] = set()
+
+    def begin(self) -> None:
+        self.backup_dir = Path(
+            tempfile.mkdtemp(prefix=".vfx-batch-", dir=str(self.output_dir))
+        )
+        try:
+            for index, output in enumerate(self.output_paths):
+                if output.parent != self.output_dir:
+                    raise ValueError(f"VFX output is outside its batch folder: {output}")
+                if output.is_symlink():
+                    raise ValueError(f"VFX output cannot replace a link: {output}")
+                if not output.exists():
+                    continue
+                if not output.is_file():
+                    raise ValueError(f"VFX output target is not a file: {output}")
+                backup = self.backup_dir / f"{index:04d}{output.suffix}"
+                shutil.copy2(output, backup)
+                self.backups.append((backup, output))
+                self.preexisting.add(output)
+        except BaseException:
+            self._discard_backups()
+            raise
+
+    def rollback(self) -> None:
+        for output in self.output_paths:
+            if output not in self.preexisting:
+                output.unlink(missing_ok=True)
+        for backup, output in reversed(self.backups):
+            if backup.exists():
+                os.replace(backup, output)
+        self._discard_backups()
+
+    def complete(self) -> None:
+        self._discard_backups()
+
+    def _discard_backups(self) -> None:
+        if self.backup_dir is None:
+            return
+        for backup, _output in self.backups:
+            backup.unlink(missing_ok=True)
+        try:
+            self.backup_dir.rmdir()
+        except FileNotFoundError:
+            pass
+        self.backup_dir = None
+        self.backups.clear()
 
 _SHORTS_PAD_FILTER = (
     "scale=1080:1920:force_original_aspect_ratio=decrease,"
@@ -42,6 +117,7 @@ _TITLE_Y_BY_POSITION = {
     "overlay": "(h-text_h)/2",
 }
 _WINDOWS_FILENAME_MAX_UTF16_UNITS = 255
+_POSIX_FILENAME_MAX_UTF8_BYTES = 255
 _ZERO_WIDTH_JOINER = "\u200d"
 _EMOJI_VARIATION_SELECTOR = "\ufe0f"
 _JAPANESE_FONT_KEYWORDS = (
@@ -242,6 +318,153 @@ def _shorts_base_vf(
         return _shorts_blur_filter(blur_strength)
     logger.warning("Unknown shorts_mode=%r; falling back to pad", mode)
     return _SHORTS_PAD_FILTER
+
+
+def _effect_overlay_position(anchor: VfxAnchor) -> tuple[str, str]:
+    horizontal = {
+        VfxAnchor.TOP_LEFT: "W*0.04",
+        VfxAnchor.LEFT: "W*0.04",
+        VfxAnchor.BOTTOM_LEFT: "W*0.04",
+        VfxAnchor.TOP: "(W-w)/2",
+        VfxAnchor.CENTER: "(W-w)/2",
+        VfxAnchor.BOTTOM: "(W-w)/2",
+        VfxAnchor.TOP_RIGHT: "W-w-W*0.04",
+        VfxAnchor.RIGHT: "W-w-W*0.04",
+        VfxAnchor.BOTTOM_RIGHT: "W-w-W*0.04",
+    }
+    vertical = {
+        VfxAnchor.TOP_LEFT: "H*0.06",
+        VfxAnchor.TOP: "H*0.06",
+        VfxAnchor.TOP_RIGHT: "H*0.06",
+        VfxAnchor.LEFT: "(H-h)/2",
+        VfxAnchor.CENTER: "(H-h)/2",
+        VfxAnchor.RIGHT: "(H-h)/2",
+        VfxAnchor.BOTTOM_LEFT: "H-h-H*0.06",
+        VfxAnchor.BOTTOM: "H-h-H*0.06",
+        VfxAnchor.BOTTOM_RIGHT: "H-h-H*0.06",
+    }
+    return horizontal[anchor], vertical[anchor]
+
+
+def _between_expr(start: float, end: float) -> str:
+    return (
+        "between(t\\,"
+        f"{_format_style_number(start)}\\,{_format_style_number(end)})"
+    )
+
+
+def _complex_effect_graph(
+    plan: ClipEffectPlan,
+    clip_duration: float,
+    *,
+    shorts: bool,
+    shorts_mode: str,
+    crop_x: str,
+    shorts_blur_strength,
+    post_filters: list[str],
+) -> str:
+    """Build the one-pass graph used only when an effect plan is enabled."""
+
+    segments: list[str] = []
+    if shorts and shorts_mode == "blur":
+        strength = _format_style_number(
+            _coerce_shorts_blur_strength(shorts_blur_strength)
+        )
+        segments.extend(
+            [
+                "[0:v:0]setpts=PTS-STARTPTS,split=2[vfx_bg][vfx_fg]",
+                "[vfx_bg]scale=1080:1920:force_original_aspect_ratio=increase,"
+                f"crop=1080:1920,boxblur={strength}[vfx_bgblur]",
+                "[vfx_fg]scale=1080:1920:force_original_aspect_ratio=decrease"
+                "[vfx_fgscaled]",
+                "[vfx_bgblur][vfx_fgscaled]overlay=(W-w)/2:(H-h)/2[scene0]",
+            ]
+        )
+    elif shorts:
+        base_filter = _shorts_base_vf(
+            shorts_mode,
+            crop_x,
+            shorts_blur_strength,
+        )
+        segments.append(f"[0:v:0]setpts=PTS-STARTPTS,{base_filter}[scene0]")
+    else:
+        segments.append("[0:v:0]setpts=PTS-STARTPTS[scene0]")
+
+    current = "scene0"
+    if plan.effect_preset is EffectPreset.PUNCH:
+        punch_end = min(
+            clip_duration,
+            plan.cue_seconds + min(0.2, plan.duration_seconds),
+        )
+        enabled = _between_expr(plan.cue_seconds, punch_end)
+        segments.extend(
+            [
+                f"[{current}]split=2[punchbase][punchsrc]",
+                "[punchsrc]scale=iw*1.08:ih*1.08:flags=bicubic,"
+                "crop=iw/1.08:ih/1.08:(iw-ow)/2:(ih-oh)/2[punchzoom]",
+                "[punchbase][punchzoom]overlay=x=0:y=0:eof_action=pass:"
+                f"repeatlast=0:enable='{enabled}'[effectout]",
+            ]
+        )
+        current = "effectout"
+    elif plan.effect_preset is EffectPreset.FLASH:
+        flash_end = min(
+            clip_duration,
+            plan.cue_seconds + min(0.16, plan.duration_seconds),
+        )
+        enabled = _between_expr(plan.cue_seconds, flash_end)
+        segments.append(
+            f"[{current}]drawbox=x=0:y=0:w=iw:h=ih:color=white@0.35:"
+            f"t=fill:enable='{enabled}'[effectout]"
+        )
+        current = "effectout"
+
+    if plan.asset is not None:
+        cue = plan.cue_seconds
+        end = min(clip_duration, cue + plan.duration_seconds)
+        visible_duration = max(0.001, end - cue)
+        scale = plan.scale_percent / 100.0
+        opacity = plan.opacity_percent / 100.0
+        alpha_fade = min(0.12, visible_duration / 2.0)
+        fade_out_start = max(0.0, visible_duration - alpha_fade)
+        x_expr, y_expr = _effect_overlay_position(plan.anchor)
+        enabled = _between_expr(cue, end)
+        segments.extend(
+            [
+                "[1:v:0]setpts=PTS-STARTPTS,"
+                f"scale=iw*{_format_style_number(scale)}:"
+                f"ih*{_format_style_number(scale)}:flags=lanczos,"
+                "format=rgba,"
+                f"colorchannelmixer=aa={_format_style_number(opacity)},"
+                f"trim=duration={_format_style_number(visible_duration)},"
+                f"fade=t=in:st=0:d={_format_style_number(alpha_fade)}:alpha=1,"
+                f"fade=t=out:st={_format_style_number(fade_out_start)}:"
+                f"d={_format_style_number(alpha_fade)}:alpha=1,"
+                f"setpts=PTS-STARTPTS+{_format_style_number(cue)}/TB[vfxtimed]",
+                f"[{current}][vfxtimed]overlay=x={x_expr}:y={y_expr}:"
+                "eof_action=pass:repeatlast=0:"
+                f"enable='{enabled}'[vfxout]",
+            ]
+        )
+        current = "vfxout"
+
+    for index, filter_text in enumerate(post_filters):
+        output_label = f"post{index}"
+        segments.append(f"[{current}]{filter_text}[{output_label}]")
+        current = output_label
+    if plan.effect_preset is EffectPreset.FADE:
+        # Fade the completed frame, including VFX, title, and subtitles.  A
+        # scene-only fade would leave overlays visible over a black frame.
+        fade_duration = min(0.25, clip_duration / 2.0)
+        fade_out_start = max(0.0, clip_duration - fade_duration)
+        segments.append(
+            f"[{current}]fade=t=in:st=0:d={_format_style_number(fade_duration)},"
+            f"fade=t=out:st={_format_style_number(fade_out_start)}:"
+            f"d={_format_style_number(fade_duration)}[effectout]"
+        )
+        current = "effectout"
+    segments.append(f"[{current}]format=yuv420p[vout]")
+    return ";".join(segments)
 
 
 def _title_char_width(ch: str) -> int:
@@ -757,11 +980,12 @@ def extract_clip(
     ass_path: Path | None = None,
     shorts_blur_strength=_DEFAULT_SHORTS_BLUR_STRENGTH,
     shorts_title_position: str = "top",
+    effect_plan: ClipEffectPlan | None = None,
 ) -> Path:
     """Extract a clip from the video."""
     duration = end_sec - start_sec
 
-    cmd = [
+    legacy_cmd = [
         "ffmpeg", "-y",
         "-ss", str(start_sec),
         "-i", str(video_path),
@@ -770,7 +994,7 @@ def extract_clip(
         "-c:a", "aac", "-b:a", "192k",
     ]
 
-    vf_filters = []
+    vf_filters: list[str] = []
     if shorts:
         vf_filters.append(
             _shorts_base_vf(shorts_mode, crop_x, shorts_blur_strength)
@@ -787,11 +1011,96 @@ def extract_clip(
         vf_filters.append(_build_ass_subtitles_filter(ass_path))
     elif shorts and srt_path is not None and font_config is not None:
         vf_filters.append(_build_subtitles_filter(srt_path, font_config))
-    if vf_filters:
-        cmd.extend(["-vf", ",".join(vf_filters)])
+    if effect_plan is not None and not isinstance(effect_plan, ClipEffectPlan):
+        raise TypeError("effect_plan must be a ClipEffectPlan")
+    use_complex_effects = effect_plan is not None and effect_plan.enabled
+    if use_complex_effects:
+        if effect_plan.asset is not None:
+            validated_asset = validate_user_media(effect_plan.asset)
+            if isinstance(validated_asset, UserMediaAsset):
+                effect_plan = ClipEffectPlan(
+                    asset=validated_asset,
+                    effect_preset=effect_plan.effect_preset,
+                    cue_seconds=effect_plan.cue_seconds,
+                    duration_seconds=effect_plan.duration_seconds,
+                    anchor=effect_plan.anchor,
+                    scale_percent=effect_plan.scale_percent,
+                    opacity_percent=effect_plan.opacity_percent,
+                )
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", str(start_sec),
+            "-i", str(video_path),
+        ]
+        if effect_plan.asset is not None:
+            suffix = effect_plan.asset.path.suffix.lower()
+            if suffix == ".png":
+                cmd.extend(["-loop", "1", "-framerate", "30"])
+            elif suffix == ".webm":
+                cmd.extend(["-stream_loop", "-1"])
+                if effect_plan.asset.video_has_alpha:
+                    decoder = {
+                        "vp9": "libvpx-vp9",
+                        "vp8": "libvpx",
+                    }.get(effect_plan.asset.video_codec)
+                    if decoder:
+                        cmd.extend(["-c:v", decoder])
+            else:
+                raise ValueError(f"Unsupported VFX file type: {suffix}")
+            cmd.extend(["-i", str(effect_plan.asset.path)])
 
-    cmd.append(str(output_path))
-    subprocess.run(cmd, capture_output=True, check=True)
+        post_filters = []
+        if shorts and shorts_title and title:
+            post_filters.append(
+                _build_title_drawtext(
+                    title,
+                    font_config or _DefaultTitleFontConfig(),
+                    shorts_title_position,
+                )
+            )
+        if shorts and karaoke and ass_path is not None:
+            post_filters.append(_build_ass_subtitles_filter(ass_path))
+        elif shorts and srt_path is not None and font_config is not None:
+            post_filters.append(_build_subtitles_filter(srt_path, font_config))
+        graph = _complex_effect_graph(
+            effect_plan,
+            duration,
+            shorts=shorts,
+            shorts_mode=shorts_mode,
+            crop_x=crop_x,
+            shorts_blur_strength=shorts_blur_strength,
+            post_filters=post_filters,
+        )
+        cmd.extend(
+            [
+                "-t", str(duration),
+                "-filter_complex", graph,
+                "-map", "[vout]",
+                "-map", "0:a:0?",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                "-c:a", "aac", "-b:a", "192k",
+            ]
+        )
+    else:
+        cmd = legacy_cmd
+        if vf_filters:
+            cmd.extend(["-vf", ",".join(vf_filters)])
+
+    if use_complex_effects:
+        temporary_output = output_path.with_name(
+            f".{output_path.stem}.vfx-{uuid.uuid4().hex}{output_path.suffix or '.mp4'}"
+        )
+        cmd.append(str(temporary_output))
+        try:
+            subprocess.run(cmd, capture_output=True, check=True)
+            if not temporary_output.is_file():
+                raise RuntimeError("FFmpeg did not create the temporary VFX output")
+            os.replace(temporary_output, output_path)
+        finally:
+            temporary_output.unlink(missing_ok=True)
+    else:
+        cmd.append(str(output_path))
+        subprocess.run(cmd, capture_output=True, check=True)
     return output_path
 
 
@@ -855,12 +1164,14 @@ def generate_thumbnail(
 
 
 def format_time_range(start_sec: float, end_sec: float) -> str:
-    """Format time range as HHhMMmSSs-HHhMMmSSs for filenames."""
+    """Format a filename-safe range, retaining milliseconds when present."""
     def fmt(sec: float) -> str:
-        h = int(sec // 3600)
-        m = int((sec % 3600) // 60)
-        s = int(sec % 60)
-        return f"{h:02d}h{m:02d}m{s:02d}s"
+        total_ms = max(0, int(round(float(sec) * 1000)))
+        h, remainder = divmod(total_ms, 3_600_000)
+        m, remainder = divmod(remainder, 60_000)
+        s, milliseconds = divmod(remainder, 1000)
+        suffix = f"{milliseconds:03d}ms" if milliseconds else ""
+        return f"{h:02d}h{m:02d}m{s:02d}s{suffix}"
     return f"{fmt(start_sec)}-{fmt(end_sec)}"
 
 
@@ -877,16 +1188,26 @@ def _utf16_units(value: str) -> int:
     return len(value.encode("utf-16-le")) // 2
 
 
-def _truncate_title_utf16(title: str, max_units: int) -> str:
-    """Trim a title without splitting emoji/grapheme clusters."""
+def _truncate_title_for_filename(
+    title: str,
+    max_utf16_units: int,
+    max_utf8_bytes: int,
+) -> str:
+    """Trim a title to Windows and POSIX component limits by grapheme."""
     kept: list[str] = []
     used_units = 0
+    used_bytes = 0
     for cluster in _title_grapheme_clusters(title):
         cluster_units = _utf16_units(cluster)
-        if used_units + cluster_units > max_units:
+        cluster_bytes = len(cluster.encode("utf-8"))
+        if (
+            used_units + cluster_units > max_utf16_units
+            or used_bytes + cluster_bytes > max_utf8_bytes
+        ):
             break
         kept.append(cluster)
         used_units += cluster_units
+        used_bytes += cluster_bytes
     return "".join(kept).rstrip(" ._")
 
 
@@ -908,7 +1229,15 @@ def _build_clip_filename(
             0,
             _WINDOWS_FILENAME_MAX_UTF16_UNITS - _utf16_units(fixed_parts),
         )
-        safe_title = _truncate_title_utf16(safe_title, available_units)
+        available_bytes = max(
+            0,
+            _POSIX_FILENAME_MAX_UTF8_BYTES - len(fixed_parts.encode("utf-8")),
+        )
+        safe_title = _truncate_title_for_filename(
+            safe_title,
+            available_units,
+            available_bytes,
+        )
     title_suffix = f"_{safe_title}" if safe_title else ""
     return f"{range_str}{title_suffix}{suffix}{asset_suffix}{extension}"
 
@@ -926,17 +1255,38 @@ def generate_thumbnails(
     font_config: "FontConfig | None" = None,
     img_format: str = "png",
     strategy: str = "midpoint",
+    protected_source_paths: Sequence[str | os.PathLike[str]] = (),
 ) -> list[Path]:
     """Generate thumbnail candidate images for all highlights."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     thumbnail_paths: list[Path] = []
     ext = (img_format or "png").strip().lower().lstrip(".") or "png"
+    protected = tuple(
+        Path(path).expanduser().resolve()
+        for path in protected_source_paths
+    )
+    used_names: set[str] = set()
 
-    for i, h in enumerate(highlights, 1):
+    for h in highlights:
         range_str = format_time_range(h["start_sec"], h["end_sec"])
-        thumbnail_path = output_dir / f"{range_str}_thumb.{ext}"
+        name = f"{range_str}_thumb.{ext}"
+        collision_index = 2
+        while name.casefold() in used_names:
+            name = f"{range_str}_thumb_dup{collision_index:02d}.{ext}"
+            collision_index += 1
+        used_names.add(name.casefold())
+        candidate = output_dir / name
+        if any(_same_file_target(candidate, source) for source in protected):
+            raise ValueError(
+                f"Thumbnail output would overwrite a selected VFX source: {candidate}"
+            )
+        thumbnail_paths.append(candidate)
 
+    for i, (h, thumbnail_path) in enumerate(
+        zip(highlights, thumbnail_paths),
+        1,
+    ):
         print(f"Generating thumbnail {i}/{len(highlights)}: {h.get('title', '')}...")
         generate_thumbnail(
             video_path,
@@ -952,9 +1302,18 @@ def generate_thumbnails(
             font_config=font_config,
             strategy=strategy,
         )
-        thumbnail_paths.append(thumbnail_path)
-
     return thumbnail_paths
+
+
+def _same_file_target(candidate: Path, source: Path) -> bool:
+    if candidate.resolve() == source.resolve():
+        return True
+    if candidate.exists() and source.exists():
+        try:
+            return os.path.samefile(candidate, source)
+        except OSError:
+            return False
+    return False
 
 
 def extract_clips(
@@ -971,39 +1330,114 @@ def extract_clips(
     ass_paths: list[Path] | None = None,
     shorts_blur_strength=_DEFAULT_SHORTS_BLUR_STRENGTH,
     shorts_title_position: str = "top",
+    vfx_options: VfxOptions | None = None,
+    prepared_vfx_assets: Sequence[UserMediaAsset] | None = None,
 ) -> list[Path]:
     """Extract all highlight clips."""
     output_dir.mkdir(parents=True, exist_ok=True)
     clip_paths = []
-
-    for i, h in enumerate(highlights, 1):
+    options = vfx_options or VfxOptions()
+    if not isinstance(options, VfxOptions):
+        raise TypeError("vfx_options must be a VfxOptions")
+    if prepared_vfx_assets is not None:
+        if any(not isinstance(asset, UserMediaAsset) for asset in prepared_vfx_assets):
+            raise TypeError("prepared_vfx_assets must contain UserMediaAsset values")
+        vfx_assets = tuple(prepared_vfx_assets)
+    elif options.applies_to(shorts=shorts):
+        vfx_assets = prepare_vfx_assets(options)
+    else:
+        vfx_assets = ()
+    planned_paths: list[Path] = []
+    used_names: set[str] = set()
+    for h in highlights:
         range_str = format_time_range(h["start_sec"], h["end_sec"])
         clip_name = _build_clip_filename(range_str, h.get("title", ""), shorts)
-        clip_path = output_dir / clip_name
+        collision_index = 2
+        while clip_name.casefold() in used_names:
+            clip_name = _build_clip_filename(
+                range_str,
+                h.get("title", ""),
+                shorts,
+                asset_suffix=f"_dup{collision_index:02d}",
+            )
+            collision_index += 1
+        used_names.add(clip_name.casefold())
+        planned_paths.append(output_dir / clip_name)
 
-        srt_path = srt_paths[i - 1] if srt_paths and i - 1 < len(srt_paths) else None
-        ass_path = ass_paths[i - 1] if ass_paths and i - 1 < len(ass_paths) else None
-
-        print(f"Extracting clip {i}/{len(highlights)}: {h['title']}...")
-        extract_clip(
-            video_path,
-            clip_path,
-            h["start_sec"],
-            h["end_sec"],
-            shorts,
-            srt_path=srt_path,
-            font_config=font_config,
-            crop_x=crop_x,
-            shorts_mode=shorts_mode,
-            shorts_title=shorts_title,
-            title=h.get("title", ""),
-            karaoke=karaoke,
-            ass_path=ass_path,
-            shorts_blur_strength=shorts_blur_strength,
-            shorts_title_position=shorts_title_position,
+    effect_plans = [
+        resolve_clip_effect_plan(
+            options,
+            h,
+            float(h["end_sec"]) - float(h["start_sec"]),
+            vfx_assets,
+            shorts=shorts,
         )
-        clip_paths.append(clip_path)
+        for h in highlights
+    ]
+    validate_effects_manifest_target(output_dir, effect_plans)
+    # Removing VFX is a batch transition too. Protect the previous clip set
+    # while its owned manifest is still present, even when every new plan is
+    # disabled, so a mid-batch failure cannot mix old and new generations.
+    needs_effect_transaction = any(plan.enabled for plan in effect_plans) or (
+        has_owned_effects_manifest(output_dir)
+    )
+    transaction = (
+        _VfxBatchTransaction(output_dir, planned_paths)
+        if needs_effect_transaction
+        else None
+    )
+    if transaction is not None:
+        transaction.begin()
+    try:
+        for i, (h, clip_path, effect_plan) in enumerate(
+            zip(highlights, planned_paths, effect_plans),
+            1,
+        ):
+            srt_path = (
+                srt_paths[i - 1]
+                if srt_paths and i - 1 < len(srt_paths)
+                else None
+            )
+            ass_path = (
+                ass_paths[i - 1]
+                if ass_paths and i - 1 < len(ass_paths)
+                else None
+            )
 
+            print(f"Extracting clip {i}/{len(highlights)}: {h['title']}...")
+            extract_clip(
+                video_path,
+                clip_path,
+                h["start_sec"],
+                h["end_sec"],
+                shorts,
+                srt_path=srt_path,
+                font_config=font_config,
+                crop_x=crop_x,
+                shorts_mode=shorts_mode,
+                shorts_title=shorts_title,
+                title=h.get("title", ""),
+                karaoke=karaoke,
+                ass_path=ass_path,
+                shorts_blur_strength=shorts_blur_strength,
+                shorts_title_position=shorts_title_position,
+                effect_plan=effect_plan if effect_plan.enabled else None,
+            )
+            clip_paths.append(clip_path)
+
+        write_effects_manifest(
+            output_dir,
+            clip_paths,
+            effect_plans,
+            options=options,
+            shorts=shorts,
+        )
+    except BaseException:
+        if transaction is not None:
+            transaction.rollback()
+        raise
+    if transaction is not None:
+        transaction.complete()
     return clip_paths
 
 

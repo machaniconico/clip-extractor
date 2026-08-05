@@ -166,6 +166,7 @@ def get_system_fonts_cached():
 from config import FontConfig
 from audio_assets import (
     AudioAssetError,
+    get_installed_asset,
     get_pack_status as get_audio_pack_status,
     install_pack as install_audio_pack,
     list_catalog_assets,
@@ -175,6 +176,17 @@ from audio_delivery import (
     AudioDeliveryOptions,
     deliver_audio_groups,
     validate_audio_selection,
+)
+from user_media import (
+    UserMediaError,
+    is_user_media_id,
+    resolve_user_media_asset,
+    scan_optional_user_media,
+)
+from video_effects import (
+    VideoEffectError,
+    VfxOptions,
+    prepare_vfx_assets,
 )
 
 SETTINGS_FILE = Path(__file__).parent / "default_settings.json"
@@ -239,6 +251,32 @@ OBS_PROCESSING_DEFAULTS = {
     "audio_alpha": 0.35,
     "karaoke": False,
 }
+
+# A running OBS watcher intentionally keeps its dedicated processing profile,
+# but media choices come from the Input profile and may be changed while the
+# watcher is active. Reload only these saved values immediately before each
+# automatic render so a watcher restart is not required.
+OBS_LIVE_MEDIA_DEFAULTS = {
+    "audio_delivery_mode": "both",
+    "bgm_asset_id": "",
+    "se_asset_id": "",
+    "bgm_user_folder": "",
+    "se_user_folder": "",
+    "bgm_gain_db": -18.0,
+    "se_gain_db": -8.0,
+    "se_cue_seconds": 0.0,
+    "vfx_user_folder": "",
+    "vfx_asset_id": "",
+    "effect_preset": "none",
+    "vfx_automatic": False,
+    "vfx_cue_seconds": 0.0,
+    "vfx_duration_seconds": 1.0,
+    "vfx_anchor": "center",
+    "vfx_scale_percent": 100.0,
+    "vfx_opacity_percent": 100.0,
+    "vfx_target": "both",
+}
+_OBS_RELOAD_MEDIA_DEFAULTS_KEY = "_reload_input_media_defaults"
 
 
 def _obs_processing_settings_from_defaults(defaults: dict | None = None) -> dict:
@@ -458,8 +496,14 @@ def load_defaults() -> dict:
         "audio_fusion": False, "audio_alpha": 0.35,
         "audio_delivery_mode": "both",
         "bgm_asset_id": "", "se_asset_id": "",
+        "bgm_user_folder": "", "se_user_folder": "",
         "bgm_gain_db": -18.0, "se_gain_db": -8.0,
         "se_cue_seconds": 0.0,
+        "vfx_user_folder": "", "vfx_asset_id": "",
+        "effect_preset": "none", "vfx_automatic": False,
+        "vfx_cue_seconds": 0.0, "vfx_duration_seconds": 1.0,
+        "vfx_anchor": "center", "vfx_scale_percent": 100.0,
+        "vfx_opacity_percent": 100.0, "vfx_target": "both",
         "karaoke": False,
         "whisper_model": "large-v3", "language": "ja",
         "font_name": "Noto Sans JP", "font_size": 96, "font_color": "#FFFFFF",
@@ -494,6 +538,8 @@ def load_defaults() -> dict:
             delivery_mode=defaults.get("audio_delivery_mode", "both"),
             bgm_asset_id=defaults.get("bgm_asset_id", ""),
             se_asset_id=defaults.get("se_asset_id", ""),
+            bgm_user_folder=defaults.get("bgm_user_folder", ""),
+            se_user_folder=defaults.get("se_user_folder", ""),
             bgm_gain_db=defaults.get("bgm_gain_db", -18.0),
             se_gain_db=defaults.get("se_gain_db", -8.0),
             se_cue_seconds=defaults.get("se_cue_seconds", 0.0),
@@ -505,9 +551,40 @@ def load_defaults() -> dict:
             "audio_delivery_mode": audio_defaults.delivery_mode.value,
             "bgm_asset_id": audio_defaults.bgm_asset_id,
             "se_asset_id": audio_defaults.se_asset_id,
+            "bgm_user_folder": audio_defaults.bgm_user_folder,
+            "se_user_folder": audio_defaults.se_user_folder,
             "bgm_gain_db": audio_defaults.bgm_gain_db,
             "se_gain_db": audio_defaults.se_gain_db,
             "se_cue_seconds": audio_defaults.se_cue_seconds,
+        }
+    )
+    try:
+        vfx_defaults = VfxOptions(
+            vfx_asset_id=defaults.get("vfx_asset_id", ""),
+            vfx_user_folder=defaults.get("vfx_user_folder", ""),
+            effect_preset=defaults.get("effect_preset", "none"),
+            automatic=defaults.get("vfx_automatic", False),
+            cue_seconds=defaults.get("vfx_cue_seconds", 0.0),
+            duration_seconds=defaults.get("vfx_duration_seconds", 1.0),
+            anchor=defaults.get("vfx_anchor", "center"),
+            scale_percent=defaults.get("vfx_scale_percent", 100.0),
+            opacity_percent=defaults.get("vfx_opacity_percent", 100.0),
+            target=defaults.get("vfx_target", "both"),
+        )
+    except (TypeError, ValueError):
+        vfx_defaults = VfxOptions()
+    defaults.update(
+        {
+            "vfx_user_folder": vfx_defaults.vfx_user_folder,
+            "vfx_asset_id": vfx_defaults.vfx_asset_id,
+            "effect_preset": vfx_defaults.effect_preset.value,
+            "vfx_automatic": vfx_defaults.automatic,
+            "vfx_cue_seconds": vfx_defaults.cue_seconds,
+            "vfx_duration_seconds": vfx_defaults.duration_seconds,
+            "vfx_anchor": vfx_defaults.anchor.value,
+            "vfx_scale_percent": vfx_defaults.scale_percent,
+            "vfx_opacity_percent": vfx_defaults.opacity_percent,
+            "vfx_target": vfx_defaults.target.value,
         }
     )
     # Secrets are loaded only inside start_obs_watch(). Returning one here can
@@ -574,7 +651,19 @@ def save_defaults(ai_provider, ai_model,
                   se_asset_id="",
                   bgm_gain_db=-18.0,
                   se_gain_db=-8.0,
-                  se_cue_seconds=0.0):
+                  se_cue_seconds=0.0,
+                  bgm_user_folder="",
+                  se_user_folder="",
+                  vfx_user_folder="",
+                  vfx_asset_id="",
+                  effect_preset="none",
+                  vfx_automatic=False,
+                  vfx_cue_seconds=0.0,
+                  vfx_duration_seconds=1.0,
+                  vfx_anchor="center",
+                  vfx_scale_percent=100.0,
+                  vfx_opacity_percent=100.0,
+                  vfx_target="both"):
     """Save current settings as defaults."""
     loaded_defaults = load_defaults()
     saved_obs = {
@@ -583,6 +672,28 @@ def save_defaults(ai_provider, ai_model,
         if key in OBS_CONNECTION_DEFAULTS
     }
     saved_obs_processing = loaded_defaults.get("obs_processing")
+    audio_saved = AudioDeliveryOptions(
+        delivery_mode=audio_delivery_mode,
+        bgm_asset_id=bgm_asset_id,
+        se_asset_id=se_asset_id,
+        bgm_user_folder=bgm_user_folder,
+        se_user_folder=se_user_folder,
+        bgm_gain_db=bgm_gain_db,
+        se_gain_db=se_gain_db,
+        se_cue_seconds=se_cue_seconds,
+    )
+    vfx_saved = VfxOptions(
+        vfx_asset_id=vfx_asset_id,
+        vfx_user_folder=vfx_user_folder,
+        effect_preset=effect_preset,
+        automatic=vfx_automatic,
+        cue_seconds=vfx_cue_seconds,
+        duration_seconds=vfx_duration_seconds,
+        anchor=vfx_anchor,
+        scale_percent=vfx_scale_percent,
+        opacity_percent=vfx_opacity_percent,
+        target=vfx_target,
+    )
     data = {
         "ai_provider": ai_provider, "ai_model": ai_model,
         "enable_clips": bool(enable_clips), "enable_chapters": bool(enable_chapters),
@@ -606,17 +717,24 @@ def save_defaults(ai_provider, ai_model,
         "generate_thumbnails": bool(generate_thumbnails),
         "audio_fusion": bool(audio_fusion),
         "audio_alpha": float(audio_alpha),
-        "audio_delivery_mode": AudioDeliveryOptions(
-            delivery_mode=audio_delivery_mode,
-            bgm_gain_db=bgm_gain_db,
-            se_gain_db=se_gain_db,
-            se_cue_seconds=se_cue_seconds,
-        ).delivery_mode.value,
-        "bgm_asset_id": str(bgm_asset_id or "").strip(),
-        "se_asset_id": str(se_asset_id or "").strip(),
-        "bgm_gain_db": float(bgm_gain_db),
-        "se_gain_db": float(se_gain_db),
-        "se_cue_seconds": float(se_cue_seconds),
+        "audio_delivery_mode": audio_saved.delivery_mode.value,
+        "bgm_asset_id": audio_saved.bgm_asset_id,
+        "se_asset_id": audio_saved.se_asset_id,
+        "bgm_user_folder": audio_saved.bgm_user_folder,
+        "se_user_folder": audio_saved.se_user_folder,
+        "bgm_gain_db": audio_saved.bgm_gain_db,
+        "se_gain_db": audio_saved.se_gain_db,
+        "se_cue_seconds": audio_saved.se_cue_seconds,
+        "vfx_user_folder": vfx_saved.vfx_user_folder,
+        "vfx_asset_id": vfx_saved.vfx_asset_id,
+        "effect_preset": vfx_saved.effect_preset.value,
+        "vfx_automatic": vfx_saved.automatic,
+        "vfx_cue_seconds": vfx_saved.cue_seconds,
+        "vfx_duration_seconds": vfx_saved.duration_seconds,
+        "vfx_anchor": vfx_saved.anchor.value,
+        "vfx_scale_percent": vfx_saved.scale_percent,
+        "vfx_opacity_percent": vfx_saved.opacity_percent,
+        "vfx_target": vfx_saved.target.value,
         "karaoke": bool(karaoke),
         "premiere_executable_path": (premiere_executable_path or "").strip(),
         "obs_launch_on_startup": bool(obs_launch_on_startup),
@@ -714,6 +832,9 @@ def _create_output_dir(base_dir: Path) -> Path:
 def pick_folder_dialog(
     current_value: str,
     title: str = "保存先フォルダを選択",
+    *,
+    initial_value: str | os.PathLike[str] | None = None,
+    create_initial: bool = True,
 ) -> str:
     """Open the native OS folder-picker and return the selected path.
 
@@ -722,11 +843,17 @@ def pick_folder_dialog(
     FolderBrowserDialog (run in STA mode, which the control requires);
     other OSes fall back to tkinter.filedialog.askdirectory.
     """
-    initial = resolve_output_base(current_value)
-    try:
-        initial.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    initial = (
+        os.path.expanduser(os.fspath(initial_value))
+        if initial_value is not None
+        else resolve_output_base(current_value)
+    )
+    if create_initial:
+        initial = Path(initial).expanduser()
+        try:
+            initial.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
 
     fallback = current_value or ""
 
@@ -772,6 +899,19 @@ def pick_folder_dialog(
             logger.warning(f"tkinter folder picker failed: {exc}")
 
     return fallback
+
+
+def pick_source_media_folder_dialog(current_value: str, title: str) -> str:
+    """Pick an existing source folder without creating it or changing cancel."""
+
+    current = str(current_value or "")
+    initial = current.strip() or str(Path.home())
+    return pick_folder_dialog(
+        current,
+        title=title,
+        initial_value=initial,
+        create_initial=False,
+    )
 
 
 def pick_obs_watch_folder_dialog(current_value: str) -> str:
@@ -1334,6 +1474,18 @@ def render_phase(
     bgm_gain_db: float = -18.0,
     se_gain_db: float = -8.0,
     se_cue_seconds: float = 0.0,
+    bgm_user_folder: str = "",
+    se_user_folder: str = "",
+    vfx_user_folder: str = "",
+    vfx_asset_id: str = "",
+    effect_preset: str = "none",
+    vfx_automatic: bool = False,
+    vfx_cue_seconds: float = 0.0,
+    vfx_duration_seconds: float = 1.0,
+    vfx_anchor: str = "center",
+    vfx_scale_percent: float = 100.0,
+    vfx_opacity_percent: float = 100.0,
+    vfx_target: str = "both",
     progress=gr.Progress(),
 ):
     """Render phase: replay downstream output generation with edited highlights."""
@@ -1383,15 +1535,42 @@ def render_phase(
                 delivery_mode=audio_delivery_mode,
                 bgm_asset_id=bgm_asset_id,
                 se_asset_id=se_asset_id,
+                bgm_user_folder=bgm_user_folder,
+                se_user_folder=se_user_folder,
                 bgm_gain_db=bgm_gain_db,
                 se_gain_db=se_gain_db,
                 se_cue_seconds=se_cue_seconds,
             )
             if modes.enable_clips or modes.enable_shorts:
                 validate_audio_selection(audio_options)
-        except (AudioDeliveryError, TypeError, ValueError) as audio_err:
+            vfx_options = VfxOptions(
+                vfx_asset_id=vfx_asset_id,
+                vfx_user_folder=vfx_user_folder,
+                effect_preset=effect_preset,
+                automatic=vfx_automatic,
+                cue_seconds=vfx_cue_seconds,
+                duration_seconds=vfx_duration_seconds,
+                anchor=vfx_anchor,
+                scale_percent=vfx_scale_percent,
+                opacity_percent=vfx_opacity_percent,
+                target=vfx_target,
+            )
+            vfx_needed = (
+                modes.enable_clips and vfx_options.applies_to(shorts=False)
+            ) or (
+                modes.enable_shorts and vfx_options.applies_to(shorts=True)
+            )
+            prepared_vfx_assets = (
+                prepare_vfx_assets(vfx_options) if vfx_needed else ()
+            )
+        except (
+            AudioDeliveryError,
+            VideoEffectError,
+            TypeError,
+            ValueError,
+        ) as audio_err:
             return ProcessResult(
-                log="\n".join(logs + [f"Error: 音声出力設定を確認してください: {audio_err}"])
+                log="\n".join(logs + [f"Error: 素材・演出設定を確認してください: {audio_err}"])
             ).as_gradio_outputs()
 
         if source_kind == "twitch" and auto_append_youtube:
@@ -1450,7 +1629,13 @@ def render_phase(
         if modes.enable_clips:
             progress(0.6, desc="[Step 4/6] Extracting clips...")
             log("[Step 4/6] Extracting clips...")
-            clip_paths = extract_clips(video_path, highlights, clips_dir)
+            clip_paths = extract_clips(
+                video_path,
+                highlights,
+                clips_dir,
+                vfx_options=vfx_options,
+                prepared_vfx_assets=prepared_vfx_assets,
+            )
             obs_render_outcome["clip_paths"] = [str(path) for path in clip_paths]
             log(f"  Extracted {len(clip_paths)} clips")
 
@@ -1488,6 +1673,8 @@ def render_phase(
                 shorts_blur_strength=shorts_blur_strength,
                 shorts_title=shorts_title,
                 shorts_title_position=shorts_title_position,
+                vfx_options=vfx_options,
+                prepared_vfx_assets=prepared_vfx_assets,
             )
             obs_render_outcome["shorts_paths"] = [str(path) for path in shorts_paths]
             obs_render_outcome["shorts_srt_paths"] = [
@@ -1511,6 +1698,10 @@ def render_phase(
                 {"clips": clip_paths, "shorts": shorts_paths},
                 highlights,
                 options=audio_options,
+                effects_manifest_dirs={
+                    **({"clips": clips_dir} if clip_paths else {}),
+                    **({"shorts": shorts_dir} if shorts_paths else {}),
+                },
             )
             clip_paths = list(audio_result.media_groups.get("clips", ()))
             shorts_paths = list(audio_result.media_groups.get("shorts", ()))
@@ -1534,12 +1725,18 @@ def render_phase(
                     shorts_blur_strength=shorts_blur_strength,
                     shorts_title_position=shorts_title_position,
                     font_config=font_config,
+                    protected_source_paths=[
+                        asset.path for asset in prepared_vfx_assets
+                    ],
                 )
                 log(f"  Generated {len(thumbnail_paths)} vertical thumbnail candidates")
             else:
                 thumbnail_paths = generate_thumbnail_candidates(
                     video_path, highlights, clips_dir,
                     font_config=font_config,
+                    protected_source_paths=[
+                        asset.path for asset in prepared_vfx_assets
+                    ],
                 )
                 log(f"  Generated {len(thumbnail_paths)} thumbnail candidates")
 
@@ -1701,6 +1898,18 @@ def maybe_render_phase(
     bgm_gain_db: float = -18.0,
     se_gain_db: float = -8.0,
     se_cue_seconds: float = 0.0,
+    bgm_user_folder: str = "",
+    se_user_folder: str = "",
+    vfx_user_folder: str = "",
+    vfx_asset_id: str = "",
+    effect_preset: str = "none",
+    vfx_automatic: bool = False,
+    vfx_cue_seconds: float = 0.0,
+    vfx_duration_seconds: float = 1.0,
+    vfx_anchor: str = "center",
+    vfx_scale_percent: float = 100.0,
+    vfx_opacity_percent: float = 100.0,
+    vfx_target: str = "both",
     progress=gr.Progress(),
 ):
     """Chain STEP 2 right after STEP 1 when the 'run both' checkbox is on.
@@ -1737,6 +1946,18 @@ def maybe_render_phase(
         bgm_gain_db=bgm_gain_db,
         se_gain_db=se_gain_db,
         se_cue_seconds=se_cue_seconds,
+        bgm_user_folder=bgm_user_folder,
+        se_user_folder=se_user_folder,
+        vfx_user_folder=vfx_user_folder,
+        vfx_asset_id=vfx_asset_id,
+        effect_preset=effect_preset,
+        vfx_automatic=vfx_automatic,
+        vfx_cue_seconds=vfx_cue_seconds,
+        vfx_duration_seconds=vfx_duration_seconds,
+        vfx_anchor=vfx_anchor,
+        vfx_scale_percent=vfx_scale_percent,
+        vfx_opacity_percent=vfx_opacity_percent,
+        vfx_target=vfx_target,
         progress=progress,
     )
 
@@ -2127,6 +2348,81 @@ def _coerce_int(value, default: int) -> int:
         return int(default)
 
 
+def _obs_settings_for_render(settings: dict) -> dict:
+    """Refresh saved Input media choices for a long-running OBS watcher."""
+
+    current = dict(settings)
+    if not current.pop(_OBS_RELOAD_MEDIA_DEFAULTS_KEY, False):
+        return current
+    latest = load_defaults()
+    for key, fallback in OBS_LIVE_MEDIA_DEFAULTS.items():
+        current[key] = latest.get(key, fallback)
+
+    for kind, id_key, folder_key in (
+        ("bgm", "bgm_asset_id", "bgm_user_folder"),
+        ("se", "se_asset_id", "se_user_folder"),
+    ):
+        asset_id = str(current.get(id_key) or "").strip()
+        if not asset_id:
+            continue
+        available = False
+        if is_user_media_id(asset_id):
+            try:
+                resolve_user_media_asset(
+                    current.get(folder_key, ""),
+                    asset_id,
+                    kind,
+                )
+                available = True
+            except (UserMediaError, OSError):
+                available = False
+        else:
+            try:
+                available = get_installed_asset(asset_id).kind == kind
+            except (AudioAssetError, OSError, KeyError):
+                available = False
+        if not available:
+            current[id_key] = ""
+            message = (
+                f"保存済み{kind.upper()}素材が現在利用できないため、"
+                "今回のOBS自動生成では使用しません"
+            )
+            logger.warning(message)
+            _obs_append_status(message)
+
+    vfx_folder = str(current.get("vfx_user_folder") or "").strip()
+    if bool(current.get("vfx_automatic")) and vfx_folder:
+        try:
+            scan_optional_user_media(vfx_folder, "vfx")
+        except (UserMediaError, OSError):
+            current["vfx_user_folder"] = ""
+            current["vfx_asset_id"] = ""
+            message = (
+                "保存済みVFX素材フォルダが現在利用できないため、"
+                "今回のOBS自動生成では内蔵エフェクトのみを使用します"
+            )
+            logger.warning(message)
+            _obs_append_status(message)
+
+    vfx_id = str(current.get("vfx_asset_id") or "").strip()
+    if vfx_id:
+        try:
+            resolve_user_media_asset(
+                current.get("vfx_user_folder", ""),
+                vfx_id,
+                "vfx",
+            )
+        except (UserMediaError, OSError):
+            current["vfx_asset_id"] = ""
+            message = (
+                "保存済みVFX素材が現在利用できないため、"
+                "今回のOBS自動生成では使用しません"
+            )
+            logger.warning(message)
+            _obs_append_status(message)
+    return current
+
+
 def _run_obs_detect_render(
     input_url: str,
     input_file,
@@ -2141,7 +2437,7 @@ def _run_obs_detect_render(
         logs.append(msg)
 
     try:
-        s = dict(settings)  # shallow copy; we only read
+        s = _obs_settings_for_render(settings)
         clips_enabled = bool(s.get("enable_clips", True))
         shorts_enabled = bool(s.get("generate_shorts", False))
         chapters_enabled = bool(s.get("enable_chapters", True))
@@ -2221,6 +2517,26 @@ def _run_obs_detect_render(
             se_cue_seconds=_coerce_float(
                 s.get("se_cue_seconds", 0.0), 0.0
             ),
+            bgm_user_folder=s.get("bgm_user_folder", ""),
+            se_user_folder=s.get("se_user_folder", ""),
+            vfx_user_folder=s.get("vfx_user_folder", ""),
+            vfx_asset_id=s.get("vfx_asset_id", ""),
+            effect_preset=s.get("effect_preset", "none"),
+            vfx_automatic=bool(s.get("vfx_automatic", False)),
+            vfx_cue_seconds=_coerce_float(
+                s.get("vfx_cue_seconds", 0.0), 0.0
+            ),
+            vfx_duration_seconds=_coerce_float(
+                s.get("vfx_duration_seconds", 1.0), 1.0
+            ),
+            vfx_anchor=s.get("vfx_anchor", "center"),
+            vfx_scale_percent=_coerce_float(
+                s.get("vfx_scale_percent", 100.0), 100.0
+            ),
+            vfx_opacity_percent=_coerce_float(
+                s.get("vfx_opacity_percent", 100.0), 100.0
+            ),
+            vfx_target=s.get("vfx_target", "both"),
             progress=progress,
         )
         # render_phase returns ProcessResult.as_gradio_outputs() = (log, highlights, dl, drive, chapters)
@@ -3686,6 +4002,7 @@ def _start_obs_watch_impl(
             _obs_append_status(msg)
             return msg
 
+    settings[_OBS_RELOAD_MEDIA_DEFAULTS_KEY] = True
     with _obs_watcher_lock:
         _obs_generation += 1
         gen = _obs_generation
@@ -4580,6 +4897,17 @@ APP_CSS = """
             opacity: 0.78;
             font-size: 0.86rem !important;
         }
+        .material-source-guide {
+            font-size: 0.9rem !important;
+            line-height: 1.55 !important;
+        }
+        .material-source-guide ul {
+            margin: 0.45rem 0 0.7rem !important;
+            padding-left: 1.2rem !important;
+        }
+        .material-source-guide li {
+            margin: 0.35rem 0 !important;
+        }
         @media (min-width: 900px) {
             .obs-connection-workspace {
                 display: grid !important;
@@ -4666,6 +4994,19 @@ GOOGLE_CREDENTIALS_SETUP_GUIDE_MD = """
 
 > `credentials.json` は機密情報です。共有・公開しないでください。
 > Gemini APIキーとは別物です。迷った場合は `SETUP_GUIDE.html`、詳しいトラブル対処は `CREDENTIALS_SETUP.txt` を参照してください。
+"""
+
+MATERIAL_SOURCE_GUIDE_MD = """
+素材は公式サイトから自分でダウンロードし、上の対応フォルダへ保存してください。
+この案内リンクから素材を自動取得・スクレイピングしません。下の明示DL式スターターパックは、公式規約で再配布可能と確認した選定素材だけを取得します。
+
+- **BGM・SE｜[DOVA-SYNDROME](https://dova-s.jp/)** — [利用条件](https://dova-s.jp/help/articles/license-usage/)。商用動画の背景利用向け。作者別条件と禁止事項を確認してください。
+- **SE｜[効果音ラボ](https://soundeffect-lab.info/)** — [利用規約](https://soundeffect-lab.info/agreement/)。商用動画で利用可・クレジット不要。素材の再配布やアプリへの初期素材同梱は不可です。
+- **BGM・SE｜[OtoLogic](https://otologic.jp/)** — [利用規約](https://otologic.jp/free/license.html)。CC BY 4.0で、無料利用には「OtoLogic」のクレジットが必要です。
+- **BGM・SE・動画/VFX｜[Pixabay](https://pixabay.com/)** — [Content License](https://pixabay.com/service/license-summary/)。作品内利用・加工可、単体再配布不可。音楽は各素材のContent ID表示も確認してください。
+- **BGM・SE・動画/VFX｜[Mixkit](https://mixkit.co/)** — [License](https://mixkit.co/license/)。Free / Restrictedなど、素材種別と各アイテムに適用されるライセンスを確認してください。
+
+> **2026-08-05確認。** 各素材の配布ページ・作者条件・最新規約が優先です。ダウンロードページと規約のURL・取得日を一緒に控えておくと、公開時の確認が楽になります。
 """
 
 GOOGLE_OAUTH_UNVERIFIED_GUIDE_MD = """
@@ -4791,37 +5132,89 @@ def _startup_auth_status_for_ui() -> str:
     return summary
 
 
-def _audio_asset_choices(kind: str) -> list[tuple[str, str]]:
-    """Return stable catalog choices without touching the network or cache."""
+def _user_media_for_ui(folder: str, kind: str):
+    try:
+        return scan_optional_user_media(folder, kind), ""
+    except (UserMediaError, OSError) as exc:
+        return (), str(exc)
+
+
+def _audio_choices_from_assets(
+    kind: str,
+    user_assets=(),
+    *,
+    include_builtin: bool = True,
+) -> list[tuple[str, str]]:
     choices = [("使用しない", "")]
+    if include_builtin:
+        choices.extend(
+            (
+                "素材パック | "
+                f"{asset.label} | {asset.creator}"
+                + (" | 要クレジット" if asset.attribution_required else ""),
+                asset.id,
+            )
+            for asset in list_catalog_assets()
+            if asset.kind == kind
+        )
     choices.extend(
-        (f"{asset.label} — {asset.creator}", asset.id)
-        for asset in list_catalog_assets()
-        if asset.kind == kind
+        (f"手持ち | {asset.label}", asset.id)
+        for asset in user_assets
     )
     return choices
+
+
+def _audio_asset_choices(
+    kind: str,
+    user_folder: str = "",
+) -> list[tuple[str, str]]:
+    """Return catalog and user-folder choices without touching the network."""
+    user_assets, _error = _user_media_for_ui(user_folder, kind)
+    return _audio_choices_from_assets(kind, user_assets)
+
+
+def _vfx_asset_choices(user_assets=()) -> list[tuple[str, str]]:
+    return [("使用しない", "")] + [
+        (f"手持ち | {asset.label}", asset.id)
+        for asset in user_assets
+    ]
 
 
 def _audio_pack_status_text() -> str:
     try:
         status = get_audio_pack_status()
+        catalog_assets = list_catalog_assets()
     except AudioAssetError as exc:
         return f"⚠️ **素材カタログを確認できません:** {exc}"
+    bgm_count = sum(asset.kind == "bgm" for asset in catalog_assets)
+    se_count = sum(asset.kind == "se" for asset in catalog_assets)
     if status.ready:
         return (
-            f"✅ **CC0素材パック {status.version} は利用可能です** "
-            f"（BGM 4曲・SE 16点 / {status.asset_count}素材）"
+            f"✅ **日本語ショート向け素材パック {status.version} は利用可能です** "
+            f"（BGM {bgm_count}曲・SE {se_count}点 / {status.asset_count}素材）  "
+            "CC0素材はクレジット不要、OtoLogic素材はクレジット必須です。"
         )
     if status.state == "invalid":
         return f"⚠️ **素材パックの再導入が必要です:** {status.message}"
     return (
-        "**CC0素材パックは未導入です。** "
+        f"**日本語ショート向け素材パックは未導入です。** BGM {bgm_count}曲・"
+        f"SE {se_count}点。OtoLogic素材はクレジット必須です。 "
         "必要な場合だけ下のボタンから一度ダウンロードします。"
     )
 
 
-def _audio_pack_control_updates(current_bgm="", current_se="", *, install=False):
-    """Refresh status and enable selectors only for a verified install."""
+def _media_library_control_updates(
+    current_bgm="",
+    current_se="",
+    current_vfx="",
+    bgm_folder="",
+    se_folder="",
+    vfx_folder="",
+    vfx_automatic=False,
+    *,
+    install=False,
+):
+    """Refresh the downloaded pack plus all three user-selected media folders."""
     error = ""
     if install:
         try:
@@ -4835,26 +5228,114 @@ def _audio_pack_control_updates(current_bgm="", current_se="", *, install=False)
         ready = False
         if not error:
             error = f"⚠️ **素材パックを確認できません:** {exc}"
-    bgm_choices = _audio_asset_choices("bgm")
-    se_choices = _audio_asset_choices("se")
+    bgm_assets, bgm_error = _user_media_for_ui(bgm_folder, "bgm")
+    se_assets, se_error = _user_media_for_ui(se_folder, "se")
+    vfx_assets, vfx_error = _user_media_for_ui(vfx_folder, "vfx")
+    bgm_choices = _audio_choices_from_assets(
+        "bgm",
+        bgm_assets,
+        include_builtin=ready,
+    )
+    se_choices = _audio_choices_from_assets(
+        "se",
+        se_assets,
+        include_builtin=ready,
+    )
+    vfx_choices = _vfx_asset_choices(vfx_assets)
     bgm_ids = {value for _label, value in bgm_choices}
     se_ids = {value for _label, value in se_choices}
+    vfx_ids = {value for _label, value in vfx_choices}
     bgm_value = current_bgm if current_bgm in bgm_ids else ""
     se_value = current_se if current_se in se_ids else ""
+    vfx_value = current_vfx if current_vfx in vfx_ids else ""
+    status_lines = [error or _audio_pack_status_text()]
+    status_lines.append(
+        "手持ち素材: "
+        f"BGM {len(bgm_assets)}件 / SE {len(se_assets)}件 / VFX {len(vfx_assets)}件"
+    )
+    for label, message in (
+        ("BGM", bgm_error),
+        ("SE", se_error),
+        ("VFX", vfx_error),
+    ):
+        if message:
+            status_lines.append(f"⚠️ **{label}フォルダ:** {message}")
+    for label, current, retained in (
+        ("BGM", current_bgm, bgm_value),
+        ("SE", current_se, se_value),
+        ("VFX", current_vfx, vfx_value),
+    ):
+        if current and not retained:
+            status_lines.append(
+                f"⚠️ **保存済み{label}選択は現在利用できないため解除しました。** "
+                "この変更をOBS自動生成にも使う場合はデフォルト設定を保存してください。"
+            )
     return (
-        error or _audio_pack_status_text(),
-        gr.update(choices=bgm_choices, value=bgm_value, interactive=ready),
-        gr.update(choices=se_choices, value=se_value, interactive=ready),
+        "\n\n".join(status_lines),
+        gr.update(
+            choices=bgm_choices,
+            value=bgm_value,
+            interactive=ready or bool(bgm_assets),
+        ),
+        gr.update(
+            choices=se_choices,
+            value=se_value,
+            interactive=ready or bool(se_assets),
+        ),
+        gr.update(
+            choices=vfx_choices,
+            value=vfx_value,
+            interactive=bool(vfx_assets) and not bool(vfx_automatic),
+        ),
     )
 
 
-def install_audio_pack_ui(current_bgm="", current_se=""):
+def install_audio_pack_ui(
+    current_bgm="",
+    current_se="",
+    current_vfx="",
+    bgm_folder="",
+    se_folder="",
+    vfx_folder="",
+    vfx_automatic=False,
+):
     """Explicit UI-only download entry point; render functions never call it."""
-    return _audio_pack_control_updates(current_bgm, current_se, install=True)
+    return _media_library_control_updates(
+        current_bgm,
+        current_se,
+        current_vfx,
+        bgm_folder,
+        se_folder,
+        vfx_folder,
+        vfx_automatic,
+        install=True,
+    )
 
 
-def refresh_audio_pack_ui(current_bgm="", current_se=""):
-    return _audio_pack_control_updates(current_bgm, current_se, install=False)
+def refresh_media_library_ui(
+    current_bgm="",
+    current_se="",
+    current_vfx="",
+    bgm_folder="",
+    se_folder="",
+    vfx_folder="",
+    vfx_automatic=False,
+):
+    return _media_library_control_updates(
+        current_bgm,
+        current_se,
+        current_vfx,
+        bgm_folder,
+        se_folder,
+        vfx_folder,
+        vfx_automatic,
+        install=False,
+    )
+
+
+def vfx_manual_control_updates(automatic: bool):
+    interactive = not bool(automatic)
+    return tuple(gr.update(interactive=interactive) for _ in range(5))
 
 
 def create_ui():
@@ -4865,14 +5346,69 @@ def create_ui():
         audio_pack_ready = get_audio_pack_status().ready
     except AudioAssetError:
         audio_pack_ready = False
-    bgm_choices = _audio_asset_choices("bgm")
-    se_choices = _audio_asset_choices("se")
+    bgm_folder_default = defaults.get("bgm_user_folder", "")
+    se_folder_default = defaults.get("se_user_folder", "")
+    vfx_folder_default = defaults.get("vfx_user_folder", "")
+    bgm_user_assets, _bgm_folder_error = _user_media_for_ui(
+        bgm_folder_default,
+        "bgm",
+    )
+    se_user_assets, _se_folder_error = _user_media_for_ui(
+        se_folder_default,
+        "se",
+    )
+    vfx_user_assets, _vfx_folder_error = _user_media_for_ui(
+        vfx_folder_default,
+        "vfx",
+    )
+    bgm_choices = _audio_choices_from_assets(
+        "bgm",
+        bgm_user_assets,
+        include_builtin=audio_pack_ready,
+    )
+    se_choices = _audio_choices_from_assets(
+        "se",
+        se_user_assets,
+        include_builtin=audio_pack_ready,
+    )
+    vfx_choices = _vfx_asset_choices(vfx_user_assets)
     bgm_default = defaults.get("bgm_asset_id", "")
     se_default = defaults.get("se_asset_id", "")
+    vfx_default = defaults.get("vfx_asset_id", "")
+    saved_media_defaults = {
+        "BGM": bgm_default,
+        "SE": se_default,
+        "VFX": vfx_default,
+    }
     if bgm_default not in {value for _label, value in bgm_choices}:
         bgm_default = ""
     if se_default not in {value for _label, value in se_choices}:
         se_default = ""
+    if vfx_default not in {value for _label, value in vfx_choices}:
+        vfx_default = ""
+    initial_media_status = [
+        _audio_pack_status_text(),
+        "手持ち素材: "
+        f"BGM {len(bgm_user_assets)}件 / SE {len(se_user_assets)}件 / "
+        f"VFX {len(vfx_user_assets)}件",
+    ]
+    for _label, _message in (
+        ("BGM", _bgm_folder_error),
+        ("SE", _se_folder_error),
+        ("VFX", _vfx_folder_error),
+    ):
+        if _message:
+            initial_media_status.append(f"⚠️ **{_label}フォルダ:** {_message}")
+    for _label, _current in (
+        ("BGM", bgm_default),
+        ("SE", se_default),
+        ("VFX", vfx_default),
+    ):
+        if saved_media_defaults[_label] and not _current:
+            initial_media_status.append(
+                f"⚠️ **保存済み{_label}選択は現在利用できないため解除しました。** "
+                "この変更をOBS自動生成にも使う場合はデフォルト設定を保存してください。"
+            )
 
     with gr.Blocks(
         title="Clip Extractor - 配信切り抜き自動生成",
@@ -5097,35 +5633,67 @@ def create_ui():
                         )
 
                 with gr.Group(elem_classes="audio-delivery-panel"):
-                    gr.Markdown(
-                        "### BGM・SE素材と出力\n"
-                        "素材は生成時に自動取得しません。必要な場合だけ一度導入し、"
-                        "以後は検証済みローカルキャッシュを使います。"
+                    gr.Markdown("### BGM・SE・VFX素材と出力")
+                    with gr.Accordion("手持ち素材の参照フォルダ", open=False):
+                        with gr.Row():
+                            bgm_user_folder = gr.Textbox(
+                                value=bgm_folder_default,
+                                label="BGMフォルダ",
+                            )
+                            bgm_folder_btn = gr.Button(
+                                "BGMフォルダを参照",
+                                variant="secondary",
+                                min_width=180,
+                            )
+                        with gr.Row():
+                            se_user_folder = gr.Textbox(
+                                value=se_folder_default,
+                                label="SEフォルダ",
+                            )
+                            se_folder_btn = gr.Button(
+                                "SEフォルダを参照",
+                                variant="secondary",
+                                min_width=180,
+                            )
+                        with gr.Row():
+                            vfx_user_folder = gr.Textbox(
+                                value=vfx_folder_default,
+                                label="VFXフォルダ",
+                            )
+                            vfx_folder_btn = gr.Button(
+                                "VFXフォルダを参照",
+                                variant="secondary",
+                                min_width=180,
+                            )
+
+                    with gr.Accordion("フリー素材サイトの案内（外部サイト）", open=False):
+                        gr.Markdown(MATERIAL_SOURCE_GUIDE_MD, elem_classes="material-source-guide")
+
+                    audio_pack_status = gr.Markdown(
+                        "\n\n".join(initial_media_status)
                     )
-                    audio_pack_status = gr.Markdown(_audio_pack_status_text())
                     with gr.Row():
                         install_audio_pack_btn = gr.Button(
-                            "CC0素材をダウンロード（約3.2 MB）",
+                            "日本語ショート向け素材をダウンロード（約7.5 MB）",
                             variant="secondary",
                         )
-                        refresh_audio_pack_btn = gr.Button(
-                            "素材の状態を更新",
+                        refresh_media_library_btn = gr.Button(
+                            "3フォルダを再スキャン",
                             variant="secondary",
                         )
+
                     with gr.Row():
                         bgm_asset_id = gr.Dropdown(
                             choices=bgm_choices,
                             value=bgm_default,
                             label="BGM",
-                            info="4曲のCC0ループ素材。未選択ならBGMは追加しません",
-                            interactive=audio_pack_ready,
+                            interactive=audio_pack_ready or bool(bgm_user_assets),
                         )
                         se_asset_id = gr.Dropdown(
                             choices=se_choices,
                             value=se_default,
                             label="SE",
-                            info="16点のCC0効果音。未選択ならSEは追加しません",
-                            interactive=audio_pack_ready,
+                            interactive=audio_pack_ready or bool(se_user_assets),
                         )
                     with gr.Row():
                         bgm_gain_db = gr.Slider(
@@ -5134,7 +5702,6 @@ def create_ui():
                             step=1,
                             value=defaults.get("bgm_gain_db", -18.0),
                             label="BGM音量 (dB)",
-                            info="元の会話音声は変更しません。推奨: -18 dB",
                         )
                         se_gain_db = gr.Slider(
                             minimum=-36,
@@ -5142,14 +5709,12 @@ def create_ui():
                             step=1,
                             value=defaults.get("se_gain_db", -8.0),
                             label="SE音量 (dB)",
-                            info="推奨: -8 dB",
                         )
                     with gr.Row():
                         se_cue_seconds = gr.Number(
                             minimum=0,
                             value=defaults.get("se_cue_seconds", 0.0),
                             label="SEを鳴らす位置 (秒)",
-                            info="各クリップ先頭からの相対時刻。範囲外なら無音になります",
                         )
                         audio_delivery_mode = gr.Radio(
                             choices=[
@@ -5159,21 +5724,144 @@ def create_ui():
                             ],
                             value=defaults.get("audio_delivery_mode", "both"),
                             label="BGM・SEの出力方法",
-                            info=(
-                                "別ファイル=clean MP4 + 48kHz WAV + JSON / "
-                                "ミックス=完成MP4 / 両方=すべて"
-                            ),
                         )
+
+                    vfx_automatic = gr.Checkbox(
+                        label="VFXと簡易エフェクトの選択・配置を自動にする",
+                        value=defaults.get("vfx_automatic", False),
+                        info="追加のAI通信なしで、切り抜きごとに再現可能な選択と配置を行います",
+                    )
+                    manual_vfx_enabled = not bool(defaults.get("vfx_automatic", False))
+                    with gr.Row():
+                        vfx_asset_id = gr.Dropdown(
+                            choices=vfx_choices,
+                            value=vfx_default,
+                            label="VFX",
+                            interactive=manual_vfx_enabled and bool(vfx_user_assets),
+                        )
+                        effect_preset = gr.Dropdown(
+                            choices=[
+                                ("使用しない", "none"),
+                                ("先頭・末尾フェード", "fade"),
+                                ("パンチズーム", "punch"),
+                                ("短いフラッシュ", "flash"),
+                            ],
+                            value=defaults.get("effect_preset", "none"),
+                            label="簡易エフェクト",
+                            interactive=manual_vfx_enabled,
+                        )
+                    with gr.Row():
+                        vfx_cue_seconds = gr.Number(
+                            minimum=0,
+                            value=defaults.get("vfx_cue_seconds", 0.0),
+                            label="VFX開始位置 (秒)",
+                            interactive=manual_vfx_enabled,
+                        )
+                        vfx_duration_seconds = gr.Number(
+                            minimum=0.1,
+                            value=defaults.get("vfx_duration_seconds", 1.0),
+                            label="VFX表示時間 (秒)",
+                            interactive=manual_vfx_enabled,
+                        )
+                        vfx_anchor = gr.Dropdown(
+                            choices=[
+                                ("左上", "top-left"),
+                                ("上", "top"),
+                                ("右上", "top-right"),
+                                ("左", "left"),
+                                ("中央", "center"),
+                                ("右", "right"),
+                                ("左下", "bottom-left"),
+                                ("下", "bottom"),
+                                ("右下", "bottom-right"),
+                            ],
+                            value=defaults.get("vfx_anchor", "center"),
+                            label="VFX配置",
+                            interactive=manual_vfx_enabled,
+                        )
+                    with gr.Row():
+                        vfx_scale_percent = gr.Slider(
+                            minimum=10,
+                            maximum=200,
+                            step=5,
+                            value=defaults.get("vfx_scale_percent", 100.0),
+                            label="VFX素材倍率 (%)",
+                        )
+                        vfx_opacity_percent = gr.Slider(
+                            minimum=0,
+                            maximum=100,
+                            step=5,
+                            value=defaults.get("vfx_opacity_percent", 100.0),
+                            label="VFX不透明度 (%)",
+                        )
+                        vfx_target = gr.Radio(
+                            choices=[
+                                ("通常・Shorts", "both"),
+                                ("通常のみ", "clips"),
+                                ("Shortsのみ", "shorts"),
+                            ],
+                            value=defaults.get("vfx_target", "both"),
+                            label="VFX適用先",
+                        )
+
+                    bgm_folder_btn.click(
+                        fn=lambda current: pick_source_media_folder_dialog(
+                            current, "BGMフォルダを選択"
+                        ),
+                        inputs=bgm_user_folder,
+                        outputs=bgm_user_folder,
+                    )
+                    se_folder_btn.click(
+                        fn=lambda current: pick_source_media_folder_dialog(
+                            current, "SEフォルダを選択"
+                        ),
+                        inputs=se_user_folder,
+                        outputs=se_user_folder,
+                    )
+                    vfx_folder_btn.click(
+                        fn=lambda current: pick_source_media_folder_dialog(
+                            current, "VFXフォルダを選択"
+                        ),
+                        inputs=vfx_user_folder,
+                        outputs=vfx_user_folder,
+                    )
+                    media_refresh_inputs = [
+                        bgm_asset_id,
+                        se_asset_id,
+                        vfx_asset_id,
+                        bgm_user_folder,
+                        se_user_folder,
+                        vfx_user_folder,
+                        vfx_automatic,
+                    ]
+                    media_refresh_outputs = [
+                        audio_pack_status,
+                        bgm_asset_id,
+                        se_asset_id,
+                        vfx_asset_id,
+                    ]
                     install_audio_pack_btn.click(
                         fn=install_audio_pack_ui,
-                        inputs=[bgm_asset_id, se_asset_id],
-                        outputs=[audio_pack_status, bgm_asset_id, se_asset_id],
+                        inputs=media_refresh_inputs,
+                        outputs=media_refresh_outputs,
                         concurrency_limit=1,
                     )
-                    refresh_audio_pack_btn.click(
-                        fn=refresh_audio_pack_ui,
-                        inputs=[bgm_asset_id, se_asset_id],
-                        outputs=[audio_pack_status, bgm_asset_id, se_asset_id],
+                    refresh_media_library_btn.click(
+                        fn=refresh_media_library_ui,
+                        inputs=media_refresh_inputs,
+                        outputs=media_refresh_outputs,
+                        concurrency_limit=1,
+                    )
+                    vfx_automatic.change(
+                        fn=vfx_manual_control_updates,
+                        inputs=vfx_automatic,
+                        outputs=[
+                            vfx_asset_id,
+                            effect_preset,
+                            vfx_cue_seconds,
+                            vfx_duration_seconds,
+                            vfx_anchor,
+                        ],
                     )
 
                 with gr.Column(elem_classes="input-actions-column"):
@@ -6069,7 +6757,19 @@ def create_ui():
                             se_asset_id,
                             bgm_gain_db,
                             se_gain_db,
-                            se_cue_seconds],
+                            se_cue_seconds,
+                            bgm_user_folder,
+                            se_user_folder,
+                            vfx_user_folder,
+                            vfx_asset_id,
+                            effect_preset,
+                            vfx_automatic,
+                            vfx_cue_seconds,
+                            vfx_duration_seconds,
+                            vfx_anchor,
+                            vfx_scale_percent,
+                            vfx_opacity_percent,
+                            vfx_target],
                     outputs=save_defaults_msg,
                 )
 
@@ -6097,7 +6797,19 @@ def create_ui():
                             se_asset_id,
                             bgm_gain_db,
                             se_gain_db,
-                            se_cue_seconds],
+                            se_cue_seconds,
+                            bgm_user_folder,
+                            se_user_folder,
+                            vfx_user_folder,
+                            vfx_asset_id,
+                            effect_preset,
+                            vfx_automatic,
+                            vfx_cue_seconds,
+                            vfx_duration_seconds,
+                            vfx_anchor,
+                            vfx_scale_percent,
+                            vfx_opacity_percent,
+                            vfx_target],
                     outputs=input_save_defaults_msg,
                 )
 
@@ -6241,6 +6953,18 @@ def create_ui():
                 bgm_gain_db,
                 se_gain_db,
                 se_cue_seconds,
+                bgm_user_folder,
+                se_user_folder,
+                vfx_user_folder,
+                vfx_asset_id,
+                effect_preset,
+                vfx_automatic,
+                vfx_cue_seconds,
+                vfx_duration_seconds,
+                vfx_anchor,
+                vfx_scale_percent,
+                vfx_opacity_percent,
+                vfx_target,
             ],
             outputs=[
                 log_output,
@@ -6281,6 +7005,18 @@ def create_ui():
                 bgm_gain_db,
                 se_gain_db,
                 se_cue_seconds,
+                bgm_user_folder,
+                se_user_folder,
+                vfx_user_folder,
+                vfx_asset_id,
+                effect_preset,
+                vfx_automatic,
+                vfx_cue_seconds,
+                vfx_duration_seconds,
+                vfx_anchor,
+                vfx_scale_percent,
+                vfx_opacity_percent,
+                vfx_target,
             ],
             outputs=[
                 log_output,

@@ -300,11 +300,19 @@ def test_render_phase_uses_mixed_paths_for_downstream_outputs(monkeypatch, tmp_p
     def fake_validate(options):
         captured["validated"] = options
 
-    def fake_deliver(output_dir, media_groups, highlights, *, options):
+    def fake_deliver(
+        output_dir,
+        media_groups,
+        highlights,
+        *,
+        options,
+        effects_manifest_dirs=None,
+    ):
         clean = Path(media_groups["clips"][0])
         mixed = clean.with_name("clip_mixed.mp4")
         mixed.write_bytes(b"mixed")
         captured["delivered"] = options
+        captured["effects_manifest_dirs"] = effects_manifest_dirs
         return SimpleNamespace(
             enabled=True,
             media_groups={"clips": (mixed,), "shorts": ()},
@@ -341,6 +349,7 @@ def test_render_phase_uses_mixed_paths_for_downstream_outputs(monkeypatch, tmp_p
 
     assert captured["validated"].delivery_mode.value == "mixed"
     assert captured["delivered"].bgm_asset_id == "bgm-brand-new-wisdom"
+    assert captured["effects_manifest_dirs"] == {"clips": tmp_path / "clips"}
     assert [Path(path).name for path in result[5]["clip_paths"]] == [
         "clip_mixed.mp4"
     ]
