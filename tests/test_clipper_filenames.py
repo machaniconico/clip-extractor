@@ -107,7 +107,7 @@ def test_extract_clips_disambiguates_identical_ranges_before_render(
         ("😀" * 200, True),
     ],
 )
-def test_extract_clips_limits_filename_to_windows_utf16_component_limit(
+def test_extract_clips_limits_filename_to_cross_platform_component_limits(
     tmp_path, monkeypatch, title, shorts
 ):
     _capture_extract_paths(monkeypatch)
@@ -119,5 +119,6 @@ def test_extract_clips_limits_filename_to_windows_utf16_component_limit(
 
     filename = paths[0].name
     assert len(filename.encode("utf-16-le")) // 2 <= 255
+    assert len(filename.encode("utf-8")) <= 255
     assert filename.endswith("_short.mp4" if shorts else ".mp4")
     assert "\ufffd" not in filename

@@ -844,11 +844,12 @@ def pick_folder_dialog(
     other OSes fall back to tkinter.filedialog.askdirectory.
     """
     initial = (
-        Path(initial_value).expanduser()
+        os.path.expanduser(os.fspath(initial_value))
         if initial_value is not None
         else resolve_output_base(current_value)
     )
     if create_initial:
+        initial = Path(initial).expanduser()
         try:
             initial.mkdir(parents=True, exist_ok=True)
         except Exception:

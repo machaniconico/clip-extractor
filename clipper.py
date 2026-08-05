@@ -117,6 +117,7 @@ _TITLE_Y_BY_POSITION = {
     "overlay": "(h-text_h)/2",
 }
 _WINDOWS_FILENAME_MAX_UTF16_UNITS = 255
+_POSIX_FILENAME_MAX_UTF8_BYTES = 255
 _ZERO_WIDTH_JOINER = "\u200d"
 _EMOJI_VARIATION_SELECTOR = "\ufe0f"
 _JAPANESE_FONT_KEYWORDS = (
@@ -1187,16 +1188,26 @@ def _utf16_units(value: str) -> int:
     return len(value.encode("utf-16-le")) // 2
 
 
-def _truncate_title_utf16(title: str, max_units: int) -> str:
-    """Trim a title without splitting emoji/grapheme clusters."""
+def _truncate_title_for_filename(
+    title: str,
+    max_utf16_units: int,
+    max_utf8_bytes: int,
+) -> str:
+    """Trim a title to Windows and POSIX component limits by grapheme."""
     kept: list[str] = []
     used_units = 0
+    used_bytes = 0
     for cluster in _title_grapheme_clusters(title):
         cluster_units = _utf16_units(cluster)
-        if used_units + cluster_units > max_units:
+        cluster_bytes = len(cluster.encode("utf-8"))
+        if (
+            used_units + cluster_units > max_utf16_units
+            or used_bytes + cluster_bytes > max_utf8_bytes
+        ):
             break
         kept.append(cluster)
         used_units += cluster_units
+        used_bytes += cluster_bytes
     return "".join(kept).rstrip(" ._")
 
 
@@ -1218,7 +1229,15 @@ def _build_clip_filename(
             0,
             _WINDOWS_FILENAME_MAX_UTF16_UNITS - _utf16_units(fixed_parts),
         )
-        safe_title = _truncate_title_utf16(safe_title, available_units)
+        available_bytes = max(
+            0,
+            _POSIX_FILENAME_MAX_UTF8_BYTES - len(fixed_parts.encode("utf-8")),
+        )
+        safe_title = _truncate_title_for_filename(
+            safe_title,
+            available_units,
+            available_bytes,
+        )
     title_suffix = f"_{safe_title}" if safe_title else ""
     return f"{range_str}{title_suffix}{suffix}{asset_suffix}{extension}"
 

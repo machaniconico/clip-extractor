@@ -71,6 +71,40 @@ def test_canceling_empty_source_media_picker_stays_empty_and_creates_nothing(
     assert str(missing_home).replace("'", "''") in captured["args"][-1]
 
 
+def test_noncreating_picker_preserves_pathlike_text_without_platform_reparsing(
+    monkeypatch,
+):
+    class PortableInitialPath:
+        def __fspath__(self):
+            return "/portable/source-media"
+
+    captured = {}
+    monkeypatch.setattr(web_app.os, "name", "nt")
+    monkeypatch.setattr(
+        web_app,
+        "Path",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("non-creating picker must not instantiate Path")
+        ),
+    )
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        return SimpleNamespace(stdout="")
+
+    monkeypatch.setattr(web_app.subprocess, "run", fake_run)
+
+    assert (
+        web_app.pick_folder_dialog(
+            "",
+            initial_value=PortableInitialPath(),
+            create_initial=False,
+        )
+        == ""
+    )
+    assert "/portable/source-media" in captured["args"][-1]
+
+
 def test_obs_folder_picker_uses_recording_specific_dialog_title(monkeypatch):
     calls = []
 

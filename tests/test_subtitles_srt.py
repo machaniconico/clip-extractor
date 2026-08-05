@@ -111,6 +111,7 @@ def test_srt_sidecar_batches_disambiguate_all_filename_collisions(
         assert paths[1].name.endswith(suffix)
         assert all(path.exists() for path in paths)
         assert all(len(path.name.encode("utf-16-le")) // 2 <= 255 for path in paths)
+        assert all(len(path.name.encode("utf-8")) <= 255 for path in paths)
 
     rerun = generate_all_short_title_srts(highlights, tmp_path / "rerun")
     assert [path.name for path in rerun] == [path.name for path in title]
