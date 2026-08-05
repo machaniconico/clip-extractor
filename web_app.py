@@ -4896,6 +4896,17 @@ APP_CSS = """
             opacity: 0.78;
             font-size: 0.86rem !important;
         }
+        .material-source-guide {
+            font-size: 0.9rem !important;
+            line-height: 1.55 !important;
+        }
+        .material-source-guide ul {
+            margin: 0.45rem 0 0.7rem !important;
+            padding-left: 1.2rem !important;
+        }
+        .material-source-guide li {
+            margin: 0.35rem 0 !important;
+        }
         @media (min-width: 900px) {
             .obs-connection-workspace {
                 display: grid !important;
@@ -4982,6 +4993,19 @@ GOOGLE_CREDENTIALS_SETUP_GUIDE_MD = """
 
 > `credentials.json` は機密情報です。共有・公開しないでください。
 > Gemini APIキーとは別物です。迷った場合は `SETUP_GUIDE.html`、詳しいトラブル対処は `CREDENTIALS_SETUP.txt` を参照してください。
+"""
+
+MATERIAL_SOURCE_GUIDE_MD = """
+素材は公式サイトから自分でダウンロードし、上の対応フォルダへ保存してください。
+この案内リンクから素材を自動取得・スクレイピングしません。下の明示DL式スターターパックは、公式規約で再配布可能と確認した選定素材だけを取得します。
+
+- **BGM・SE｜[DOVA-SYNDROME](https://dova-s.jp/)** — [利用条件](https://dova-s.jp/help/articles/license-usage/)。商用動画の背景利用向け。作者別条件と禁止事項を確認してください。
+- **SE｜[効果音ラボ](https://soundeffect-lab.info/)** — [利用規約](https://soundeffect-lab.info/agreement/)。商用動画で利用可・クレジット不要。素材の再配布やアプリへの初期素材同梱は不可です。
+- **BGM・SE｜[OtoLogic](https://otologic.jp/)** — [利用規約](https://otologic.jp/free/license.html)。CC BY 4.0で、無料利用には「OtoLogic」のクレジットが必要です。
+- **BGM・SE・動画/VFX｜[Pixabay](https://pixabay.com/)** — [Content License](https://pixabay.com/service/license-summary/)。作品内利用・加工可、単体再配布不可。音楽は各素材のContent ID表示も確認してください。
+- **BGM・SE・動画/VFX｜[Mixkit](https://mixkit.co/)** — [License](https://mixkit.co/license/)。Free / Restrictedなど、素材種別と各アイテムに適用されるライセンスを確認してください。
+
+> **2026-08-05確認。** 各素材の配布ページ・作者条件・最新規約が優先です。ダウンロードページと規約のURL・取得日を一緒に控えておくと、公開時の確認が楽になります。
 """
 
 GOOGLE_OAUTH_UNVERIFIED_GUIDE_MD = """
@@ -5123,7 +5147,12 @@ def _audio_choices_from_assets(
     choices = [("使用しない", "")]
     if include_builtin:
         choices.extend(
-            (f"内蔵 | {asset.label} | {asset.creator}", asset.id)
+            (
+                "素材パック | "
+                f"{asset.label} | {asset.creator}"
+                + (" | 要クレジット" if asset.attribution_required else ""),
+                asset.id,
+            )
             for asset in list_catalog_assets()
             if asset.kind == kind
         )
@@ -5153,17 +5182,22 @@ def _vfx_asset_choices(user_assets=()) -> list[tuple[str, str]]:
 def _audio_pack_status_text() -> str:
     try:
         status = get_audio_pack_status()
+        catalog_assets = list_catalog_assets()
     except AudioAssetError as exc:
         return f"⚠️ **素材カタログを確認できません:** {exc}"
+    bgm_count = sum(asset.kind == "bgm" for asset in catalog_assets)
+    se_count = sum(asset.kind == "se" for asset in catalog_assets)
     if status.ready:
         return (
-            f"✅ **CC0素材パック {status.version} は利用可能です** "
-            f"（BGM 4曲・SE 16点 / {status.asset_count}素材）"
+            f"✅ **日本語ショート向け素材パック {status.version} は利用可能です** "
+            f"（BGM {bgm_count}曲・SE {se_count}点 / {status.asset_count}素材）  "
+            "CC0素材はクレジット不要、OtoLogic素材はクレジット必須です。"
         )
     if status.state == "invalid":
         return f"⚠️ **素材パックの再導入が必要です:** {status.message}"
     return (
-        "**CC0素材パックは未導入です。** "
+        f"**日本語ショート向け素材パックは未導入です。** BGM {bgm_count}曲・"
+        f"SE {se_count}点。OtoLogic素材はクレジット必須です。 "
         "必要な場合だけ下のボタンから一度ダウンロードします。"
     )
 
@@ -5179,7 +5213,7 @@ def _media_library_control_updates(
     *,
     install=False,
 ):
-    """Refresh the CC0 pack plus all three user-selected media folders."""
+    """Refresh the downloaded pack plus all three user-selected media folders."""
     error = ""
     if install:
         try:
@@ -5631,12 +5665,15 @@ def create_ui():
                                 min_width=180,
                             )
 
+                    with gr.Accordion("フリー素材サイトの案内（外部サイト）", open=False):
+                        gr.Markdown(MATERIAL_SOURCE_GUIDE_MD, elem_classes="material-source-guide")
+
                     audio_pack_status = gr.Markdown(
                         "\n\n".join(initial_media_status)
                     )
                     with gr.Row():
                         install_audio_pack_btn = gr.Button(
-                            "CC0素材をダウンロード（約3.2 MB）",
+                            "日本語ショート向け素材をダウンロード（約7.5 MB）",
                             variant="secondary",
                         )
                         refresh_media_library_btn = gr.Button(

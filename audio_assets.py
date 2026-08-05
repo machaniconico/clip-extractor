@@ -1,4 +1,4 @@
-"""Install and resolve the optional CC0 audio starter pack.
+"""Install and resolve the optional, license-tracked audio starter pack.
 
 Downloads only happen through :func:`install_pack`, which is intended to be
 called from an explicit user action.  Read APIs never access the network.
@@ -24,7 +24,7 @@ import uuid
 import zipfile
 
 
-DEFAULT_PACK_ID = "cc0-starter"
+DEFAULT_PACK_ID = "short-video-starter"
 ASSET_CACHE_ENV = "CLIP_EXTRACTOR_ASSET_CACHE"
 CATALOG_PATH = Path(__file__).resolve().parent / "assets" / "audio" / "catalog.json"
 LICENSES_PATH = CATALOG_PATH.parent / "licenses"
@@ -39,6 +39,8 @@ _DOWNLOAD_HOST_ALLOWLIST = frozenset(
         "www.kenney.nl",
         "opengameart.org",
         "www.opengameart.org",
+        "otologic.jp",
+        "www.otologic.jp",
     }
 )
 
@@ -64,7 +66,7 @@ class AssetIntegrityError(AudioAssetError):
 
 
 class MediaValidationError(AudioAssetError):
-    """Raised when ffprobe cannot decode a downloaded OGG asset."""
+    """Raised when ffprobe cannot decode a downloaded audio asset."""
 
 
 class _AllowlistedRedirectHandler(request.HTTPRedirectHandler):
@@ -94,6 +96,7 @@ class CatalogAsset:
     license_id: str
     license_url: str
     attribution_required: bool
+    attribution_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -114,6 +117,7 @@ class InstalledAsset:
     license_url: str
     license_checked_at: str
     attribution_required: bool
+    attribution_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -372,6 +376,9 @@ def _validate_catalog(catalog: dict[str, Any]) -> None:
         asset_paths: set[str] = set()
         for source in pack["sources"]:
             _validate_source(source)
+            source_hosts = {
+                _normalize_host(str(host)) for host in source["allowed_hosts"]
+            }
             for asset in source["assets"]:
                 asset_id = str(asset.get("id", ""))
                 _validate_id(asset_id, "asset ID")
@@ -384,6 +391,7 @@ def _validate_catalog(catalog: dict[str, Any]) -> None:
                     raise AudioAssetError(f"Duplicate asset path: {relative_text}")
                 asset_paths.add(relative_text)
                 _validate_digest_and_size(asset, f"asset {asset_id}")
+                _validate_asset_metadata(asset, source_hosts)
                 if source["type"] == "zip":
                     _safe_archive_member(str(asset.get("archive_member", "")))
 
@@ -409,10 +417,33 @@ def _validate_source(source: dict[str, Any]) -> None:
     if not normalized_hosts.issubset(_DOWNLOAD_HOST_ALLOWLIST):
         raise AudioAssetError(f"Source {source_id} contains an unapproved host")
     _validate_url(str(source.get("url", "")), normalized_hosts)
+    _validate_url(str(source.get("source_page", "")), normalized_hosts)
     if not isinstance(source.get("assets"), list) or not source["assets"]:
         raise AudioAssetError(f"Source {source_id} has no selected assets")
     if source["type"] == "file" and len(source["assets"]) != 1:
         raise AudioAssetError(f"Direct source {source_id} must contain one asset")
+
+
+def _validate_asset_metadata(asset: dict[str, Any], allowed_hosts: set[str]) -> None:
+    asset_id = str(asset.get("id", ""))
+    if asset.get("kind") not in {"bgm", "se"}:
+        raise AudioAssetError(f"Invalid media kind for asset {asset_id}")
+    for field in ("label", "creator", "modifications"):
+        if not isinstance(asset.get(field), str) or not asset[field].strip():
+            raise AudioAssetError(f"Asset {asset_id} has no {field}")
+    _validate_url(str(asset.get("source_page", "")), allowed_hosts)
+
+    license_info = asset.get("license")
+    if not isinstance(license_info, dict):
+        raise AudioAssetError(f"Asset {asset_id} has no license metadata")
+    for field in ("id", "name", "url"):
+        if not isinstance(license_info.get(field), str) or not license_info[field].strip():
+            raise AudioAssetError(f"Asset {asset_id} has no license {field}")
+    attribution_required = license_info.get("attribution_required")
+    if not isinstance(attribution_required, bool):
+        raise AudioAssetError(f"Asset {asset_id} has invalid attribution metadata")
+    if attribution_required and not str(license_info.get("attribution_text", "")).strip():
+        raise AudioAssetError(f"Asset {asset_id} has no required attribution text")
 
 
 def _validate_digest_and_size(item: dict[str, Any], label: str) -> None:
@@ -453,6 +484,7 @@ def _catalog_asset(pack: dict[str, Any], asset: dict[str, Any]) -> CatalogAsset:
         license_id=license_info["id"],
         license_url=license_info["url"],
         attribution_required=bool(license_info["attribution_required"]),
+        attribution_text=str(license_info.get("attribution_text", "")),
     )
 
 
@@ -560,6 +592,7 @@ def _download_source(
         headers={
             "User-Agent": "ClipExtractor-audio-assets/1",
             "Accept-Encoding": "identity",
+            "Referer": source["source_page"],
         },
     )
     digest = hashlib.sha256()
@@ -956,6 +989,7 @@ def _installed_asset(
         license_url=license_info["url"],
         license_checked_at=manifest["license_checked_at"],
         attribution_required=bool(license_info["attribution_required"]),
+        attribution_text=str(license_info.get("attribution_text", "")),
     )
 
 

@@ -612,7 +612,7 @@ def _resolve_selection(options: AudioDeliveryOptions) -> dict[str, Any]:
         if not status.ready:
             raise AudioDeliveryError(
                 "BGM/SE素材パックが利用できません。Input画面の"
-                "「CC0素材をダウンロード」を先に実行してください。"
+                "「日本語ショート向け素材をダウンロード」を先に実行してください。"
             )
         resolved["pack_id"] = status.pack_id
         resolved["pack_version"] = status.version
@@ -676,13 +676,14 @@ def _asset_provenance(
         "id": asset.id,
         "label": asset.label,
         "kind": asset.kind,
-        "source_type": "bundled_cc0",
+        "source_type": "downloaded_pack",
         "creator": asset.creator,
         "source_page": asset.source_page,
         "license_id": asset.license_id,
         "license_url": asset.license_url,
         "license_checked_at": asset.license_checked_at,
         "attribution_required": asset.attribution_required,
+        "attribution_text": asset.attribution_text,
         "pack_id": asset.pack_id,
         "pack_version": asset.pack_version,
         "source_sha256": asset.sha256,
@@ -1118,12 +1119,46 @@ def _third_party_notices(selection: Mapping[str, Any]) -> str:
                 f"Pack: {selection['pack_id']} {selection['pack_version']}",
                 f"License review date: {selection['license_checked_at']}",
                 "",
-                "The bundled works are provided under CC0 1.0 Universal.",
-                "Attribution is not required, but provenance is retained here.",
-                "https://creativecommons.org/publicdomain/zero/1.0/",
-                "",
             ]
         )
+        licenses: dict[tuple[str, str], bool] = {}
+        for asset in installed_assets:
+            key = (asset.license_id, asset.license_url)
+            licenses[key] = licenses.get(key, False) or asset.attribution_required
+        for (license_id, license_url), attribution_required in licenses.items():
+            lines.extend(
+                [
+                    f"License: {license_id} ({license_url})",
+                    "Attribution required: "
+                    + ("yes" if attribution_required else "no"),
+                    "",
+                ]
+            )
+
+        required_credits = list(
+            dict.fromkeys(
+                asset.attribution_text
+                for asset in installed_assets
+                if asset.attribution_required and asset.attribution_text
+            )
+        )
+        if required_credits:
+            lines.append("公開時に必要なクレジット / Required publication credit:")
+            lines.extend(required_credits)
+            lines.extend(
+                [
+                    "動画の概要欄など、作品と合理的に結びつく場所へ記載してください。",
+                    "",
+                ]
+            )
+        if any(asset.creator == "OtoLogic" for asset in installed_assets):
+            lines.extend(
+                [
+                    "注意: OtoLogic素材を含む作品をContent IDへ登録したり、"
+                    "素材の独占権を主張したりしないでください。",
+                    "",
+                ]
+            )
     for key, heading in (("bgm", "BGM"), ("se", "SE")):
         asset = selection.get(key)
         if asset is None:
@@ -1147,6 +1182,13 @@ def _third_party_notices(selection: Mapping[str, Any]) -> str:
                     f"Creator: {asset.creator}",
                     f"Source: {asset.source_page}",
                     f"License: {asset.license_id} ({asset.license_url})",
+                    "Attribution required: "
+                    + ("yes" if asset.attribution_required else "no"),
+                    *(
+                        [f"Required credit: {asset.attribution_text}"]
+                        if asset.attribution_required and asset.attribution_text
+                        else []
+                    ),
                     f"Source SHA-256: {asset.sha256}",
                     "Modifications: source unchanged; output gain/loop/cue may be applied.",
                     "",

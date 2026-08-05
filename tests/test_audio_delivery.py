@@ -1,3 +1,4 @@
+from dataclasses import replace
 import hashlib
 import json
 from pathlib import Path
@@ -25,15 +26,15 @@ def _asset(tmp_path: Path, asset_id: str, kind: str) -> InstalledAsset:
         label=f"label-{asset_id}",
         kind=kind,
         path=path,
-        pack_id="cc0-starter",
-        pack_version="2026.08.1",
+        pack_id="short-video-starter",
+        pack_version="2026.08.2",
         size=3,
         sha256="a" * 64,
         creator="creator",
         source_page="https://example.invalid/source",
         license_id="CC0-1.0",
         license_url="https://creativecommons.org/publicdomain/zero/1.0/",
-        license_checked_at="2026-08-04",
+        license_checked_at="2026-08-05",
         attribution_required=False,
     )
 
@@ -41,8 +42,8 @@ def _asset(tmp_path: Path, asset_id: str, kind: str) -> InstalledAsset:
 def _ready_status():
     return SimpleNamespace(
         ready=True,
-        pack_id="cc0-starter",
-        version="2026.08.1",
+        pack_id="short-video-starter",
+        version="2026.08.2",
     )
 
 
@@ -120,7 +121,7 @@ def _user_asset(tmp_path: Path, asset_id: str, kind: str) -> UserMediaAsset:
     )
 
 
-def test_user_audio_resolves_without_cc0_pack_and_writes_user_provenance(
+def test_user_audio_resolves_without_downloaded_pack_and_writes_user_provenance(
     tmp_path, monkeypatch
 ):
     clips_dir = tmp_path / "clips"
@@ -132,7 +133,7 @@ def test_user_audio_resolves_without_cc0_pack_and_writes_user_provenance(
     monkeypatch.setattr(
         audio_delivery,
         "get_pack_status",
-        lambda: pytest.fail("user-only audio must not require the CC0 pack"),
+        lambda: pytest.fail("user-only audio must not require the downloaded pack"),
     )
     monkeypatch.setattr(
         audio_delivery,
@@ -202,7 +203,7 @@ def test_user_audio_is_revalidated_immediately_before_mixing(
     monkeypatch.setattr(
         audio_delivery,
         "get_pack_status",
-        lambda: pytest.fail("user-only audio must not require the CC0 pack"),
+        lambda: pytest.fail("user-only audio must not require the downloaded pack"),
     )
     monkeypatch.setattr(
         audio_delivery,
@@ -243,7 +244,7 @@ def test_user_audio_reference_requires_its_matching_folder(tmp_path, monkeypatch
     monkeypatch.setattr(
         audio_delivery,
         "get_pack_status",
-        lambda: pytest.fail("user audio must not inspect the CC0 pack"),
+        lambda: pytest.fail("user audio must not inspect the downloaded pack"),
     )
     with pytest.raises(AudioDeliveryError, match="参照フォルダ"):
         validate_audio_selection(
@@ -663,6 +664,7 @@ def test_delivery_resolves_assets_writes_provenance_and_selects_primary_video(
     assert captured["provenance"]["bgm"]["source_sha256"] == "a" * 64
     payload = json.loads(result.manifest_path.read_text(encoding="utf-8"))
     assert payload["delivery_mode"] == mode
+    assert payload["selected_assets"]["bgm"]["source_type"] == "downloaded_pack"
     assert payload["selected_assets"]["bgm"]["license_id"] == "CC0-1.0"
     assert payload["groups"]["clips"][0]["primary_video"].endswith(expected_primary)
     if mode in {"mixed", "both"}:
@@ -673,8 +675,38 @@ def test_delivery_resolves_assets_writes_provenance_and_selects_primary_video(
             "post_mix_attenuation_db": -1.5,
         }
     notices = result.notices_path.read_text(encoding="utf-8")
-    assert "CC0 1.0 Universal" in notices
+    assert "License: CC0-1.0" in notices
     assert "Creator: creator" in notices
+
+
+def test_cc_by_audio_notice_contains_copyable_required_credit(tmp_path):
+    asset = replace(
+        _asset(tmp_path, "otologic-bgm", "bgm"),
+        creator="OtoLogic",
+        source_page="https://otologic.jp/free/bgm/pop-music01.html",
+        license_id="CC-BY-4.0",
+        license_url="https://creativecommons.org/licenses/by/4.0/",
+        attribution_required=True,
+        attribution_text=(
+            "音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0"
+        ),
+    )
+
+    notices = audio_delivery._third_party_notices(
+        {
+            "pack_id": "short-video-starter",
+            "pack_version": "2026.08.2",
+            "license_checked_at": "2026-08-05",
+            "bgm": asset,
+        }
+    )
+
+    assert "Attribution required: yes" in notices
+    assert "公開時に必要なクレジット" in notices
+    assert "音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0" in notices
+    assert "Content IDへ登録" in notices
+    assert "独占権を主張" in notices
+    assert "The bundled works are provided under CC0" not in notices
 
 
 def test_wrong_asset_kind_is_rejected_before_render(tmp_path, monkeypatch):

@@ -1,16 +1,17 @@
 {
   "schema_version": 1,
   "catalog_id": "clip-extractor-audio-assets",
-  "catalog_updated_at": "2026-08-04",
+  "catalog_updated_at": "2026-08-05",
   "packs": [
     {
-      "id": "cc0-starter",
-      "version": "2026.08.1",
-      "display_name": "CC0 BGM・SE スターターパック",
-      "description": "商用動画にも使えるCC0 1.0のBGM 4曲と効果音16点。",
-      "license_checked_at": "2026-08-04",
+      "id": "short-video-starter",
+      "version": "2026.08.2",
+      "display_name": "日本語ショート向け BGM・SE スターターパック",
+      "description": "商用動画にも使えるCC0 1.0 / CC BY 4.0のBGM 5曲と効果音20点。OtoLogic素材はクレジット必須。",
+      "license_checked_at": "2026-08-05",
       "license_files": [
         "CC0-1.0.txt",
+        "OtoLogic-CC-BY-4.0.md",
         "SOURCES.md"
       ],
       "sources": [
@@ -456,6 +457,176 @@
                 "name": "CC0 1.0 Universal",
                 "url": "https://creativecommons.org/publicdomain/zero/1.0/",
                 "attribution_required": false
+              }
+            }
+          ]
+        },
+        {
+          "id": "otologic-camera-motion11",
+          "type": "zip",
+          "url": "https://otologic.jp/sounds/se/mp3-zip/Camera_Motion11-mp3.zip",
+          "allowed_hosts": [
+            "otologic.jp",
+            "www.otologic.jp"
+          ],
+          "source_page": "https://otologic.jp/free/se/camera-motion01.html",
+          "size": 218425,
+          "max_bytes": 500000,
+          "sha256": "698c14d03b6258cb24f155bb8a66660fdcb57afa1e58729e55018c05ba1566ca",
+          "assets": [
+            {
+              "id": "se-otologic-whoosh-short",
+              "label": "シーン転換・Whoosh",
+              "kind": "se",
+              "archive_member": "Camera_Motion11/Camera_Motion11-2(Short).mp3",
+              "path": "se/otologic-camera-motion11-short.mp3",
+              "size": 19010,
+              "sha256": "7ee1116085e3bdb083d1ae89e261c04ca18b9a5659f8ee7450a349df5e52e039",
+              "creator": "OtoLogic",
+              "source_page": "https://otologic.jp/free/se/camera-motion01.html",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC-BY-4.0",
+                "name": "Creative Commons Attribution 4.0 International",
+                "url": "https://creativecommons.org/licenses/by/4.0/",
+                "attribution_required": true,
+                "attribution_text": "音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0"
+              }
+            }
+          ]
+        },
+        {
+          "id": "otologic-quiz-correct05",
+          "type": "zip",
+          "url": "https://otologic.jp/sounds/se/mp3-zip/Quiz-Ding_Dong05-mp3.zip",
+          "allowed_hosts": [
+            "otologic.jp",
+            "www.otologic.jp"
+          ],
+          "source_page": "https://otologic.jp/free/se/quiz01.html",
+          "size": 126699,
+          "max_bytes": 500000,
+          "sha256": "08caa5234b92ba0afb47267b80fec1ad6f3f128421f3f7f177d1edb544cb4bf8",
+          "assets": [
+            {
+              "id": "se-otologic-quiz-correct",
+              "label": "正解・ピンポン",
+              "kind": "se",
+              "archive_member": "Quiz-Ding_Dong05/Quiz-Ding_Dong05-1(Fast-Short).mp3",
+              "path": "se/otologic-quiz-correct05-fast-short.mp3",
+              "size": 24471,
+              "sha256": "085e5a4a3fe2669ad1378423c412f7e76cc6b2b573b3081380207f5d8b8ea2fc",
+              "creator": "OtoLogic",
+              "source_page": "https://otologic.jp/free/se/quiz01.html",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC-BY-4.0",
+                "name": "Creative Commons Attribution 4.0 International",
+                "url": "https://creativecommons.org/licenses/by/4.0/",
+                "attribution_required": true,
+                "attribution_text": "音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0"
+              }
+            }
+          ]
+        },
+        {
+          "id": "otologic-quiz-wrong05",
+          "type": "zip",
+          "url": "https://otologic.jp/sounds/se/mp3-zip/Quiz-Buzzer05-mp3.zip",
+          "allowed_hosts": [
+            "otologic.jp",
+            "www.otologic.jp"
+          ],
+          "source_page": "https://otologic.jp/free/se/quiz01.html",
+          "size": 55670,
+          "max_bytes": 500000,
+          "sha256": "7c172d45194e6a58ec9f278c40ff364bfc0d62772fc319a7bc8b2b56670d7bc8",
+          "assets": [
+            {
+              "id": "se-otologic-quiz-wrong",
+              "label": "不正解・ブザー",
+              "kind": "se",
+              "archive_member": "Quiz-Buzzer05/Quiz-Buzzer05-2(Short).mp3",
+              "path": "se/otologic-quiz-wrong05-short.mp3",
+              "size": 12198,
+              "sha256": "62459b81bdd8763eb808d9a63251f2d9e1f50f28ead614d43568368dea3d5f51",
+              "creator": "OtoLogic",
+              "source_page": "https://otologic.jp/free/se/quiz01.html",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC-BY-4.0",
+                "name": "Creative Commons Attribution 4.0 International",
+                "url": "https://creativecommons.org/licenses/by/4.0/",
+                "attribution_required": true,
+                "attribution_text": "音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0"
+              }
+            }
+          ]
+        },
+        {
+          "id": "otologic-short-accent06",
+          "type": "zip",
+          "url": "https://otologic.jp/sounds/se/mp3-zip/Short_Accent06-mp3.zip",
+          "allowed_hosts": [
+            "otologic.jp",
+            "www.otologic.jp"
+          ],
+          "source_page": "https://otologic.jp/free/se/short-accent01.html",
+          "size": 42193,
+          "max_bytes": 500000,
+          "sha256": "ef86925ef0042610abe23ea3fbc7589e4b6ea99b2e7aec462d76160d51ee27bc",
+          "assets": [
+            {
+              "id": "se-otologic-pop-transition",
+              "label": "ポップ・かわいい場面転換",
+              "kind": "se",
+              "archive_member": "Short_Accent06/Short_Accent06-1(Dry).mp3",
+              "path": "se/otologic-short-accent06-dry.mp3",
+              "size": 16194,
+              "sha256": "4545e8b5c9fdd00810a955a1c5caec6a6f19d6a824c0efea563cfa0248328c98",
+              "creator": "OtoLogic",
+              "source_page": "https://otologic.jp/free/se/short-accent01.html",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC-BY-4.0",
+                "name": "Creative Commons Attribution 4.0 International",
+                "url": "https://creativecommons.org/licenses/by/4.0/",
+                "attribution_required": true,
+                "attribution_text": "音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0"
+              }
+            }
+          ]
+        },
+        {
+          "id": "otologic-sunny-narration",
+          "type": "zip",
+          "url": "https://otologic.jp/sounds/bgm/mp3-zip/bo-tto%20hidamari-mp3.zip",
+          "allowed_hosts": [
+            "otologic.jp",
+            "www.otologic.jp"
+          ],
+          "source_page": "https://otologic.jp/free/bgm/pop-music01.html",
+          "size": 3843364,
+          "max_bytes": 5000000,
+          "sha256": "9dd90213ab089934abec073fcf45c50d725ffc3ed60d95abeb1437d63afdb14a",
+          "assets": [
+            {
+              "id": "bgm-otologic-sunny-narration",
+              "label": "明るい・のどか（ナレーション向け）",
+              "kind": "bgm",
+              "archive_member": "bo-tto hidamari/bo-tto hidamari-Narr.mp3",
+              "path": "bgm/otologic-sunny-narration.mp3",
+              "size": 1849122,
+              "sha256": "7dfa8ec14cab3963fb279d04136453e60574f3f4c83ddb1c3dcc2658d0bb1b69",
+              "creator": "OtoLogic",
+              "source_page": "https://otologic.jp/free/bgm/pop-music01.html",
+              "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC-BY-4.0",
+                "name": "Creative Commons Attribution 4.0 International",
+                "url": "https://creativecommons.org/licenses/by/4.0/",
+                "attribution_required": true,
+                "attribution_text": "音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0"
               }
             }
           ]

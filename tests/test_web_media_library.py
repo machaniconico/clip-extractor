@@ -22,7 +22,7 @@ def _asset(kind: str, name: str, digest_char: str) -> UserMediaAsset:
     )
 
 
-def test_custom_audio_remains_selectable_without_cc0_pack(monkeypatch):
+def test_custom_audio_remains_selectable_without_downloaded_pack(monkeypatch):
     bgm = _asset("bgm", "theme.mp3", "a")
     se = _asset("se", "click.wav", "b")
     vfx = _asset("vfx", "spark.png", "c")

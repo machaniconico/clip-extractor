@@ -318,6 +318,39 @@ def test_audio_delivery_controls_are_persisted_and_rendered():
         assert _click_input_names(module, button)[-18:] == expected
 
 
+def test_material_source_guide_uses_official_links_without_automatic_downloads():
+    module = _module()
+    source = WEB_APP.read_text(encoding="utf-8")
+    guide = _string_constant(module, "MATERIAL_SOURCE_GUIDE_MD")
+
+    official_urls = (
+        "https://dova-s.jp/help/articles/license-usage/",
+        "https://soundeffect-lab.info/agreement/",
+        "https://otologic.jp/free/license.html",
+        "https://pixabay.com/service/license-summary/",
+        "https://mixkit.co/license/",
+    )
+    for url in official_urls:
+        assert guide.count(url) == 1
+
+    assert "案内リンクから素材を自動取得・スクレイピングしません" in guide
+    assert "明示DL式スターターパック" in guide
+    assert "各素材の配布ページ・作者条件・最新規約が優先" in guide
+    assert "OtoLogic" in guide and "クレジットが必要" in guide
+    assert "Content ID" in guide
+    assert 'with gr.Accordion("フリー素材サイトの案内（外部サイト）"' in source
+    assert "gr.Markdown(MATERIAL_SOURCE_GUIDE_MD" in source
+
+
+def test_short_video_starter_pack_ui_surfaces_required_credit():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert "日本語ショート向け素材をダウンロード（約7.5 MB）" in source
+    assert "BGM {bgm_count}曲・SE {se_count}点" in source
+    assert "OtoLogic素材はクレジット必須" in source
+    assert "要クレジット" in source
+
+
 def test_shorts_visual_controls_are_available_for_input_and_obs():
     module = _module()
     source = WEB_APP.read_text(encoding="utf-8")

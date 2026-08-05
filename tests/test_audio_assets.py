@@ -114,6 +114,7 @@ def _catalog(zip_member="Audio/click.ogg"):
                                     "bgm",
                                     "bgm/loop.ogg",
                                     bgm_payload,
+                                    source_page="https://opengameart.org/content/test",
                                 )
                             ],
                         },
@@ -147,7 +148,13 @@ def _install_test_catalog(tmp_path, monkeypatch, *, catalog=None, payloads=None)
     calls = []
 
     def fake_urlopen(http_request, timeout, allowed_hosts=None):
-        calls.append((http_request.full_url, timeout))
+        calls.append(
+            (
+                http_request.full_url,
+                timeout,
+                http_request.get_header("Referer"),
+            )
+        )
         payload = payloads[http_request.full_url]
         return FakeResponse(payload, http_request.full_url)
 
@@ -156,12 +163,20 @@ def _install_test_catalog(tmp_path, monkeypatch, *, catalog=None, payloads=None)
     return status, calls
 
 
-def test_bundled_catalog_has_pinned_official_cc0_sources():
+def test_bundled_catalog_has_pinned_official_short_video_sources():
     catalog, _catalog_hash = audio_assets._load_catalog()
-    pack = next(pack for pack in catalog["packs"] if pack["id"] == "cc0-starter")
+    pack = next(
+        pack for pack in catalog["packs"] if pack["id"] == "short-video-starter"
+    )
     sources = {source["id"]: source for source in pack["sources"]}
 
-    assert pack["version"] == "2026.08.1"
+    assert audio_assets.DEFAULT_PACK_ID == "short-video-starter"
+    assert pack["version"] == "2026.08.2"
+    assert pack["license_files"] == [
+        "CC0-1.0.txt",
+        "OtoLogic-CC-BY-4.0.md",
+        "SOURCES.md",
+    ]
     assert sources["kenney-interface-sounds"]["size"] == 834536
     assert sources["kenney-interface-sounds"]["sha256"] == (
         "f2193d072726d6758a5f7871b2dcc54dcce0d5c35c6f0a62f92549b327c81232"
@@ -170,12 +185,51 @@ def test_bundled_catalog_has_pinned_official_cc0_sources():
     assert sources["kenney-impact-sounds"]["sha256"] == (
         "029d734af1582474edf3a694d1b0cebc97c1c152f2f39fa34d4c2bafc5de77f8"
     )
+    expected_otologic_sources = {
+        "otologic-camera-motion11": (
+            218425,
+            "698c14d03b6258cb24f155bb8a66660fdcb57afa1e58729e55018c05ba1566ca",
+        ),
+        "otologic-quiz-correct05": (
+            126699,
+            "08caa5234b92ba0afb47267b80fec1ad6f3f128421f3f7f177d1edb544cb4bf8",
+        ),
+        "otologic-quiz-wrong05": (
+            55670,
+            "7c172d45194e6a58ec9f278c40ff364bfc0d62772fc319a7bc8b2b56670d7bc8",
+        ),
+        "otologic-short-accent06": (
+            42193,
+            "ef86925ef0042610abe23ea3fbc7589e4b6ea99b2e7aec462d76160d51ee27bc",
+        ),
+        "otologic-sunny-narration": (
+            3843364,
+            "9dd90213ab089934abec073fcf45c50d725ffc3ed60d95abeb1437d63afdb14a",
+        ),
+    }
+    for source_id, (size, sha256) in expected_otologic_sources.items():
+        assert sources[source_id]["size"] == size
+        assert sources[source_id]["sha256"] == sha256
+        assert sources[source_id]["allowed_hosts"] == [
+            "otologic.jp",
+            "www.otologic.jp",
+        ]
     assert all(source["url"].startswith("https://") for source in sources.values())
     assets = [asset for source in sources.values() for asset in source["assets"]]
-    assert len(assets) == 20
-    assert sum(asset["kind"] == "bgm" for asset in assets) == 4
-    assert sum(asset["kind"] == "se" for asset in assets) == 16
-    assert all(asset["license"] == LICENSE for asset in assets)
+    assert len(assets) == 25
+    assert sum(asset["kind"] == "bgm" for asset in assets) == 5
+    assert sum(asset["kind"] == "se" for asset in assets) == 20
+    cc0_assets = [asset for asset in assets if asset["creator"] != "OtoLogic"]
+    assert len(cc0_assets) == 20
+    assert all(asset["license"] == LICENSE for asset in cc0_assets)
+    otologic_assets = [asset for asset in assets if asset["creator"] == "OtoLogic"]
+    assert len(otologic_assets) == 5
+    assert all(asset["license"]["id"] == "CC-BY-4.0" for asset in otologic_assets)
+    assert all(asset["license"]["attribution_required"] for asset in otologic_assets)
+    assert all(
+        "OtoLogic" in asset["license"]["attribution_text"]
+        for asset in otologic_assets
+    )
 
 
 def test_explicit_install_verifies_and_writes_provenance_manifest(
@@ -186,8 +240,16 @@ def test_explicit_install_verifies_and_writes_provenance_manifest(
     assert status.ready
     assert status.asset_count == 2
     assert calls == [
-        ("https://kenney.nl/test.zip", 7),
-        ("https://opengameart.org/test.ogg", 7),
+        (
+            "https://kenney.nl/test.zip",
+            7,
+            "https://kenney.nl/assets/interface-sounds",
+        ),
+        (
+            "https://opengameart.org/test.ogg",
+            7,
+            "https://opengameart.org/content/test",
+        ),
     ]
     assert (status.path / "se" / "click.ogg").read_bytes() == b"OggS-test-effect"
     assert (status.path / "bgm" / "loop.ogg").read_bytes() == (
@@ -199,6 +261,23 @@ def test_explicit_install_verifies_and_writes_provenance_manifest(
     assert manifest["sources"][0]["verified"] is True
     assert manifest["assets"][0]["creator"] == "Test creator"
     assert manifest["assets"][0]["media_validation"]["status"] == "passed"
+
+
+def test_catalog_rejects_unallowlisted_referer_and_missing_required_credit():
+    catalog, _payloads = _catalog()
+    catalog["packs"][0]["sources"][0]["source_page"] = (
+        "https://untrusted.example/source"
+    )
+    with pytest.raises(audio_assets.AudioAssetError, match="allowlisted HTTPS"):
+        audio_assets._validate_catalog(catalog)
+
+    catalog, _payloads = _catalog()
+    catalog["packs"][0]["sources"][0]["assets"][0]["license"] = {
+        **LICENSE,
+        "attribution_required": True,
+    }
+    with pytest.raises(audio_assets.AudioAssetError, match="attribution text"):
+        audio_assets._validate_catalog(catalog)
 
 
 def test_install_requires_ffprobe_for_media_validation(tmp_path, monkeypatch):
