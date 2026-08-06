@@ -345,7 +345,7 @@ def test_material_source_guide_uses_official_links_without_automatic_downloads()
 def test_short_video_starter_pack_ui_surfaces_required_credit():
     source = WEB_APP.read_text(encoding="utf-8")
 
-    assert "日本語ショート向け素材をダウンロード（約7.5 MB）" in source
+    assert "日本語ショート向け素材をダウンロード（約13.4 MB）" in source
     assert "BGM {bgm_count}曲・SE {se_count}点" in source
     assert "OtoLogic素材はクレジット必須" in source
     assert "要クレジット" in source

@@ -171,7 +171,7 @@ def test_bundled_catalog_has_pinned_official_short_video_sources():
     sources = {source["id"]: source for source in pack["sources"]}
 
     assert audio_assets.DEFAULT_PACK_ID == "short-video-starter"
-    assert pack["version"] == "2026.08.2"
+    assert pack["version"] == "2026.08.3"
     assert pack["license_files"] == [
         "CC0-1.0.txt",
         "OtoLogic-CC-BY-4.0.md",
@@ -206,6 +206,30 @@ def test_bundled_catalog_has_pinned_official_short_video_sources():
             3843364,
             "9dd90213ab089934abec073fcf45c50d725ffc3ed60d95abeb1437d63afdb14a",
         ),
+        "otologic-inspiration11": (
+            14858,
+            "d60346f6da7b076e4983d1711b9b995979a35c0b0e7d27ae35fa09c62a5b8013",
+        ),
+        "otologic-countdown06": (
+            55256,
+            "56e0725e9593974b69a9812db66f921dbcb17dea46de066073929b06c2116c87",
+        ),
+        "otologic-censor-bleep01": (
+            11360,
+            "156a7e2de346dec6802c573d68cd86cbbdcf08b362caaf7598480019fbc1b944",
+        ),
+        "otologic-kokage-yuttari-fast": (
+            2522104,
+            "7f07b016513c5042d55a4e69b7f7b6c0210d693bc325480a2332633cb1398e7f",
+        ),
+        "otologic-dotabata-panic-fast": (
+            1675126,
+            "48f532a9a2c2cc7502933a109ce7e25b30283eae40b58a85d2bf86af4e774b0f",
+        ),
+        "otologic-kumoyuki-slow": (
+            1648230,
+            "93d971d03abf818cab43a769ec46d1101c1b18a88e294fabf2c3fcb55af5828d",
+        ),
     }
     for source_id, (size, sha256) in expected_otologic_sources.items():
         assert sources[source_id]["size"] == size
@@ -216,14 +240,14 @@ def test_bundled_catalog_has_pinned_official_short_video_sources():
         ]
     assert all(source["url"].startswith("https://") for source in sources.values())
     assets = [asset for source in sources.values() for asset in source["assets"]]
-    assert len(assets) == 25
-    assert sum(asset["kind"] == "bgm" for asset in assets) == 5
-    assert sum(asset["kind"] == "se" for asset in assets) == 20
+    assert len(assets) == 31
+    assert sum(asset["kind"] == "bgm" for asset in assets) == 8
+    assert sum(asset["kind"] == "se" for asset in assets) == 23
     cc0_assets = [asset for asset in assets if asset["creator"] != "OtoLogic"]
     assert len(cc0_assets) == 20
     assert all(asset["license"] == LICENSE for asset in cc0_assets)
     otologic_assets = [asset for asset in assets if asset["creator"] == "OtoLogic"]
-    assert len(otologic_assets) == 5
+    assert len(otologic_assets) == 11
     assert all(asset["license"]["id"] == "CC-BY-4.0" for asset in otologic_assets)
     assert all(asset["license"]["attribution_required"] for asset in otologic_assets)
     assert all(

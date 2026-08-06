@@ -1,13 +1,13 @@
 # Downloadable audio asset compliance record
 
-Checked: 2026-08-05
+Checked: 2026-08-06
 
 The optional `short-video-starter` pack is not bundled into the application and is not
 downloaded during rendering. A user must explicitly start installation. The
 versioned cache is stored under
-`%LOCALAPPDATA%/ClipExtractor/asset-packs/short-video-starter/2026.08.2/` on
-Windows. The pinned source downloads total 7,458,402 bytes and install 5 BGM
-and 20 SE files.
+`%LOCALAPPDATA%/ClipExtractor/asset-packs/short-video-starter/2026.08.3/` on
+Windows. The pinned source downloads total 13,385,336 bytes and install 8 BGM
+and 23 SE files.
 
 ## Included sources
 
@@ -20,6 +20,12 @@ and 20 SE files.
 | Quiz Ding Dong / Buzzer 05 (short) | OtoLogic | https://otologic.jp/free/se/quiz01.html | CC BY 4.0 | Required |
 | Short Accent 06 (dry) | OtoLogic | https://otologic.jp/free/se/short-accent01.html | CC BY 4.0 | Required |
 | bo-tto hidamari (Narr) | OtoLogic | https://otologic.jp/free/bgm/pop-music01.html | CC BY 4.0 | Required |
+| Inspiration 11 (mid) | OtoLogic | https://otologic.jp/free/se/inspiration01.html | CC BY 4.0 | Required |
+| Countdown 06 (pop) | OtoLogic | https://otologic.jp/free/se/countdown01.html | CC BY 4.0 | Required |
+| Censor Bleep 1kHz 01 (short) | OtoLogic | https://otologic.jp/free/se/censor-bleep01.html | CC BY 4.0 | Required |
+| 木陰でゆったり (fast) | OtoLogic | https://otologic.jp/free/bgm/wood_mallet01.html | CC BY 4.0 | Required |
+| ドタバタパニック (fast) | OtoLogic | https://otologic.jp/free/bgm/wood_mallet01.html | CC BY 4.0 | Required |
+| 雲行きが怪しいぞ (slow) | OtoLogic | https://otologic.jp/free/bgm/wood_mallet01.html | CC BY 4.0 | Required |
 
 Kenney's official support page states that game assets on the asset pages are
 CC0: https://kenney.nl/support
@@ -73,11 +79,11 @@ commercial-use and editing permissions they have already verified.
 
 ## External source guide
 
-Guide links were reviewed against the official terms pages on 2026-08-05.
+Guide links were reviewed against the official terms pages on 2026-08-06.
 They are discovery links, not an approved-material allowlist. No media from
 these sites is bundled, scraped, or downloaded merely by opening the guide.
 The separate explicit starter-pack action downloads only the catalog-pinned
-pack files, including the five OtoLogic files listed above. Their
+pack files, including the eleven OtoLogic files listed above. Their
 redistribution permission and required credit were independently recorded.
 
 | Source | Media shown in the guide | Official terms | Material conditions surfaced in the UI |
