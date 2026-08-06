@@ -250,6 +250,72 @@ def test_obs_processing_profile_is_separate_from_archive_defaults(
     }
 
 
+def test_obs_media_profile_is_separate_and_roundtrips_for_auto_connect(
+    monkeypatch, tmp_path
+):
+    _save_with(monkeypatch, tmp_path)
+
+    web_app.save_obs_processing_defaults(
+        True,
+        "",
+        True,
+        "",
+        False,
+        5,
+        30,
+        90,
+        "combined",
+        True,
+        "pad",
+        "center",
+        True,
+        False,
+        False,
+        0.35,
+        False,
+        obs_audio_delivery_mode="separate",
+        obs_bgm_asset_id="bgm-obs-track",
+        obs_se_asset_id="se-obs-hit",
+        obs_bgm_gain_db=-22,
+        obs_se_gain_db=-6,
+        obs_se_cue_seconds=1.5,
+        obs_bgm_user_folder="D:/OBS/BGM",
+        obs_se_user_folder="D:/OBS/SE",
+        obs_vfx_user_folder="D:/OBS/VFX",
+        obs_vfx_asset_id="user:vfx:" + ("c" * 64),
+        obs_effect_preset="flash",
+        obs_vfx_automatic=True,
+        obs_vfx_cue_seconds=0.5,
+        obs_vfx_duration_seconds=1.75,
+        obs_vfx_anchor="top-right",
+        obs_vfx_scale_percent=80,
+        obs_vfx_opacity_percent=75,
+        obs_vfx_target="shorts",
+    )
+
+    loaded = web_app.load_defaults()
+    assert loaded["obs_media"] == {
+        "audio_delivery_mode": "separate",
+        "bgm_asset_id": "bgm-obs-track",
+        "se_asset_id": "se-obs-hit",
+        "bgm_user_folder": "D:/OBS/BGM",
+        "se_user_folder": "D:/OBS/SE",
+        "bgm_gain_db": -22,
+        "se_gain_db": -6,
+        "se_cue_seconds": 1.5,
+        "vfx_user_folder": "D:/OBS/VFX",
+        "vfx_asset_id": "user:vfx:" + ("c" * 64),
+        "effect_preset": "flash",
+        "vfx_automatic": True,
+        "vfx_cue_seconds": 0.5,
+        "vfx_duration_seconds": 1.75,
+        "vfx_anchor": "top-right",
+        "vfx_scale_percent": 80,
+        "vfx_opacity_percent": 75,
+        "vfx_target": "shorts",
+    }
+
+
 def test_roundtrip_preserves_defaults(monkeypatch, tmp_path):
     loaded = _save_with(monkeypatch, tmp_path)
     assert loaded["generate_shorts"] is False, loaded

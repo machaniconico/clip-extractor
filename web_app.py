@@ -177,6 +177,7 @@ from audio_delivery import (
     deliver_audio_groups,
     validate_audio_selection,
 )
+from audio_mix import AudioDeliveryMode
 from user_media import (
     UserMediaError,
     is_user_media_id,
@@ -277,6 +278,74 @@ OBS_LIVE_MEDIA_DEFAULTS = {
     "vfx_target": "both",
 }
 _OBS_RELOAD_MEDIA_DEFAULTS_KEY = "_reload_input_media_defaults"
+
+
+def _obs_media_settings_from_defaults(defaults: dict | None = None) -> dict:
+    """Return OBS media settings, falling back to the shared Input profile."""
+    source = defaults if defaults is not None else load_defaults()
+    saved_profile = source.get("obs_media")
+    if not isinstance(saved_profile, dict):
+        saved_profile = {}
+    return {
+        key: saved_profile.get(key, source.get(key, fallback))
+        for key, fallback in OBS_LIVE_MEDIA_DEFAULTS.items()
+    }
+
+
+def _normalise_obs_media_settings(
+    values: dict | None = None,
+    defaults: dict | None = None,
+) -> dict:
+    """Validate and serialise the OBS-specific BGM, SE, and VFX profile."""
+    base = _obs_media_settings_from_defaults(defaults)
+    if values:
+        for key in OBS_LIVE_MEDIA_DEFAULTS:
+            value = values.get(key)
+            if value is not None:
+                base[key] = value
+
+    audio = AudioDeliveryOptions(
+        delivery_mode=base["audio_delivery_mode"],
+        bgm_asset_id=base["bgm_asset_id"],
+        se_asset_id=base["se_asset_id"],
+        bgm_user_folder=base["bgm_user_folder"],
+        se_user_folder=base["se_user_folder"],
+        bgm_gain_db=base["bgm_gain_db"],
+        se_gain_db=base["se_gain_db"],
+        se_cue_seconds=base["se_cue_seconds"],
+    )
+    vfx = VfxOptions(
+        vfx_asset_id=base["vfx_asset_id"],
+        vfx_user_folder=base["vfx_user_folder"],
+        effect_preset=base["effect_preset"],
+        automatic=base["vfx_automatic"],
+        cue_seconds=base["vfx_cue_seconds"],
+        duration_seconds=base["vfx_duration_seconds"],
+        anchor=base["vfx_anchor"],
+        scale_percent=base["vfx_scale_percent"],
+        opacity_percent=base["vfx_opacity_percent"],
+        target=base["vfx_target"],
+    )
+    return {
+        "audio_delivery_mode": audio.delivery_mode.value,
+        "bgm_asset_id": audio.bgm_asset_id,
+        "se_asset_id": audio.se_asset_id,
+        "bgm_user_folder": audio.bgm_user_folder,
+        "se_user_folder": audio.se_user_folder,
+        "bgm_gain_db": audio.bgm_gain_db,
+        "se_gain_db": audio.se_gain_db,
+        "se_cue_seconds": audio.se_cue_seconds,
+        "vfx_user_folder": vfx.vfx_user_folder,
+        "vfx_asset_id": vfx.vfx_asset_id,
+        "effect_preset": vfx.effect_preset.value,
+        "vfx_automatic": vfx.automatic,
+        "vfx_cue_seconds": vfx.cue_seconds,
+        "vfx_duration_seconds": vfx.duration_seconds,
+        "vfx_anchor": vfx.anchor.value,
+        "vfx_scale_percent": vfx.scale_percent,
+        "vfx_opacity_percent": vfx.opacity_percent,
+        "vfx_target": vfx.target.value,
+    }
 
 
 def _obs_processing_settings_from_defaults(defaults: dict | None = None) -> dict:
@@ -603,6 +672,7 @@ def _save_obs_connection_defaults(
     watch_folder: str,
     auto_process: bool,
     processing_settings: dict | None = None,
+    media_settings: dict | None = None,
 ) -> None:
     """Persist OBS controls while keeping the password out of tracked JSON."""
     data = load_defaults()
@@ -620,6 +690,11 @@ def _save_obs_connection_defaults(
     if processing_settings is not None:
         data["obs_processing"] = _normalise_obs_processing_settings(
             processing_settings,
+            defaults=data,
+        )
+    if media_settings is not None:
+        data["obs_media"] = _normalise_obs_media_settings(
+            media_settings,
             defaults=data,
         )
     SETTINGS_FILE.write_text(
@@ -672,6 +747,7 @@ def save_defaults(ai_provider, ai_model,
         if key in OBS_CONNECTION_DEFAULTS
     }
     saved_obs_processing = loaded_defaults.get("obs_processing")
+    saved_obs_media = loaded_defaults.get("obs_media")
     audio_saved = AudioDeliveryOptions(
         delivery_mode=audio_delivery_mode,
         bgm_asset_id=bgm_asset_id,
@@ -744,6 +820,8 @@ def save_defaults(ai_provider, ai_model,
     data.update(saved_obs)
     if isinstance(saved_obs_processing, dict):
         data["obs_processing"] = dict(saved_obs_processing)
+    if isinstance(saved_obs_media, dict):
+        data["obs_media"] = dict(saved_obs_media)
     SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return "Settings saved as default!"
 
@@ -769,6 +847,24 @@ def save_obs_processing_defaults(
     auto_start_without_prompt_confirmation=False,
     shorts_blur_strength=20,
     shorts_title_position="top",
+    obs_audio_delivery_mode=None,
+    obs_bgm_asset_id=None,
+    obs_se_asset_id=None,
+    obs_bgm_gain_db=None,
+    obs_se_gain_db=None,
+    obs_se_cue_seconds=None,
+    obs_bgm_user_folder=None,
+    obs_se_user_folder=None,
+    obs_vfx_user_folder=None,
+    obs_vfx_asset_id=None,
+    obs_effect_preset=None,
+    obs_vfx_automatic=None,
+    obs_vfx_cue_seconds=None,
+    obs_vfx_duration_seconds=None,
+    obs_vfx_anchor=None,
+    obs_vfx_scale_percent=None,
+    obs_vfx_opacity_percent=None,
+    obs_vfx_target=None,
 ):
     """Persist the dedicated OBS processing profile without changing Input."""
     data = load_defaults()
@@ -795,6 +891,31 @@ def save_obs_processing_defaults(
         shorts_blur_strength=shorts_blur_strength,
         shorts_title_position=shorts_title_position,
     )
+    media_values = {
+        "audio_delivery_mode": obs_audio_delivery_mode,
+        "bgm_asset_id": obs_bgm_asset_id,
+        "se_asset_id": obs_se_asset_id,
+        "bgm_gain_db": obs_bgm_gain_db,
+        "se_gain_db": obs_se_gain_db,
+        "se_cue_seconds": obs_se_cue_seconds,
+        "bgm_user_folder": obs_bgm_user_folder,
+        "se_user_folder": obs_se_user_folder,
+        "vfx_user_folder": obs_vfx_user_folder,
+        "vfx_asset_id": obs_vfx_asset_id,
+        "effect_preset": obs_effect_preset,
+        "vfx_automatic": obs_vfx_automatic,
+        "vfx_cue_seconds": obs_vfx_cue_seconds,
+        "vfx_duration_seconds": obs_vfx_duration_seconds,
+        "vfx_anchor": obs_vfx_anchor,
+        "vfx_scale_percent": obs_vfx_scale_percent,
+        "vfx_opacity_percent": obs_vfx_opacity_percent,
+        "vfx_target": obs_vfx_target,
+    }
+    if any(value is not None for value in media_values.values()):
+        data["obs_media"] = _normalise_obs_media_settings(
+            media_values,
+            defaults=data,
+        )
     SETTINGS_FILE.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -1543,6 +1664,20 @@ def render_phase(
             )
             if modes.enable_clips or modes.enable_shorts:
                 validate_audio_selection(audio_options)
+            if audio_options.enabled:
+                log(
+                    "  BGM/SE selected: "
+                    f"bgm={audio_options.bgm_asset_id or 'なし'}, "
+                    f"se={audio_options.se_asset_id or 'なし'}, "
+                    f"mode={audio_options.delivery_mode.value}"
+                )
+                if audio_options.delivery_mode is AudioDeliveryMode.BOTH:
+                    log(
+                        "  出力方法=両方: clean MP4を主ファイルとして残し、"
+                        "音声入りは *_mixed.mp4 で出力します"
+                    )
+            else:
+                log("  BGM/SE素材未選択: clean MP4のみを出力します")
             vfx_options = VfxOptions(
                 vfx_asset_id=vfx_asset_id,
                 vfx_user_folder=vfx_user_folder,
@@ -2355,8 +2490,9 @@ def _obs_settings_for_render(settings: dict) -> dict:
     if not current.pop(_OBS_RELOAD_MEDIA_DEFAULTS_KEY, False):
         return current
     latest = load_defaults()
-    for key, fallback in OBS_LIVE_MEDIA_DEFAULTS.items():
-        current[key] = latest.get(key, fallback)
+    latest_media = _obs_media_settings_from_defaults(latest)
+    for key in OBS_LIVE_MEDIA_DEFAULTS:
+        current[key] = latest_media[key]
 
     for kind, id_key, folder_key in (
         ("bgm", "bgm_asset_id", "bgm_user_folder"),
@@ -3836,6 +3972,7 @@ def _start_obs_watch_impl(
     whisper_model: str,
     output_base_dir: str,
     obs_processing_settings: dict | None = None,
+    media_settings: dict | None = None,
 ) -> str:
     """Implementation shared by manual and automatic OBS connection starts."""
     global _obs_watcher, _obs_generation, _obs_retry_handler
@@ -3893,6 +4030,13 @@ def _start_obs_watch_impl(
         return msg
     settings.update(obs_profile)
     settings["obs_processing"] = obs_profile
+    obs_media = (
+        _normalise_obs_media_settings(media_settings, defaults=settings)
+        if media_settings is not None
+        else _obs_media_settings_from_defaults(settings)
+    )
+    settings.update(obs_media)
+    settings["obs_media"] = obs_media
     try:
         # These legacy arguments remain part of the public start signature for
         # compatibility with callers outside the UI.  The dedicated profile
@@ -3970,6 +4114,7 @@ def _start_obs_watch_impl(
             config["watch_folder"],
             bool(auto_process),
             processing_settings=obs_profile,
+            media_settings=media_settings,
         )
     except Exception as exc:
         msg = f"OBS連携設定の保存に失敗しました: {exc}"
@@ -4111,6 +4256,24 @@ def start_obs_watch(
     obs_auto_start_without_prompt_confirmation=None,
     obs_shorts_blur_strength=None,
     obs_shorts_title_position=None,
+    obs_audio_delivery_mode=None,
+    obs_bgm_asset_id=None,
+    obs_se_asset_id=None,
+    obs_bgm_gain_db=None,
+    obs_se_gain_db=None,
+    obs_se_cue_seconds=None,
+    obs_bgm_user_folder=None,
+    obs_se_user_folder=None,
+    obs_vfx_user_folder=None,
+    obs_vfx_asset_id=None,
+    obs_effect_preset=None,
+    obs_vfx_automatic=None,
+    obs_vfx_cue_seconds=None,
+    obs_vfx_duration_seconds=None,
+    obs_vfx_anchor=None,
+    obs_vfx_scale_percent=None,
+    obs_vfx_opacity_percent=None,
+    obs_vfx_target=None,
 ) -> str:
     """Manually (re)start OBS integration from the Gradio controls.
 
@@ -4120,6 +4283,7 @@ def start_obs_watch(
     """
     _obs_auto_connect_cancel.set()
     obs_processing_settings = None
+    obs_media_settings = None
     if any(
         value is not None
         for value in (
@@ -4163,6 +4327,28 @@ def start_obs_watch(
             shorts_blur_strength=obs_shorts_blur_strength,
             shorts_title_position=obs_shorts_title_position,
         )
+    media_values = {
+        "audio_delivery_mode": obs_audio_delivery_mode,
+        "bgm_asset_id": obs_bgm_asset_id,
+        "se_asset_id": obs_se_asset_id,
+        "bgm_gain_db": obs_bgm_gain_db,
+        "se_gain_db": obs_se_gain_db,
+        "se_cue_seconds": obs_se_cue_seconds,
+        "bgm_user_folder": obs_bgm_user_folder,
+        "se_user_folder": obs_se_user_folder,
+        "vfx_user_folder": obs_vfx_user_folder,
+        "vfx_asset_id": obs_vfx_asset_id,
+        "effect_preset": obs_effect_preset,
+        "vfx_automatic": obs_vfx_automatic,
+        "vfx_cue_seconds": obs_vfx_cue_seconds,
+        "vfx_duration_seconds": obs_vfx_duration_seconds,
+        "vfx_anchor": obs_vfx_anchor,
+        "vfx_scale_percent": obs_vfx_scale_percent,
+        "vfx_opacity_percent": obs_vfx_opacity_percent,
+        "vfx_target": obs_vfx_target,
+    }
+    if any(value is not None for value in media_values.values()):
+        obs_media_settings = _normalise_obs_media_settings(media_values)
     with _obs_start_lock:
         return _start_obs_watch_impl(
             method=method,
@@ -4181,6 +4367,7 @@ def start_obs_watch(
             whisper_model=whisper_model,
             output_base_dir=output_base_dir,
             obs_processing_settings=obs_processing_settings,
+            media_settings=obs_media_settings,
         )
 
 
@@ -5410,6 +5597,56 @@ def create_ui():
                 "この変更をOBS自動生成にも使う場合はデフォルト設定を保存してください。"
             )
 
+    obs_media_defaults = _obs_media_settings_from_defaults(defaults)
+    obs_bgm_folder_default = obs_media_defaults["bgm_user_folder"]
+    obs_se_folder_default = obs_media_defaults["se_user_folder"]
+    obs_vfx_folder_default = obs_media_defaults["vfx_user_folder"]
+    obs_bgm_user_assets, _obs_bgm_folder_error = _user_media_for_ui(
+        obs_bgm_folder_default,
+        "bgm",
+    )
+    obs_se_user_assets, _obs_se_folder_error = _user_media_for_ui(
+        obs_se_folder_default,
+        "se",
+    )
+    obs_vfx_user_assets, _obs_vfx_folder_error = _user_media_for_ui(
+        obs_vfx_folder_default,
+        "vfx",
+    )
+    obs_bgm_choices = _audio_choices_from_assets(
+        "bgm",
+        obs_bgm_user_assets,
+        include_builtin=audio_pack_ready,
+    )
+    obs_se_choices = _audio_choices_from_assets(
+        "se",
+        obs_se_user_assets,
+        include_builtin=audio_pack_ready,
+    )
+    obs_vfx_choices = _vfx_asset_choices(obs_vfx_user_assets)
+    obs_bgm_default = obs_media_defaults["bgm_asset_id"]
+    obs_se_default = obs_media_defaults["se_asset_id"]
+    obs_vfx_default = obs_media_defaults["vfx_asset_id"]
+    if obs_bgm_default not in {value for _label, value in obs_bgm_choices}:
+        obs_bgm_default = ""
+    if obs_se_default not in {value for _label, value in obs_se_choices}:
+        obs_se_default = ""
+    if obs_vfx_default not in {value for _label, value in obs_vfx_choices}:
+        obs_vfx_default = ""
+    obs_initial_media_status = [
+        _audio_pack_status_text(),
+        "OBS用手持ち素材: "
+        f"BGM {len(obs_bgm_user_assets)}件 / SE {len(obs_se_user_assets)}件 / "
+        f"VFX {len(obs_vfx_user_assets)}件",
+    ]
+    for _label, _message in (
+        ("BGM", _obs_bgm_folder_error),
+        ("SE", _obs_se_folder_error),
+        ("VFX", _obs_vfx_folder_error),
+    ):
+        if _message:
+            obs_initial_media_status.append(f"⚠️ **OBS用{_label}フォルダ:** {_message}")
+
     with gr.Blocks(
         title="Clip Extractor - 配信切り抜き自動生成",
         analytics_enabled=False,
@@ -6343,6 +6580,243 @@ def create_ui():
                                 info="ショート動画の字幕を単語ごとにハイライトします",
                             )
 
+                    with gr.Accordion(
+                        "OBS用 BGM・SE・VFX素材と出力",
+                        open=True,
+                    ):
+                        gr.Markdown(
+                            "OBS自動処理で使う素材をInputとは別に指定できます。"
+                            "保存後は起動時自動連携と監視中の再試行にも反映されます。"
+                        )
+                        with gr.Accordion("OBS用手持ち素材の参照フォルダ", open=False):
+                            with gr.Row():
+                                obs_bgm_user_folder = gr.Textbox(
+                                    value=obs_bgm_folder_default,
+                                    label="OBS用BGMフォルダ",
+                                )
+                                obs_bgm_folder_btn = gr.Button(
+                                    "BGMフォルダを参照",
+                                    variant="secondary",
+                                    min_width=180,
+                                )
+                            with gr.Row():
+                                obs_se_user_folder = gr.Textbox(
+                                    value=obs_se_folder_default,
+                                    label="OBS用SEフォルダ",
+                                )
+                                obs_se_folder_btn = gr.Button(
+                                    "SEフォルダを参照",
+                                    variant="secondary",
+                                    min_width=180,
+                                )
+                            with gr.Row():
+                                obs_vfx_user_folder = gr.Textbox(
+                                    value=obs_vfx_folder_default,
+                                    label="OBS用VFXフォルダ",
+                                )
+                                obs_vfx_folder_btn = gr.Button(
+                                    "VFXフォルダを参照",
+                                    variant="secondary",
+                                    min_width=180,
+                                )
+
+                        obs_audio_pack_status = gr.Markdown(
+                            "\n\n".join(obs_initial_media_status)
+                        )
+                        with gr.Row():
+                            obs_install_audio_pack_btn = gr.Button(
+                                "日本語ショート向け素材をダウンロード（約13.4 MB）",
+                                variant="secondary",
+                            )
+                            obs_refresh_media_library_btn = gr.Button(
+                                "OBS用3フォルダを再スキャン",
+                                variant="secondary",
+                            )
+
+                        with gr.Row():
+                            obs_bgm_asset_id = gr.Dropdown(
+                                choices=obs_bgm_choices,
+                                value=obs_bgm_default,
+                                label="OBS用BGM",
+                                interactive=audio_pack_ready or bool(obs_bgm_user_assets),
+                            )
+                            obs_se_asset_id = gr.Dropdown(
+                                choices=obs_se_choices,
+                                value=obs_se_default,
+                                label="OBS用SE",
+                                interactive=audio_pack_ready or bool(obs_se_user_assets),
+                            )
+                        with gr.Row():
+                            obs_bgm_gain_db = gr.Slider(
+                                minimum=-36,
+                                maximum=0,
+                                step=1,
+                                value=obs_media_defaults["bgm_gain_db"],
+                                label="OBS用BGM音量 (dB)",
+                            )
+                            obs_se_gain_db = gr.Slider(
+                                minimum=-36,
+                                maximum=0,
+                                step=1,
+                                value=obs_media_defaults["se_gain_db"],
+                                label="OBS用SE音量 (dB)",
+                            )
+                        with gr.Row():
+                            obs_se_cue_seconds = gr.Number(
+                                minimum=0,
+                                value=obs_media_defaults["se_cue_seconds"],
+                                label="OBS用SEを鳴らす位置 (秒)",
+                            )
+                            obs_audio_delivery_mode = gr.Radio(
+                                choices=[
+                                    ("別ファイル（編集向け）", "separate"),
+                                    ("動画へミックス", "mixed"),
+                                    ("両方", "both"),
+                                ],
+                                value=obs_media_defaults["audio_delivery_mode"],
+                                label="OBS用BGM・SEの出力方法",
+                            )
+
+                        obs_vfx_automatic = gr.Checkbox(
+                            label="OBS用VFXと簡易エフェクトの選択・配置を自動にする",
+                            value=obs_media_defaults["vfx_automatic"],
+                            info="追加のAI通信なしで、OBSの切り抜きごとに再現可能な選択と配置を行います",
+                        )
+                        obs_manual_vfx_enabled = not bool(
+                            obs_media_defaults["vfx_automatic"]
+                        )
+                        with gr.Row():
+                            obs_vfx_asset_id = gr.Dropdown(
+                                choices=obs_vfx_choices,
+                                value=obs_vfx_default,
+                                label="OBS用VFX",
+                                interactive=obs_manual_vfx_enabled and bool(obs_vfx_user_assets),
+                            )
+                            obs_effect_preset = gr.Dropdown(
+                                choices=[
+                                    ("使用しない", "none"),
+                                    ("先頭・末尾フェード", "fade"),
+                                    ("パンチズーム", "punch"),
+                                    ("短いフラッシュ", "flash"),
+                                ],
+                                value=obs_media_defaults["effect_preset"],
+                                label="OBS用簡易エフェクト",
+                                interactive=obs_manual_vfx_enabled,
+                            )
+                        with gr.Row():
+                            obs_vfx_cue_seconds = gr.Number(
+                                minimum=0,
+                                value=obs_media_defaults["vfx_cue_seconds"],
+                                label="OBS用VFX開始位置 (秒)",
+                                interactive=obs_manual_vfx_enabled,
+                            )
+                            obs_vfx_duration_seconds = gr.Number(
+                                minimum=0.1,
+                                value=obs_media_defaults["vfx_duration_seconds"],
+                                label="OBS用VFX表示時間 (秒)",
+                                interactive=obs_manual_vfx_enabled,
+                            )
+                            obs_vfx_anchor = gr.Dropdown(
+                                choices=[
+                                    ("左上", "top-left"),
+                                    ("上", "top"),
+                                    ("右上", "top-right"),
+                                    ("左", "left"),
+                                    ("中央", "center"),
+                                    ("右", "right"),
+                                    ("左下", "bottom-left"),
+                                    ("下", "bottom"),
+                                    ("右下", "bottom-right"),
+                                ],
+                                value=obs_media_defaults["vfx_anchor"],
+                                label="OBS用VFX配置",
+                                interactive=obs_manual_vfx_enabled,
+                            )
+                        with gr.Row():
+                            obs_vfx_scale_percent = gr.Slider(
+                                minimum=10,
+                                maximum=200,
+                                step=5,
+                                value=obs_media_defaults["vfx_scale_percent"],
+                                label="OBS用VFX素材倍率 (%)",
+                            )
+                            obs_vfx_opacity_percent = gr.Slider(
+                                minimum=0,
+                                maximum=100,
+                                step=5,
+                                value=obs_media_defaults["vfx_opacity_percent"],
+                                label="OBS用VFX不透明度 (%)",
+                            )
+                            obs_vfx_target = gr.Radio(
+                                choices=[
+                                    ("通常・Shorts", "both"),
+                                    ("通常のみ", "clips"),
+                                    ("Shortsのみ", "shorts"),
+                                ],
+                                value=obs_media_defaults["vfx_target"],
+                                label="OBS用VFX適用先",
+                            )
+
+                        obs_bgm_folder_btn.click(
+                            fn=lambda current: pick_source_media_folder_dialog(
+                                current, "OBS用BGMフォルダを選択"
+                            ),
+                            inputs=obs_bgm_user_folder,
+                            outputs=obs_bgm_user_folder,
+                        )
+                        obs_se_folder_btn.click(
+                            fn=lambda current: pick_source_media_folder_dialog(
+                                current, "OBS用SEフォルダを選択"
+                            ),
+                            inputs=obs_se_user_folder,
+                            outputs=obs_se_user_folder,
+                        )
+                        obs_vfx_folder_btn.click(
+                            fn=lambda current: pick_source_media_folder_dialog(
+                                current, "OBS用VFXフォルダを選択"
+                            ),
+                            inputs=obs_vfx_user_folder,
+                            outputs=obs_vfx_user_folder,
+                        )
+                        obs_media_refresh_inputs = [
+                            obs_bgm_asset_id,
+                            obs_se_asset_id,
+                            obs_vfx_asset_id,
+                            obs_bgm_user_folder,
+                            obs_se_user_folder,
+                            obs_vfx_user_folder,
+                            obs_vfx_automatic,
+                        ]
+                        obs_media_refresh_outputs = [
+                            obs_audio_pack_status,
+                            obs_bgm_asset_id,
+                            obs_se_asset_id,
+                            obs_vfx_asset_id,
+                        ]
+                        obs_install_audio_pack_btn.click(
+                            fn=install_audio_pack_ui,
+                            inputs=obs_media_refresh_inputs,
+                            outputs=obs_media_refresh_outputs,
+                            concurrency_limit=1,
+                        )
+                        obs_refresh_media_library_btn.click(
+                            fn=refresh_media_library_ui,
+                            inputs=obs_media_refresh_inputs,
+                            outputs=obs_media_refresh_outputs,
+                            concurrency_limit=1,
+                        )
+                        obs_vfx_automatic.change(
+                            fn=vfx_manual_control_updates,
+                            inputs=obs_vfx_automatic,
+                            outputs=[
+                                obs_vfx_asset_id,
+                                obs_effect_preset,
+                                obs_vfx_cue_seconds,
+                                obs_vfx_duration_seconds,
+                                obs_vfx_anchor,
+                            ],
+                        )
+
                     with gr.Row():
                         obs_save_processing_btn = gr.Button(
                             "OBS用設定を保存",
@@ -6376,6 +6850,24 @@ def create_ui():
                             obs_auto_start_without_prompt_confirmation,
                             obs_shorts_blur_strength,
                             obs_shorts_title_position,
+                            obs_audio_delivery_mode,
+                            obs_bgm_asset_id,
+                            obs_se_asset_id,
+                            obs_bgm_gain_db,
+                            obs_se_gain_db,
+                            obs_se_cue_seconds,
+                            obs_bgm_user_folder,
+                            obs_se_user_folder,
+                            obs_vfx_user_folder,
+                            obs_vfx_asset_id,
+                            obs_effect_preset,
+                            obs_vfx_automatic,
+                            obs_vfx_cue_seconds,
+                            obs_vfx_duration_seconds,
+                            obs_vfx_anchor,
+                            obs_vfx_scale_percent,
+                            obs_vfx_opacity_percent,
+                            obs_vfx_target,
                         ],
                         outputs=obs_save_processing_msg,
                     )
@@ -7066,6 +7558,24 @@ def create_ui():
                 obs_auto_start_without_prompt_confirmation,
                 obs_shorts_blur_strength,
                 obs_shorts_title_position,
+                obs_audio_delivery_mode,
+                obs_bgm_asset_id,
+                obs_se_asset_id,
+                obs_bgm_gain_db,
+                obs_se_gain_db,
+                obs_se_cue_seconds,
+                obs_bgm_user_folder,
+                obs_se_user_folder,
+                obs_vfx_user_folder,
+                obs_vfx_asset_id,
+                obs_effect_preset,
+                obs_vfx_automatic,
+                obs_vfx_cue_seconds,
+                obs_vfx_duration_seconds,
+                obs_vfx_anchor,
+                obs_vfx_scale_percent,
+                obs_vfx_opacity_percent,
+                obs_vfx_target,
             ],
             outputs=obs_status_box,
         )
