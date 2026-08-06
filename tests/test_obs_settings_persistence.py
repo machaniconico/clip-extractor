@@ -83,6 +83,55 @@ def test_obs_render_settings_reload_latest_media_and_clear_stale_in_memory(
     assert any("VFX素材" in message for message in statuses)
 
 
+def test_obs_render_settings_prefer_saved_obs_media_profile(monkeypatch):
+    monkeypatch.setattr(
+        web_app,
+        "load_defaults",
+        lambda: {
+            "audio_delivery_mode": "both",
+            "bgm_asset_id": "input-bgm",
+            "obs_media": {
+                "audio_delivery_mode": "mixed",
+                "bgm_asset_id": "obs-bgm",
+                "se_asset_id": "obs-se",
+                "bgm_user_folder": "D:/obs/bgm",
+                "se_user_folder": "D:/obs/se",
+                "vfx_user_folder": "",
+                "vfx_asset_id": "",
+                "effect_preset": "none",
+                "vfx_automatic": False,
+                "vfx_cue_seconds": 0.0,
+                "vfx_duration_seconds": 1.0,
+                "vfx_anchor": "center",
+                "vfx_scale_percent": 100.0,
+                "vfx_opacity_percent": 100.0,
+                "vfx_target": "both",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        web_app,
+        "get_installed_asset",
+        lambda asset_id: SimpleNamespace(
+            kind="bgm" if asset_id == "obs-bgm" else "se"
+        ),
+    )
+    monkeypatch.setattr(
+        web_app,
+        "resolve_user_media_asset",
+        lambda *_args: SimpleNamespace(kind="se"),
+    )
+
+    refreshed = web_app._obs_settings_for_render(
+        {web_app._OBS_RELOAD_MEDIA_DEFAULTS_KEY: True}
+    )
+
+    assert refreshed["audio_delivery_mode"] == "mixed"
+    assert refreshed["bgm_asset_id"] == "obs-bgm"
+    assert refreshed["se_asset_id"] == "obs-se"
+    assert refreshed["bgm_user_folder"] == "D:/obs/bgm"
+
+
 def test_obs_render_settings_auto_vfx_missing_folder_uses_builtin_effects(
     monkeypatch,
 ):
@@ -174,6 +223,81 @@ def test_start_obs_watch_persists_password_for_next_launch(monkeypatch, tmp_path
         assert reloaded["obs_stop_event"] == "record"
         assert reloaded["obs_watch_folder"] == "C:/recordings"
         assert reloaded["obs_auto_process"] is False
+    finally:
+        web_app.stop_obs_watch()
+
+
+def test_start_obs_watch_persists_media_controls_for_live_pipeline(
+    monkeypatch, tmp_path
+):
+    settings_file = tmp_path / "default_settings.json"
+    password_file = tmp_path / ".obs_password"
+    monkeypatch.setattr(web_app, "SETTINGS_FILE", settings_file)
+    monkeypatch.setattr(web_app, "OBS_PASSWORD_FILE", password_file)
+    monkeypatch.setattr(
+        obs_integration,
+        "create_watcher",
+        lambda *_args, **_kwargs: _FakeWatcher(),
+    )
+
+    try:
+        status = web_app.start_obs_watch(
+            "folder",
+            "localhost",
+            4455,
+            "",
+            False,
+            "record",
+            "C:/recordings",
+            False,
+            False,
+            5,
+            "combined",
+            False,
+            "gemini",
+            "large-v3",
+            "",
+            obs_audio_delivery_mode="mixed",
+            obs_bgm_asset_id="bgm-obs",
+            obs_se_asset_id="se-obs",
+            obs_bgm_gain_db=-20,
+            obs_se_gain_db=-5,
+            obs_se_cue_seconds=0.75,
+            obs_bgm_user_folder="C:/OBS/BGM",
+            obs_se_user_folder="C:/OBS/SE",
+            obs_vfx_user_folder="C:/OBS/VFX",
+            obs_vfx_asset_id="",
+            obs_effect_preset="punch",
+            obs_vfx_automatic=False,
+            obs_vfx_cue_seconds=0.25,
+            obs_vfx_duration_seconds=1.25,
+            obs_vfx_anchor="bottom",
+            obs_vfx_scale_percent=90,
+            obs_vfx_opacity_percent=85,
+            obs_vfx_target="both",
+        )
+
+        assert status == "connected"
+        assert web_app.load_defaults()["obs_media"] == {
+            "audio_delivery_mode": "mixed",
+            "bgm_asset_id": "bgm-obs",
+            "se_asset_id": "se-obs",
+            "bgm_user_folder": "C:/OBS/BGM",
+            "se_user_folder": "C:/OBS/SE",
+            "bgm_gain_db": -20,
+            "se_gain_db": -5,
+            "se_cue_seconds": 0.75,
+            "vfx_user_folder": "C:/OBS/VFX",
+            "vfx_asset_id": "",
+            "effect_preset": "punch",
+            "vfx_automatic": False,
+            "vfx_cue_seconds": 0.25,
+            "vfx_duration_seconds": 1.25,
+            "vfx_anchor": "bottom",
+            "vfx_scale_percent": 90,
+            "vfx_opacity_percent": 85,
+            "vfx_target": "both",
+        }
     finally:
         web_app.stop_obs_watch()
 

@@ -318,6 +318,49 @@ def test_audio_delivery_controls_are_persisted_and_rendered():
         assert _click_input_names(module, button)[-18:] == expected
 
 
+def test_obs_tab_exposes_media_controls_and_wires_them_to_save_and_start():
+    module = _module()
+    source = WEB_APP.read_text(encoding="utf-8")
+    obs_tab = source.index('with gr.Tab("OBS連携 / OBS")')
+    settings_tab = source.index('with gr.Tab("Settings / 設定")')
+    media_section = source.index('"OBS用 BGM・SE・VFX素材と出力"', obs_tab)
+    assert obs_tab < media_section < settings_tab
+    for control in (
+        "obs_bgm_user_folder =",
+        "obs_se_user_folder =",
+        "obs_vfx_user_folder =",
+        "obs_bgm_asset_id =",
+        "obs_se_asset_id =",
+        "obs_audio_delivery_mode =",
+        "obs_vfx_automatic =",
+        "obs_effect_preset =",
+        "obs_vfx_target =",
+    ):
+        assert control in source[media_section:settings_tab]
+    for button in ("obs_save_processing_btn", "obs_start_btn"):
+        inputs = _click_input_names(module, button)
+        assert inputs[-18:] == [
+            "obs_audio_delivery_mode",
+            "obs_bgm_asset_id",
+            "obs_se_asset_id",
+            "obs_bgm_gain_db",
+            "obs_se_gain_db",
+            "obs_se_cue_seconds",
+            "obs_bgm_user_folder",
+            "obs_se_user_folder",
+            "obs_vfx_user_folder",
+            "obs_vfx_asset_id",
+            "obs_effect_preset",
+            "obs_vfx_automatic",
+            "obs_vfx_cue_seconds",
+            "obs_vfx_duration_seconds",
+            "obs_vfx_anchor",
+            "obs_vfx_scale_percent",
+            "obs_vfx_opacity_percent",
+            "obs_vfx_target",
+        ]
+
+
 def test_material_source_guide_uses_official_links_without_automatic_downloads():
     module = _module()
     source = WEB_APP.read_text(encoding="utf-8")
@@ -812,6 +855,12 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_audio_alpha", "obs_karaoke",
         "obs_auto_start_without_prompt_confirmation",
         "obs_shorts_blur_strength", "obs_shorts_title_position",
+        "obs_audio_delivery_mode", "obs_bgm_asset_id", "obs_se_asset_id",
+        "obs_bgm_gain_db", "obs_se_gain_db", "obs_se_cue_seconds",
+        "obs_bgm_user_folder", "obs_se_user_folder", "obs_vfx_user_folder",
+        "obs_vfx_asset_id", "obs_effect_preset", "obs_vfx_automatic",
+        "obs_vfx_cue_seconds", "obs_vfx_duration_seconds", "obs_vfx_anchor",
+        "obs_vfx_scale_percent", "obs_vfx_opacity_percent", "obs_vfx_target",
     ]
     assert _click_input_names(module, "obs_start_btn") == [
         "obs_trigger_radio", "obs_host", "obs_port", "obs_password",
@@ -824,6 +873,12 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_generate_thumbnails", "obs_audio_fusion", "obs_audio_alpha",
         "obs_karaoke", "obs_auto_start_without_prompt_confirmation",
         "obs_shorts_blur_strength", "obs_shorts_title_position",
+        "obs_audio_delivery_mode", "obs_bgm_asset_id", "obs_se_asset_id",
+        "obs_bgm_gain_db", "obs_se_gain_db", "obs_se_cue_seconds",
+        "obs_bgm_user_folder", "obs_se_user_folder", "obs_vfx_user_folder",
+        "obs_vfx_asset_id", "obs_effect_preset", "obs_vfx_automatic",
+        "obs_vfx_cue_seconds", "obs_vfx_duration_seconds", "obs_vfx_anchor",
+        "obs_vfx_scale_percent", "obs_vfx_opacity_percent", "obs_vfx_target",
     ]
 
 
