@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "catalog_id": "clip-extractor-audio-assets",
-  "catalog_updated_at": "2026-08-05",
+  "catalog_updated_at": "2026-08-06",
   "packs": [
     {
       "id": "short-video-starter",
-      "version": "2026.08.2",
+      "version": "2026.08.3",
       "display_name": "日本語ショート向け BGM・SE スターターパック",
-      "description": "商用動画にも使えるCC0 1.0 / CC BY 4.0のBGM 5曲と効果音20点。OtoLogic素材はクレジット必須。",
-      "license_checked_at": "2026-08-05",
+      "description": "商用動画にも使えるCC0 1.0 / CC BY 4.0のBGM 8曲と効果音23点。OtoLogic素材はクレジット必須。",
+      "license_checked_at": "2026-08-06",
       "license_files": [
         "CC0-1.0.txt",
         "OtoLogic-CC-BY-4.0.md",
@@ -621,6 +621,204 @@
               "creator": "OtoLogic",
               "source_page": "https://otologic.jp/free/bgm/pop-music01.html",
               "modifications": "None; extracted byte-for-byte from the source archive.",
+              "license": {
+                "id": "CC-BY-4.0",
+                "name": "Creative Commons Attribution 4.0 International",
+                "url": "https://creativecommons.org/licenses/by/4.0/",
+                "attribution_required": true,
+                "attribution_text": "音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0"
+              }
+            }
+          ]
+        },
+        {
+          "id": "otologic-inspiration11",
+          "type": "file",
+          "url": "https://otologic.jp/sounds/se/pre2/Inspiration11-2%28Mid%29.mp3",
+          "allowed_hosts": [
+            "otologic.jp",
+            "www.otologic.jp"
+          ],
+          "source_page": "https://otologic.jp/free/se/inspiration01.html",
+          "size": 14858,
+          "max_bytes": 500000,
+          "sha256": "d60346f6da7b076e4983d1711b9b995979a35c0b0e7d27ae35fa09c62a5b8013",
+          "assets": [
+            {
+              "id": "se-otologic-inspiration-mid",
+              "label": "ひらめき・中音",
+              "kind": "se",
+              "path": "se/otologic-inspiration11-mid.mp3",
+              "size": 14858,
+              "sha256": "d60346f6da7b076e4983d1711b9b995979a35c0b0e7d27ae35fa09c62a5b8013",
+              "creator": "OtoLogic",
+              "source_page": "https://otologic.jp/free/se/inspiration01.html",
+              "modifications": "None; downloaded byte-for-byte from the official direct MP3 URL.",
+              "license": {
+                "id": "CC-BY-4.0",
+                "name": "Creative Commons Attribution 4.0 International",
+                "url": "https://creativecommons.org/licenses/by/4.0/",
+                "attribution_required": true,
+                "attribution_text": "音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0"
+              }
+            }
+          ]
+        },
+        {
+          "id": "otologic-countdown06",
+          "type": "file",
+          "url": "https://otologic.jp/sounds/se/pre/Countdown06-3.mp3",
+          "allowed_hosts": [
+            "otologic.jp",
+            "www.otologic.jp"
+          ],
+          "source_page": "https://otologic.jp/free/se/countdown01.html",
+          "size": 55256,
+          "max_bytes": 500000,
+          "sha256": "56e0725e9593974b69a9812db66f921dbcb17dea46de066073929b06c2116c87",
+          "assets": [
+            {
+              "id": "se-otologic-countdown06",
+              "label": "カウントダウン・ポップ",
+              "kind": "se",
+              "path": "se/otologic-countdown06-3.mp3",
+              "size": 55256,
+              "sha256": "56e0725e9593974b69a9812db66f921dbcb17dea46de066073929b06c2116c87",
+              "creator": "OtoLogic",
+              "source_page": "https://otologic.jp/free/se/countdown01.html",
+              "modifications": "None; downloaded byte-for-byte from the official direct MP3 URL.",
+              "license": {
+                "id": "CC-BY-4.0",
+                "name": "Creative Commons Attribution 4.0 International",
+                "url": "https://creativecommons.org/licenses/by/4.0/",
+                "attribution_required": true,
+                "attribution_text": "音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0"
+              }
+            }
+          ]
+        },
+        {
+          "id": "otologic-censor-bleep01",
+          "type": "file",
+          "url": "https://otologic.jp/sounds/se/pre2/Censor_Bleep-1kHz01-2%28Short%29.mp3",
+          "allowed_hosts": [
+            "otologic.jp",
+            "www.otologic.jp"
+          ],
+          "source_page": "https://otologic.jp/free/se/censor-bleep01.html",
+          "size": 11360,
+          "max_bytes": 500000,
+          "sha256": "156a7e2de346dec6802c573d68cd86cbbdcf08b362caaf7598480019fbc1b944",
+          "assets": [
+            {
+              "id": "se-otologic-censor-bleep-short",
+              "label": "自主規制音・短いピー",
+              "kind": "se",
+              "path": "se/otologic-censor-bleep01-short.mp3",
+              "size": 11360,
+              "sha256": "156a7e2de346dec6802c573d68cd86cbbdcf08b362caaf7598480019fbc1b944",
+              "creator": "OtoLogic",
+              "source_page": "https://otologic.jp/free/se/censor-bleep01.html",
+              "modifications": "None; downloaded byte-for-byte from the official direct MP3 URL.",
+              "license": {
+                "id": "CC-BY-4.0",
+                "name": "Creative Commons Attribution 4.0 International",
+                "url": "https://creativecommons.org/licenses/by/4.0/",
+                "attribution_required": true,
+                "attribution_text": "音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0"
+              }
+            }
+          ]
+        },
+        {
+          "id": "otologic-kokage-yuttari-fast",
+          "type": "file",
+          "url": "https://otologic.jp/sounds/bgm/pre/Kokage_De_Yuttari-2%28Fast%29.mp3",
+          "allowed_hosts": [
+            "otologic.jp",
+            "www.otologic.jp"
+          ],
+          "source_page": "https://otologic.jp/free/bgm/wood_mallet01.html",
+          "size": 2522104,
+          "max_bytes": 5000000,
+          "sha256": "7f07b016513c5042d55a4e69b7f7b6c0210d693bc325480a2332633cb1398e7f",
+          "assets": [
+            {
+              "id": "bgm-otologic-kokage-fast",
+              "label": "木陰でゆったり・速い",
+              "kind": "bgm",
+              "path": "bgm/otologic-kokage-de-yuttari-fast.mp3",
+              "size": 2522104,
+              "sha256": "7f07b016513c5042d55a4e69b7f7b6c0210d693bc325480a2332633cb1398e7f",
+              "creator": "OtoLogic",
+              "source_page": "https://otologic.jp/free/bgm/wood_mallet01.html",
+              "modifications": "None; downloaded byte-for-byte from the official direct MP3 URL.",
+              "license": {
+                "id": "CC-BY-4.0",
+                "name": "Creative Commons Attribution 4.0 International",
+                "url": "https://creativecommons.org/licenses/by/4.0/",
+                "attribution_required": true,
+                "attribution_text": "音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0"
+              }
+            }
+          ]
+        },
+        {
+          "id": "otologic-dotabata-panic-fast",
+          "type": "file",
+          "url": "https://otologic.jp/sounds/bgm/pre/Dotabata_Panic-1%28Fast%29.mp3",
+          "allowed_hosts": [
+            "otologic.jp",
+            "www.otologic.jp"
+          ],
+          "source_page": "https://otologic.jp/free/bgm/wood_mallet01.html",
+          "size": 1675126,
+          "max_bytes": 5000000,
+          "sha256": "48f532a9a2c2cc7502933a109ce7e25b30283eae40b58a85d2bf86af4e774b0f",
+          "assets": [
+            {
+              "id": "bgm-otologic-dotabata-fast",
+              "label": "ドタバタパニック・速い",
+              "kind": "bgm",
+              "path": "bgm/otologic-dotabata-panic-fast.mp3",
+              "size": 1675126,
+              "sha256": "48f532a9a2c2cc7502933a109ce7e25b30283eae40b58a85d2bf86af4e774b0f",
+              "creator": "OtoLogic",
+              "source_page": "https://otologic.jp/free/bgm/wood_mallet01.html",
+              "modifications": "None; downloaded byte-for-byte from the official direct MP3 URL.",
+              "license": {
+                "id": "CC-BY-4.0",
+                "name": "Creative Commons Attribution 4.0 International",
+                "url": "https://creativecommons.org/licenses/by/4.0/",
+                "attribution_required": true,
+                "attribution_text": "音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0"
+              }
+            }
+          ]
+        },
+        {
+          "id": "otologic-kumoyuki-slow",
+          "type": "file",
+          "url": "https://otologic.jp/sounds/bgm/pre/Kumoyuki_Ga_Ayashiizo-1%28Slow%29.mp3",
+          "allowed_hosts": [
+            "otologic.jp",
+            "www.otologic.jp"
+          ],
+          "source_page": "https://otologic.jp/free/bgm/wood_mallet01.html",
+          "size": 1648230,
+          "max_bytes": 5000000,
+          "sha256": "93d971d03abf818cab43a769ec46d1101c1b18a88e294fabf2c3fcb55af5828d",
+          "assets": [
+            {
+              "id": "bgm-otologic-kumoyuki-slow",
+              "label": "雲行きが怪しいぞ・遅い",
+              "kind": "bgm",
+              "path": "bgm/otologic-kumoyuki-ga-ayashiizo-slow.mp3",
+              "size": 1648230,
+              "sha256": "93d971d03abf818cab43a769ec46d1101c1b18a88e294fabf2c3fcb55af5828d",
+              "creator": "OtoLogic",
+              "source_page": "https://otologic.jp/free/bgm/wood_mallet01.html",
+              "modifications": "None; downloaded byte-for-byte from the official direct MP3 URL.",
               "license": {
                 "id": "CC-BY-4.0",
                 "name": "Creative Commons Attribution 4.0 International",

@@ -5006,7 +5006,7 @@ MATERIAL_SOURCE_GUIDE_MD = """
 - **BGM・SE・動画/VFX｜[Pixabay](https://pixabay.com/)** — [Content License](https://pixabay.com/service/license-summary/)。作品内利用・加工可、単体再配布不可。音楽は各素材のContent ID表示も確認してください。
 - **BGM・SE・動画/VFX｜[Mixkit](https://mixkit.co/)** — [License](https://mixkit.co/license/)。Free / Restrictedなど、素材種別と各アイテムに適用されるライセンスを確認してください。
 
-> **2026-08-05確認。** 各素材の配布ページ・作者条件・最新規約が優先です。ダウンロードページと規約のURL・取得日を一緒に控えておくと、公開時の確認が楽になります。
+> **2026-08-06確認。** 各素材の配布ページ・作者条件・最新規約が優先です。ダウンロードページと規約のURL・取得日を一緒に控えておくと、公開時の確認が楽になります。
 """
 
 GOOGLE_OAUTH_UNVERIFIED_GUIDE_MD = """
@@ -5674,7 +5674,7 @@ def create_ui():
                     )
                     with gr.Row():
                         install_audio_pack_btn = gr.Button(
-                            "日本語ショート向け素材をダウンロード（約7.5 MB）",
+                            "日本語ショート向け素材をダウンロード（約13.4 MB）",
                             variant="secondary",
                         )
                         refresh_media_library_btn = gr.Button(

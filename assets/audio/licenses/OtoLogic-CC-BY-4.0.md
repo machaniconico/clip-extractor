@@ -1,6 +1,6 @@
 # OtoLogic audio material notice
 
-Checked: 2026-08-05
+Checked: 2026-08-06
 
 Creator: OtoLogic
 
@@ -34,7 +34,7 @@ recipient from exercising the CC BY 4.0 rights. Do not register a work using
 these shared materials with Content ID or otherwise claim exclusive rights in
 the source material.
 
-The starter pack extracts the selected MP3 files byte-for-byte from OtoLogic's
-official ZIP downloads. Gain, looping, cue placement, and encoding can be
+The starter pack downloads the selected MP3 files byte-for-byte from OtoLogic's
+official material URLs. Gain, looping, cue placement, and encoding can be
 applied only while generating the user's video/audio outputs; those output
 changes are recorded in the generated provenance files.

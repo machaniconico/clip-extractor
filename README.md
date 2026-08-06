@@ -129,7 +129,7 @@ Windows では `Clip Extractor.bat` をダブルクリックでも起動でき�
 
 ### BGM・SE・VFX素材と出力モード
 
-Input画面の **BGM・SE・VFX素材と出力** で使います。初回だけ **「日本語ショート向け素材をダウンロード」** を押すと、約7.5 MBのBGM 5曲・SE 20点を取得します。内訳は、[Kenney Interface Sounds](https://kenney.nl/assets/interface-sounds)、[Kenney Impact Sounds](https://kenney.nl/assets/impact-sounds)、[OpenGameArt Short Loops Background Music Pack](https://opengameart.org/content/short-loops-background-music-pack) から選定したCC0素材20点と、[OtoLogic](https://otologic.jp/)から選定した日本語ショート向けのCC BY 4.0素材5点です。追加5点は、場面転換Whoosh、正解音、不正解音、ポップな転換音、明るいナレーション向けBGMです。
+Input画面の **BGM・SE・VFX素材と出力** で使います。初回だけ **「日本語ショート向け素材をダウンロード」** を押すと、約13.4 MBのBGM 8曲・SE 23点を取得します。内訳は、[Kenney Interface Sounds](https://kenney.nl/assets/interface-sounds)、[Kenney Impact Sounds](https://kenney.nl/assets/impact-sounds)、[OpenGameArt Short Loops Background Music Pack](https://opengameart.org/content/short-loops-background-music-pack) から選定したCC0素材20点と、[OtoLogic](https://otologic.jp/)から選定した日本語ショート向けのCC BY 4.0素材11点です。OtoLogicの追加分は、ひらめき、カウントダウン、自主規制音のSEと、木琴系のゆったり・コミカル・不安系BGMです。
 
 > OtoLogic素材はクレジット必須です。選択肢に **「要クレジット」** と表示し、生成時に `THIRD_PARTY_NOTICES_AUDIO.txt` へ `音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0` を出力します。動画公開時はこの文を概要欄などへ記載してください。CC0素材はクレジット不要です。
 
@@ -141,7 +141,7 @@ Input画面の **BGM・SE・VFX素材と出力** で使います。初回だけ 
 
 UIの **「フリー素材サイトの案内（外部サイト）」** からも同じリンクを開けます。素材は各公式サイトから自分でダウンロードし、BGM / SE / VFXフォルダへ保存してから再スキャンしてください。この案内リンクから素材を自動取得・スクレイピングしません。上記スターターパックだけは、公式規約で再配布可能と確認した選定素材を、利用者がボタンを押した時に限り取得します。
 
-| 入手先 | 主な素材 | 利用時の要点（2026-08-05確認） |
+| 入手先 | 主な素材 | 利用時の要点（2026-08-06確認） |
 |---|---|---|
 | [DOVA-SYNDROME](https://dova-s.jp/) | BGM・SE | 商用動画の背景利用向け。[利用条件](https://dova-s.jp/help/articles/license-usage/)と作者別条件を確認 |
 | [効果音ラボ](https://soundeffect-lab.info/) | SE | 商用動画で利用可・クレジット不要。素材再配布やアプリへの初期素材同梱は不可（[利用規約](https://soundeffect-lab.info/agreement/)） |

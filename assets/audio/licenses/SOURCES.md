@@ -24,8 +24,8 @@ on that source page. No audio modification is performed during installation.
 ## Japanese short-video material
 
 OtoLogic (https://otologic.jp/) provides the following selected files under
-CC BY 4.0. Each is extracted byte-for-byte from the ZIP linked on its official
-material page:
+CC BY 4.0. Each is downloaded byte-for-byte from the official material URL
+listed on its material page:
 
 - Camera Motion 11, short Whoosh:
   https://otologic.jp/free/se/camera-motion01.html
@@ -37,6 +37,18 @@ material page:
   https://otologic.jp/free/se/short-accent01.html
 - `bo-tto hidamari-Narr`, bright narration-friendly BGM:
   https://otologic.jp/free/bgm/pop-music01.html
+- Inspiration 11, mid-range short accent:
+  https://otologic.jp/free/se/inspiration01.html
+- Countdown 06, pop countdown:
+  https://otologic.jp/free/se/countdown01.html
+- Censor Bleep 1kHz 01, short bleep:
+  https://otologic.jp/free/se/censor-bleep01.html
+- 木陰でゆったり, fast version:
+  https://otologic.jp/free/bgm/wood_mallet01.html
+- ドタバタパニック, fast version:
+  https://otologic.jp/free/bgm/wood_mallet01.html
+- 雲行きが怪しいぞ, slow version:
+  https://otologic.jp/free/bgm/wood_mallet01.html
 
 OtoLogic license and FAQ:
 
