@@ -84,6 +84,18 @@ class AudioMixSettings:
 
 
 @dataclass(frozen=True)
+class SeCue:
+    """One SE source placed at a clip-relative time."""
+
+    source: str | os.PathLike[str]
+    cue_seconds: float = 0.0
+    event_id: str = ""
+    category: str = ""
+    confidence: float = 0.0
+    reason: str = ""
+
+
+@dataclass(frozen=True)
 class AudioOutputResult:
     """Audio artifacts retained for a single clip."""
 
@@ -115,6 +127,7 @@ def process_clip_audio(
     settings: AudioMixSettings,
     bgm_path: str | os.PathLike[str] | None = None,
     se_path: str | os.PathLike[str] | None = None,
+    se_cues: Sequence[SeCue] | None = None,
     clip_metadata: Mapping[str, Any] | None = None,
     provenance: Mapping[str, Any] | None = None,
 ) -> AudioOutputResult:
@@ -136,8 +149,19 @@ def process_clip_audio(
     if duration <= 0:
         raise ValueError("duration_seconds must be greater than 0")
 
+    if se_path is not None and se_cues:
+        raise ValueError("se_path and se_cues cannot be used together")
+    raw_se_cues = tuple(se_cues or ())
+    if se_path is not None:
+        raw_se_cues = (
+            SeCue(source=se_path, cue_seconds=settings.se_cue_seconds),
+        )
+    resolved_se_cues = tuple(
+        _resolve_se_cue(cue, index) for index, cue in enumerate(raw_se_cues)
+    )
     bgm = _optional_existing_file(bgm_path, "bgm_path")
-    se = _optional_existing_file(se_path, "se_path")
+    se = resolved_se_cues[0].source if resolved_se_cues else None
+    se_sources = tuple(cue.source for cue in resolved_se_cues)
     metadata = _json_mapping(clip_metadata, "clip_metadata")
     source_provenance = _json_mapping(provenance, "provenance")
 
@@ -149,11 +173,11 @@ def process_clip_audio(
     mixed_final = base.with_name(f"{base.name}_mixed.mp4")
     manifest_final = base.with_name(f"{base.name}_audio.json")
     _reject_source_output_collisions(
-        sources=(clean, bgm, se),
+        sources=(clean, bgm, *se_sources),
         outputs=(bgm_target, se_target, mixed_final, manifest_final),
     )
 
-    if bgm is None and se is None:
+    if bgm is None and not resolved_se_cues:
         with tempfile.TemporaryDirectory(
             prefix=".clip_audio_", dir=str(clean.parent)
         ) as staging_name:
@@ -187,17 +211,25 @@ def process_clip_audio(
             )
             _require_generated_file(bgm_staged, "BGM stem")
 
-        if se and se_staged:
-            _run_command(
-                _se_stem_command(
+        if resolved_se_cues and se_staged:
+            if len(resolved_se_cues) == 1:
+                command = _se_stem_command(
                     settings.ffmpeg_bin,
-                    se,
+                    resolved_se_cues[0].source,
                     se_staged,
                     duration,
                     settings.se_gain_db,
-                    settings.se_cue_seconds,
+                    resolved_se_cues[0].cue_seconds,
                 )
-            )
+            else:
+                command = _se_stem_command_multi(
+                    settings.ffmpeg_bin,
+                    resolved_se_cues,
+                    se_staged,
+                    duration,
+                    settings.se_gain_db,
+                )
+            _run_command(command)
             _require_generated_file(se_staged, "SE stem")
 
         mixed_staged: Path | None = None
@@ -227,6 +259,7 @@ def process_clip_audio(
                 mode=mode,
                 bgm=bgm,
                 se=se,
+                se_cues=resolved_se_cues,
                 bgm_final=bgm_final,
                 se_final=se_final,
                 mixed_final=mixed_final if make_mixed else None,
@@ -305,6 +338,7 @@ def process_clip_batch(
     settings: AudioMixSettings,
     bgm_path: str | os.PathLike[str] | None = None,
     se_path: str | os.PathLike[str] | None = None,
+    se_cues_by_clip: Sequence[Sequence[SeCue]] | None = None,
     provenance: Mapping[str, Any] | None = None,
 ) -> AudioBatchResult:
     """Apply identical audio selections to rendered clips and their highlights."""
@@ -313,11 +347,25 @@ def process_clip_batch(
         raise ValueError("clip_paths and highlights must have the same length")
     if not isinstance(settings, AudioMixSettings):
         raise TypeError("settings must be an AudioMixSettings instance")
+    if se_path is not None and se_cues_by_clip is not None:
+        raise ValueError("se_path and se_cues_by_clip cannot be used together")
+    if se_cues_by_clip is not None and len(se_cues_by_clip) != len(clip_paths):
+        raise ValueError("se_cues_by_clip and clip_paths must have the same length")
 
     durations = tuple(
         _highlight_duration(item, index) for index, item in enumerate(highlights)
     )
-    clean_paths, bgm, se = _preflight_batch_paths(clip_paths, bgm_path, se_path)
+    extra_se_sources = tuple(
+        cue.source
+        for cues in (se_cues_by_clip or ())
+        for cue in cues
+    )
+    clean_paths, bgm, se = _preflight_batch_paths(
+        clip_paths,
+        bgm_path,
+        se_path,
+        extra_se_sources=extra_se_sources,
+    )
     for index, highlight in enumerate(highlights):
         _json_mapping(highlight, f"highlights[{index}]")
     _json_mapping(provenance, "provenance")
@@ -327,11 +375,18 @@ def process_clip_batch(
             duration_seconds=duration,
             settings=settings,
             bgm_path=bgm,
-            se_path=se,
+            se_path=se if se_cues_by_clip is None else None,
+            se_cues=(
+                se_cues_by_clip[index]
+                if se_cues_by_clip is not None
+                else None
+            ),
             clip_metadata=highlight,
             provenance=provenance,
         )
-        for clip_path, highlight, duration in zip(clean_paths, highlights, durations)
+        for index, (clip_path, highlight, duration) in enumerate(
+            zip(clean_paths, highlights, durations)
+        )
     )
     return AudioBatchResult(clips=results)
 
@@ -443,6 +498,91 @@ def _se_stem_command(
         end,
         str(output),
     ]
+
+
+def _se_stem_command_multi(
+    ffmpeg_bin: str,
+    cues: Sequence[SeCue],
+    output: Path,
+    duration: float,
+    gain_db: float,
+) -> list[str]:
+    """Build one SE stem from multiple delayed, independently loop-free cues."""
+
+    end = _format_number(duration)
+    active = tuple(cue for cue in cues if cue.cue_seconds < duration)
+    if not active:
+        return [
+            ffmpeg_bin,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"anullsrc=r={STEM_SAMPLE_RATE}:cl=stereo:d={end}",
+            "-vn",
+            "-c:a",
+            STEM_CODEC,
+            "-ar",
+            str(STEM_SAMPLE_RATE),
+            "-ac",
+            str(STEM_CHANNELS),
+            "-t",
+            end,
+            str(output),
+        ]
+
+    filters: list[str] = []
+    labels: list[str] = []
+    for index, cue in enumerate(active):
+        label = f"se{index}"
+        labels.append(f"[{label}]")
+        available = _format_number(max(0.0, duration - cue.cue_seconds))
+        delay_samples = round(cue.cue_seconds * STEM_SAMPLE_RATE)
+        filters.append(
+            f"[{index}:a:0]aresample=48000,"
+            "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+            f"volume={_format_number(gain_db)}dB,"
+            f"atrim=start=0:end={available},asetpts=N/SR/TB,"
+            f"adelay=delays={delay_samples}S:all=1,"
+            f"apad=whole_dur={end},atrim=start=0:end={end}[{label}]"
+        )
+    filters.append(
+        "".join(labels)
+        + f"amix=inputs={len(active)}:duration=longest:"
+        "dropout_transition=0:normalize=0,"
+        f"apad=whole_dur={end},atrim=start=0:end={end}[aout]"
+    )
+    command = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+    ]
+    for cue in active:
+        command.extend(("-i", str(cue.source)))
+    command.extend(
+        [
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            "[aout]",
+            "-vn",
+            "-c:a",
+            STEM_CODEC,
+            "-ar",
+            str(STEM_SAMPLE_RATE),
+            "-ac",
+            str(STEM_CHANNELS),
+            "-t",
+            end,
+            str(output),
+        ]
+    )
+    return command
 
 
 def _mixed_video_command(
@@ -676,6 +816,7 @@ def _build_manifest(
     provenance: Mapping[str, Any],
     decoded_peak_4x_dbfs: float | None,
     post_mix_attenuation_db: float,
+    se_cues: Sequence[SeCue] = (),
 ) -> dict[str, Any]:
     artifacts = [{"kind": "clean_video", "file": clean.name}]
     if bgm_final:
@@ -696,12 +837,32 @@ def _build_manifest(
             "provenance": provenance.get("bgm", {}),
         }
     if se and se_final:
+        cue_records = [
+            {
+                "source_file": Path(str(cue.source)).name,
+                "cue_seconds": cue.cue_seconds,
+                **(
+                    {
+                        "event_id": cue.event_id,
+                        "category": cue.category,
+                        "confidence": cue.confidence,
+                        "reason": cue.reason,
+                    }
+                    if cue.event_id or cue.category or cue.reason
+                    else {}
+                ),
+            }
+            for cue in se_cues
+        ]
         audio["se"] = {
             "source_file": se.name,
             "stem_file": se_final.name,
             "gain_db": settings.se_gain_db,
             "looped": False,
-            "cue_seconds": settings.se_cue_seconds,
+            "cue_seconds": se_cues[0].cue_seconds
+            if len(se_cues) == 1
+            else settings.se_cue_seconds,
+            "cues": cue_records,
             "provenance": provenance.get("se", {}),
         }
 
@@ -798,6 +959,8 @@ def _preflight_batch_paths(
     clip_paths: Sequence[str | os.PathLike[str]],
     bgm_path: str | os.PathLike[str] | None,
     se_path: str | os.PathLike[str] | None,
+    *,
+    extra_se_sources: Sequence[str | os.PathLike[str]] = (),
 ) -> tuple[tuple[Path, ...], Path | None, Path | None]:
     """Reject batch path relationships that could overwrite a later input."""
 
@@ -813,12 +976,23 @@ def _preflight_batch_paths(
 
     bgm = _optional_existing_file(bgm_path, "bgm_path")
     se = _optional_existing_file(se_path, "se_path")
+    extra_se = tuple(
+        _existing_file(path, f"se_cues[{index}].source")
+        for index, path in enumerate(extra_se_sources)
+    )
     clean_set = set(clean_paths)
     for label, asset in (("bgm_path", bgm), ("se_path", se)):
         if asset is not None and asset in clean_set:
             raise ValueError(f"{label} must not also be a batch clip input")
+    for asset in extra_se:
+        if asset in clean_set:
+            raise ValueError("se_cues source must not also be a batch clip input")
 
-    protected_inputs = clean_set | {asset for asset in (bgm, se) if asset is not None}
+    protected_inputs = (
+        clean_set
+        | {asset for asset in (bgm, se) if asset is not None}
+        | set(extra_se)
+    )
     claimed_outputs: dict[Path, Path] = {}
     for clean in clean_paths:
         base = clean.with_suffix("")
@@ -850,6 +1024,22 @@ def _existing_file(path: str | os.PathLike[str], field_name: str) -> Path:
     if not candidate.is_file():
         raise ValueError(f"{field_name} must point to a file")
     return candidate
+
+
+def _resolve_se_cue(cue: SeCue, index: int) -> SeCue:
+    if not isinstance(cue, SeCue):
+        raise TypeError(f"se_cues[{index}] must be a SeCue")
+    cue_seconds = _finite_number(cue.cue_seconds, f"se_cues[{index}].cue_seconds")
+    if cue_seconds < 0:
+        raise ValueError(f"se_cues[{index}].cue_seconds must be non-negative")
+    return SeCue(
+        source=_existing_file(cue.source, f"se_cues[{index}].source"),
+        cue_seconds=cue_seconds,
+        event_id=str(cue.event_id or ""),
+        category=str(cue.category or ""),
+        confidence=_finite_number(cue.confidence, f"se_cues[{index}].confidence"),
+        reason=str(cue.reason or ""),
+    )
 
 
 def _optional_existing_file(

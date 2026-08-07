@@ -223,7 +223,7 @@ def test_render_phase_signature_matches_render_inputs():
     assert args[0] == "session"
     assert render_inputs[0] == "session_state"
     assert args[1:] == render_inputs[1:]
-    assert args[-22:] == [
+    assert args[-23:] == [
         "generate_thumbnails",
         "karaoke",
         "shorts_blur_strength",
@@ -234,6 +234,7 @@ def test_render_phase_signature_matches_render_inputs():
         "bgm_gain_db",
         "se_gain_db",
         "se_cue_seconds",
+        "se_usage_percent",
         "bgm_user_folder",
         "se_user_folder",
         "vfx_user_folder",
@@ -255,7 +256,7 @@ def test_save_defaults_signature_matches_save_button_inputs():
     module = _module()
     args = _function_args(module, "save_defaults")
     assert args == _click_input_names(module, "save_defaults_btn")
-    assert args[-21:] == [
+    assert args[-22:] == [
         "obs_launch_on_startup",
         "obs_executable_path",
         "obs_auto_connect_on_startup",
@@ -277,6 +278,7 @@ def test_save_defaults_signature_matches_save_button_inputs():
         "vfx_scale_percent",
         "vfx_opacity_percent",
         "vfx_target",
+        "se_usage_percent",
     ]
     assert "shorts_blur_strength" in args
     assert "shorts_title_position" in args
@@ -292,6 +294,7 @@ def test_audio_delivery_controls_are_persisted_and_rendered():
         "bgm_gain_db",
         "se_gain_db",
         "se_cue_seconds",
+        "se_usage_percent",
         "bgm_user_folder",
         "se_user_folder",
         "vfx_user_folder",
@@ -313,9 +316,12 @@ def test_audio_delivery_controls_are_persisted_and_rendered():
     assert "fn=vfx_manual_control_updates" in source
     for event_name in ("render_phase", "maybe_render_phase"):
         event_inputs = _event_input_names(module, event_name, "then")
-        assert event_inputs[-18:] == expected
+        assert event_inputs[-19:] == expected
+    save_expected = [
+        item for item in expected if item != "se_usage_percent"
+    ] + ["se_usage_percent"]
     for button in ("save_defaults_btn", "input_save_defaults_btn"):
-        assert _click_input_names(module, button)[-18:] == expected
+        assert _click_input_names(module, button)[-19:] == save_expected
 
 
 def test_obs_tab_exposes_media_controls_and_wires_them_to_save_and_start():
@@ -339,13 +345,14 @@ def test_obs_tab_exposes_media_controls_and_wires_them_to_save_and_start():
         assert control in source[media_section:settings_tab]
     for button in ("obs_save_processing_btn", "obs_start_btn"):
         inputs = _click_input_names(module, button)
-        assert inputs[-18:] == [
+        assert inputs[-19:] == [
             "obs_audio_delivery_mode",
             "obs_bgm_asset_id",
             "obs_se_asset_id",
             "obs_bgm_gain_db",
             "obs_se_gain_db",
             "obs_se_cue_seconds",
+            "obs_se_usage_percent",
             "obs_bgm_user_folder",
             "obs_se_user_folder",
             "obs_vfx_user_folder",
@@ -359,8 +366,6 @@ def test_obs_tab_exposes_media_controls_and_wires_them_to_save_and_start():
             "obs_vfx_opacity_percent",
             "obs_vfx_target",
         ]
-
-
 def test_material_source_guide_uses_official_links_without_automatic_downloads():
     module = _module()
     source = WEB_APP.read_text(encoding="utf-8")
@@ -857,6 +862,7 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_shorts_blur_strength", "obs_shorts_title_position",
         "obs_audio_delivery_mode", "obs_bgm_asset_id", "obs_se_asset_id",
         "obs_bgm_gain_db", "obs_se_gain_db", "obs_se_cue_seconds",
+        "obs_se_usage_percent",
         "obs_bgm_user_folder", "obs_se_user_folder", "obs_vfx_user_folder",
         "obs_vfx_asset_id", "obs_effect_preset", "obs_vfx_automatic",
         "obs_vfx_cue_seconds", "obs_vfx_duration_seconds", "obs_vfx_anchor",
@@ -875,6 +881,7 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_shorts_blur_strength", "obs_shorts_title_position",
         "obs_audio_delivery_mode", "obs_bgm_asset_id", "obs_se_asset_id",
         "obs_bgm_gain_db", "obs_se_gain_db", "obs_se_cue_seconds",
+        "obs_se_usage_percent",
         "obs_bgm_user_folder", "obs_se_user_folder", "obs_vfx_user_folder",
         "obs_vfx_asset_id", "obs_effect_preset", "obs_vfx_automatic",
         "obs_vfx_cue_seconds", "obs_vfx_duration_seconds", "obs_vfx_anchor",

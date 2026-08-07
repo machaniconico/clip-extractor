@@ -19,7 +19,11 @@ venv/
 
 # Output artifacts
 output_*/
+output/
 *.zip
+
+# Local sound-effect library
+SE/
 
 # Editor / OS
 .vscode/

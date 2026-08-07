@@ -30,13 +30,27 @@ from audio_mix import (
     AAC_TRUE_PEAK_LIMIT_DB,
     AudioDeliveryMode,
     AudioMixSettings,
+    AudioBatchResult,
+    SeCue,
     process_clip_batch,
+)
+from se_auto import (
+    SeClipAssignment,
+    normalise_se_usage,
+    plan_se_assignments,
+)
+from se_analysis import (
+    DEFAULT_MAX_EVENTS_PER_CLIP,
+    PlannedSeCue,
+    build_se_content_events,
+    plan_se_cues,
 )
 from user_media import (
     UserMediaAsset,
     UserMediaError,
     is_user_media_id,
     resolve_user_media_asset,
+    scan_optional_user_media,
     validate_user_media,
 )
 from video_effects import (
@@ -74,6 +88,7 @@ class AudioDeliveryOptions:
     bgm_gain_db: float = -18.0
     se_gain_db: float = -8.0
     se_cue_seconds: float = 0.0
+    se_usage_percent: float = 100.0
 
     def __post_init__(self) -> None:
         bgm_id = str(self.bgm_asset_id or "").strip()
@@ -95,10 +110,19 @@ class AudioDeliveryOptions:
         object.__setattr__(self, "bgm_gain_db", validated.bgm_gain_db)
         object.__setattr__(self, "se_gain_db", validated.se_gain_db)
         object.__setattr__(self, "se_cue_seconds", validated.se_cue_seconds)
+        object.__setattr__(
+            self,
+            "se_usage_percent",
+            normalise_se_usage(self.se_usage_percent, default=100.0),
+        )
 
     @property
     def enabled(self) -> bool:
-        return bool(self.bgm_asset_id or self.se_asset_id)
+        se_enabled = bool(
+            self.se_usage_percent > 0
+            and (self.se_asset_id or self.se_user_folder)
+        )
+        return bool(self.bgm_asset_id or se_enabled)
 
 
 @dataclass(frozen=True)
@@ -357,6 +381,7 @@ def deliver_audio_groups(
     *,
     options: AudioDeliveryOptions,
     effects_manifest_dirs: Mapping[str, str | os.PathLike[str]] | None = None,
+    transcript_segments: Sequence[Any] | None = None,
 ) -> AudioDeliveryResult:
     """Apply BGM/SE to landscape and/or Shorts media in one shared pass.
 
@@ -438,6 +463,8 @@ def deliver_audio_groups(
             highlights,
             selection=selection,
             settings=settings,
+            se_usage_percent=options.se_usage_percent,
+            transcript_segments=transcript_segments,
         )
         for group_name, directory in normalized_effect_dirs.items():
             try:
@@ -457,6 +484,135 @@ def deliver_audio_groups(
     return result
 
 
+def _selection_assets(
+    selection: Mapping[str, Any],
+    kind: str,
+) -> tuple[InstalledAsset | UserMediaAsset, ...]:
+    """Return unique assets for a selection, supporting automatic SE plans."""
+
+    values = selection.get(f"{kind}_assets")
+    if values:
+        candidates = tuple(values)
+    else:
+        asset = selection.get(kind)
+        candidates = (asset,) if asset is not None else ()
+    unique: list[InstalledAsset | UserMediaAsset] = []
+    seen: set[tuple[str, str]] = set()
+    for asset in candidates:
+        if not isinstance(asset, (InstalledAsset, UserMediaAsset)):
+            continue
+        key = (
+            "user" if isinstance(asset, UserMediaAsset) else "installed",
+            str(getattr(asset, "id", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(asset)
+    return tuple(unique)
+
+
+def _selection_provenance(
+    selection: Mapping[str, Any],
+    kind: str,
+    *,
+    usage_percent: float,
+) -> dict[str, Any]:
+    """Describe one selected asset or the set used by automatic SE mode."""
+
+    assets = _selection_assets(selection, kind)
+    if not assets:
+        return {}
+    if kind == "se" and bool(selection.get("se_auto")):
+        return {
+            "source_type": "automatic_user_selection",
+            "usage_percent": normalise_se_usage(usage_percent, default=100.0),
+            "assets": [_asset_provenance(asset) for asset in assets],
+        }
+    return _asset_provenance(assets[0])
+
+
+def _process_clip_group_with_se_plan(
+    paths: Sequence[Path],
+    highlights: Sequence[Mapping[str, Any]],
+    *,
+    settings: AudioMixSettings,
+    bgm_path: Path | None,
+    assignments: Sequence[SeClipAssignment],
+    provenance: Mapping[str, Any],
+) -> AudioBatchResult:
+    """Render each clip with its own optional automatically selected SE."""
+
+    if len(paths) != len(highlights) or len(paths) != len(assignments):
+        raise AudioDeliveryError("SE自動割り当ての動画数とハイライト数が一致しません")
+
+    results = []
+    for path, highlight, assignment in zip(paths, highlights, assignments):
+        clip_settings = AudioMixSettings(
+            delivery_mode=settings.delivery_mode,
+            bgm_gain_db=settings.bgm_gain_db,
+            se_gain_db=settings.se_gain_db,
+            se_cue_seconds=assignment.cue_seconds,
+            ffmpeg_bin=settings.ffmpeg_bin,
+            ffprobe_bin=settings.ffprobe_bin,
+        )
+        batch = process_clip_batch(
+            [path],
+            [highlight],
+            settings=clip_settings,
+            bgm_path=bgm_path,
+            se_path=(assignment.asset.path if assignment.asset else None),
+            provenance=provenance,
+        )
+        if len(batch.clips) != 1:
+            raise AudioDeliveryError("SE自動割り当ての音声結果が不正です")
+        results.append(batch.clips[0])
+    return AudioBatchResult(clips=tuple(results))
+
+
+def _process_clip_group_with_se_cues(
+    paths: Sequence[Path],
+    highlights: Sequence[Mapping[str, Any]],
+    *,
+    settings: AudioMixSettings,
+    bgm_path: Path | None,
+    cue_plans: Sequence[Sequence[PlannedSeCue]],
+    provenance: Mapping[str, Any],
+) -> AudioBatchResult:
+    """Render each clip with a content-aware, multi-cue SE timeline."""
+
+    if len(paths) != len(highlights) or len(paths) != len(cue_plans):
+        raise AudioDeliveryError("SE分析結果の動画数とハイライト数が一致しません")
+
+    results = []
+    for path, highlight, plans in zip(paths, highlights, cue_plans):
+        cues = tuple(
+            SeCue(
+                source=plan.asset.path,
+                cue_seconds=plan.cue_seconds,
+                event_id=plan.event.event_id,
+                category=plan.event.category,
+                confidence=plan.event.confidence,
+                reason=plan.event.evidence,
+            )
+            for plan in plans
+        )
+        clip_provenance = dict(provenance)
+        clip_provenance["se_cues"] = [plan.to_manifest() for plan in plans]
+        batch = process_clip_batch(
+            [path],
+            [highlight],
+            settings=settings,
+            bgm_path=bgm_path,
+            se_cues_by_clip=(cues,),
+            provenance=clip_provenance,
+        )
+        if len(batch.clips) != 1:
+            raise AudioDeliveryError("SE分析結果の音声結果が不正です")
+        results.append(batch.clips[0])
+    return AudioBatchResult(clips=tuple(results))
+
+
 def _deliver_enabled_audio(
     root: Path,
     normalized_groups: Mapping[str, tuple[Path, ...]],
@@ -464,21 +620,77 @@ def _deliver_enabled_audio(
     *,
     selection: Mapping[str, Any],
     settings: AudioMixSettings,
+    se_usage_percent: float = 100.0,
+    transcript_segments: Sequence[Any] | None = None,
 ) -> AudioDeliveryResult:
     """Generate one enabled audio delivery inside an active transaction."""
 
     selection = dict(selection)
-    for key in ("bgm", "se"):
-        asset = selection.get(key)
-        if isinstance(asset, UserMediaAsset):
+    bgm_asset = selection.get("bgm")
+    if isinstance(bgm_asset, UserMediaAsset):
+        try:
+            validated_bgm = validate_user_media(bgm_asset)
+        except UserMediaError as exc:
+            raise AudioDeliveryError(
+                f"選択したBGM素材が生成直前に変更されました: {exc}"
+            ) from exc
+        if isinstance(validated_bgm, UserMediaAsset):
+            selection["bgm"] = validated_bgm
+
+    se_assets = _selection_assets(selection, "se")
+    content_analysis_se = (
+        bool(selection.get("se_auto"))
+        and bool(transcript_segments)
+        and normalise_se_usage(se_usage_percent, default=100.0) > 0
+    )
+    se_assignments = plan_se_assignments(
+        se_assets,
+        highlights,
+        se_usage_percent,
+        cue_seconds=settings.se_cue_seconds,
+    )
+    selected_se_assets: list[InstalledAsset | UserMediaAsset] = []
+    if content_analysis_se:
+        selected_se_assets.extend(se_assets)
+    else:
+        for assignment in se_assignments:
+            asset = assignment.asset
+            if asset is not None and asset not in selected_se_assets:
+                selected_se_assets.append(asset)
+    validated_se_assets: list[InstalledAsset | UserMediaAsset] = []
+    validated_by_id: dict[str, UserMediaAsset] = {}
+    for candidate in selected_se_assets:
+        asset = candidate
+        if isinstance(candidate, UserMediaAsset):
             try:
-                validated = validate_user_media(asset)
+                validated = validate_user_media(candidate)
             except UserMediaError as exc:
                 raise AudioDeliveryError(
-                    f"選択した{key.upper()}素材が生成直前に変更されました: {exc}"
+                    f"選択したSE素材が生成直前に変更されました: {exc}"
                 ) from exc
             if isinstance(validated, UserMediaAsset):
-                selection[key] = validated
+                asset = validated
+            validated_by_id[asset.id] = asset
+        if asset not in validated_se_assets:
+            validated_se_assets.append(asset)
+    if validated_se_assets:
+        selection["se_assets"] = tuple(validated_se_assets)
+        selection["se"] = validated_se_assets[0]
+        se_assets = _selection_assets(selection, "se")
+    se_assignments = tuple(
+        SeClipAssignment(
+            asset=(
+                validated_by_id.get(assignment.asset.id, assignment.asset)
+                if isinstance(assignment.asset, UserMediaAsset)
+                else assignment.asset
+            ),
+            cue_seconds=assignment.cue_seconds,
+        )
+        for assignment in se_assignments
+    )
+    if normalise_se_usage(se_usage_percent, default=100.0) <= 0:
+        selection["se_assets"] = ()
+        selection["se"] = None
 
     pack_provenance = None
     if selection["pack_id"] != "user-provided":
@@ -487,12 +699,22 @@ def _deliver_enabled_audio(
             "version": selection["pack_version"],
             "license_checked_at": selection["license_checked_at"],
         }
+    se_provenance = _selection_provenance(
+        selection,
+        "se",
+        usage_percent=se_usage_percent,
+    )
     provenance = {
         "pack": pack_provenance,
         "bgm": _asset_provenance(selection.get("bgm")),
-        "se": _asset_provenance(selection.get("se")),
+        "se": se_provenance,
     }
 
+    automatic_se = bool(selection.get("se_auto")) or (
+        len(se_assignments) > 0
+        and se_usage_percent < 100.0
+        and bool(selection.get("se_assets"))
+    )
     primary_groups: dict[str, tuple[Path, ...]] = {}
     deliverables: list[Path] = []
     manifest_groups: dict[str, list[dict[str, Any]]] = {}
@@ -506,14 +728,71 @@ def _deliver_enabled_audio(
             raise AudioDeliveryError(
                 f"{group_name} の動画数とハイライト数が一致しません"
             )
-        batch = process_clip_batch(
-            paths,
-            highlights,
-            settings=settings,
-            bgm_path=(selection["bgm"].path if selection.get("bgm") else None),
-            se_path=(selection["se"].path if selection.get("se") else None),
-            provenance=provenance,
-        )
+        content_plans: tuple[tuple[PlannedSeCue, ...], ...] | None = None
+        content_analysis_records: tuple[dict[str, Any], ...] = ()
+        if content_analysis_se:
+            computed_plans: list[tuple[PlannedSeCue, ...]] = []
+            computed_records: list[dict[str, Any]] = []
+            for path, highlight in zip(paths, highlights):
+                events = build_se_content_events(
+                    highlight,
+                    transcript_segments,
+                    clip_path=path,
+                    max_events=DEFAULT_MAX_EVENTS_PER_CLIP * 2,
+                )
+                plans = plan_se_cues(
+                    se_assets,
+                    events,
+                    se_usage_percent,
+                    max_events_per_clip=DEFAULT_MAX_EVENTS_PER_CLIP,
+                    cue_offset_seconds=settings.se_cue_seconds,
+                )
+                computed_plans.append(plans)
+                computed_records.append(
+                    {
+                        "events": [event.to_manifest() for event in events],
+                        "cues": [plan.to_manifest() for plan in plans],
+                    }
+                )
+            content_plans = tuple(computed_plans)
+            content_analysis_records = tuple(computed_records)
+
+        if content_plans is not None:
+            batch = _process_clip_group_with_se_cues(
+                paths,
+                highlights,
+                settings=settings,
+                bgm_path=(
+                    selection["bgm"].path if selection.get("bgm") else None
+                ),
+                cue_plans=content_plans,
+                provenance=provenance,
+            )
+        elif automatic_se:
+            batch = _process_clip_group_with_se_plan(
+                paths,
+                highlights,
+                settings=settings,
+                bgm_path=(
+                    selection["bgm"].path if selection.get("bgm") else None
+                ),
+                assignments=se_assignments,
+                provenance=provenance,
+            )
+        else:
+            batch = process_clip_batch(
+                paths,
+                highlights,
+                settings=settings,
+                bgm_path=(selection["bgm"].path if selection.get("bgm") else None),
+                se_path=(
+                    selection["se"].path
+                    if selection.get("se")
+                    and normalise_se_usage(se_usage_percent, default=100.0) > 0
+                    else None
+                ),
+                provenance=provenance,
+            )
         primary_paths: list[Path] = []
         group_records: list[dict[str, Any]] = []
         for clean_input, result in zip(paths, batch.clips):
@@ -522,6 +801,8 @@ def _deliver_enabled_audio(
                 if settings.delivery_mode is AudioDeliveryMode.MIXED
                 else result.clean_video
             )
+            if primary is None and result.clean_video is not None:
+                primary = result.clean_video
             if primary is None:
                 raise AudioDeliveryError(f"{group_name} の主出力を確定できませんでした")
             primary_paths.append(primary)
@@ -532,6 +813,8 @@ def _deliver_enabled_audio(
                 "primary_video": _relative_output(root, primary),
                 "artifacts": artifacts,
             }
+            if content_analysis_records:
+                record["se_analysis"] = content_analysis_records[len(group_records)]
             if (
                 result.mixed_video is not None
                 and result.decoded_peak_4x_dbfs is not None
@@ -557,6 +840,11 @@ def _deliver_enabled_audio(
             "bgm_gain_db": settings.bgm_gain_db,
             "se_gain_db": settings.se_gain_db,
             "se_cue_seconds": settings.se_cue_seconds,
+            "se_usage_percent": normalise_se_usage(
+                se_usage_percent,
+                default=100.0,
+            ),
+            "se_content_analysis": content_analysis_se,
             "stem_sample_rate_hz": 48_000,
             "stem_channels": 2,
         },
@@ -606,6 +894,8 @@ def _resolve_selection(options: AudioDeliveryOptions) -> dict[str, Any]:
         "pack_id": "user-provided",
         "pack_version": "",
         "license_checked_at": "",
+        "se_assets": (),
+        "se_auto": False,
     }
     if builtin_selected:
         status = get_pack_status()
@@ -631,6 +921,8 @@ def _resolve_selection(options: AudioDeliveryOptions) -> dict[str, Any]:
                 options.se_user_folder,
             ),
         ):
+            if key == "se" and options.se_usage_percent <= 0:
+                continue
             if not asset_id:
                 continue
             if is_user_media_id(asset_id):
@@ -651,8 +943,23 @@ def _resolve_selection(options: AudioDeliveryOptions) -> dict[str, Any]:
                     f"{asset_id} は {expected_kind.upper()} 素材ではありません"
                 )
             resolved[key] = asset
+            if key == "se":
+                resolved["se_assets"] = (asset,)
             if isinstance(asset, InstalledAsset):
                 resolved["license_checked_at"] = asset.license_checked_at
+        if (
+            not options.se_asset_id
+            and options.se_user_folder
+            and options.se_usage_percent > 0
+        ):
+            assets = scan_optional_user_media(options.se_user_folder, "se")
+            if not assets:
+                raise AudioDeliveryError(
+                    "SE自動選択用フォルダに対応する音声ファイルがありません"
+                )
+            resolved["se_assets"] = assets
+            resolved["se"] = assets[0]
+            resolved["se_auto"] = True
     except (AudioAssetError, UserMediaError, KeyError) as exc:
         raise AudioDeliveryError(f"選択したBGM/SE素材を確認できません: {exc}") from exc
     return resolved
@@ -706,19 +1013,17 @@ def _reject_audio_source_output_collisions(
         }
     )
     for key in ("bgm", "se"):
-        asset = selection.get(key)
-        if asset is None:
-            continue
-        try:
-            source = Path(asset.path).resolve(strict=True)
-        except (OSError, RuntimeError) as exc:
-            raise AudioDeliveryError(
-                f"選択した{key.upper()}素材を確認できません"
-            ) from exc
-        if source in protected:
-            raise AudioDeliveryError(
-                f"選択した{key.upper()}素材が音声生成先と衝突します: {source}"
-            )
+        for asset in _selection_assets(selection, key):
+            try:
+                source = Path(asset.path).resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise AudioDeliveryError(
+                    f"選択した{key.upper()}素材を確認できません"
+                ) from exc
+            if source in protected:
+                raise AudioDeliveryError(
+                    f"選択した{key.upper()}素材が音声生成先と衝突します: {source}"
+                )
 
 
 def _result_artifacts(root: Path, result: Any) -> list[dict[str, Any]]:
@@ -1111,7 +1416,8 @@ def _third_party_notices(selection: Mapping[str, Any]) -> str:
     installed_assets = [
         asset
         for key in ("bgm", "se")
-        if isinstance((asset := selection.get(key)), InstalledAsset)
+        for asset in _selection_assets(selection, key)
+        if isinstance(asset, InstalledAsset)
     ]
     if installed_assets:
         lines.extend(
@@ -1160,40 +1466,38 @@ def _third_party_notices(selection: Mapping[str, Any]) -> str:
                 ]
             )
     for key, heading in (("bgm", "BGM"), ("se", "SE")):
-        asset = selection.get(key)
-        if asset is None:
-            continue
-        if isinstance(asset, UserMediaAsset):
-            lines.extend(
-                [
-                    f"[{heading}] {asset.filename}",
-                    "User-provided material",
-                    f"Source SHA-256: {asset.sha256}",
-                    "License and permission are managed by the user and were not "
-                    "independently verified by Clip Extractor.",
-                    "Modifications: output gain/loop/cue may be applied.",
-                    "",
-                ]
-            )
-        else:
-            lines.extend(
-                [
-                    f"[{heading}] {asset.label}",
-                    f"Creator: {asset.creator}",
-                    f"Source: {asset.source_page}",
-                    f"License: {asset.license_id} ({asset.license_url})",
-                    "Attribution required: "
-                    + ("yes" if asset.attribution_required else "no"),
-                    *(
-                        [f"Required credit: {asset.attribution_text}"]
-                        if asset.attribution_required and asset.attribution_text
-                        else []
-                    ),
-                    f"Source SHA-256: {asset.sha256}",
-                    "Modifications: source unchanged; output gain/loop/cue may be applied.",
-                    "",
-                ]
-            )
+        for asset in _selection_assets(selection, key):
+            if isinstance(asset, UserMediaAsset):
+                lines.extend(
+                    [
+                        f"[{heading}] {asset.filename}",
+                        "User-provided material",
+                        f"Source SHA-256: {asset.sha256}",
+                        "License and permission are managed by the user and were not "
+                        "independently verified by Clip Extractor.",
+                        "Modifications: output gain/loop/cue may be applied.",
+                        "",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        f"[{heading}] {asset.label}",
+                        f"Creator: {asset.creator}",
+                        f"Source: {asset.source_page}",
+                        f"License: {asset.license_id} ({asset.license_url})",
+                        "Attribution required: "
+                        + ("yes" if asset.attribution_required else "no"),
+                        *(
+                            [f"Required credit: {asset.attribution_text}"]
+                            if asset.attribution_required and asset.attribution_text
+                            else []
+                        ),
+                        f"Source SHA-256: {asset.sha256}",
+                        "Modifications: source unchanged; output gain/loop/cue may be applied.",
+                        "",
+                    ]
+                )
     return "\n".join(lines).rstrip() + "\n"
 
 
