@@ -27,6 +27,7 @@
   "bgm_gain_db": -18.0,
   "se_gain_db": -8.0,
   "se_cue_seconds": 0.0,
+  "se_usage_percent": 40.0,
   "vfx_user_folder": "",
   "vfx_asset_id": "",
   "effect_preset": "none",
@@ -66,7 +67,7 @@
     "max_duration": 90,
     "output_mode": "combined",
     "generate_shorts": true,
-    "shorts_mode": "pad",
+    "shorts_mode": "blur",
     "shorts_blur_strength": 20.0,
     "shorts_crop": "center",
     "shorts_title": true,
@@ -75,5 +76,26 @@
     "audio_fusion": false,
     "audio_alpha": 0.35,
     "karaoke": false
+  },
+  "obs_media": {
+    "audio_delivery_mode": "mixed",
+    "bgm_asset_id": "",
+    "se_asset_id": "se-impact-generic-light",
+    "bgm_user_folder": "",
+    "se_user_folder": "",
+    "bgm_gain_db": -18.0,
+    "se_gain_db": -8.0,
+    "se_cue_seconds": 0.0,
+    "se_usage_percent": 40.0,
+    "vfx_user_folder": "",
+    "vfx_asset_id": "",
+    "effect_preset": "none",
+    "vfx_automatic": true,
+    "vfx_cue_seconds": 0.0,
+    "vfx_duration_seconds": 1.0,
+    "vfx_anchor": "center",
+    "vfx_scale_percent": 100.0,
+    "vfx_opacity_percent": 100.0,
+    "vfx_target": "both"
   }
 }

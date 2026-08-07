@@ -24,6 +24,7 @@ from audio_delivery import (
     deliver_audio_groups,
     validate_audio_selection,
 )
+from se_auto import DEFAULT_SE_USAGE_PERCENT
 from clipper import extract_clips, generate_thumbnails, get_video_info
 from subtitles import (
     generate_all_karaoke_ass,
@@ -107,6 +108,18 @@ def main():
                         help="SE出力ゲイン (default: -8 dB)")
     parser.add_argument("--se-cue-seconds", type=float, default=0.0,
                         help="各クリップ先頭からSEを鳴らす相対秒 (default: 0)")
+    default_se_folder = Path(__file__).resolve().parent / "SE"
+    parser.add_argument(
+        "--se-folder",
+        default=str(default_se_folder) if default_se_folder.is_dir() else "",
+        help="SE自動選択用フォルダ (既定: アプリ直下のSEフォルダ)",
+    )
+    parser.add_argument(
+        "--se-usage-percent",
+        type=float,
+        default=DEFAULT_SE_USAGE_PERCENT,
+        help="SE自動演出で採用する検出イベントの密度 0-100 (default: 40)",
+    )
     parser.add_argument(
         "--audio-delivery",
         choices=["separate", "mixed", "both"],
@@ -282,6 +295,8 @@ def main():
             bgm_gain_db=args.bgm_gain_db,
             se_gain_db=args.se_gain_db,
             se_cue_seconds=args.se_cue_seconds,
+            se_usage_percent=args.se_usage_percent,
+            se_user_folder=args.se_folder,
         )
         if modes.enable_clips:
             validate_audio_selection(audio_options)
@@ -447,6 +462,7 @@ def main():
                 {"clips": clip_paths, "shorts": shorts_paths},
                 highlights,
                 options=audio_options,
+                transcript_segments=segments,
             )
         except AudioDeliveryError as audio_err:
             print(f"Audio delivery failed: {audio_err}", file=sys.stderr)

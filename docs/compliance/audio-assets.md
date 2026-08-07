@@ -77,6 +77,16 @@ uploaded, bundled, or described as CC0. The application does not determine or
 approve their license; the user is responsible for selecting material whose
 commercial-use and editing permissions they have already verified.
 
+As of 2026-08-07, an adjacent application `SE/` directory is used as the
+default user-selected SE folder when it exists. This is a convenience for a
+local checkout, not a distribution approval: the directory is not part of the
+verified starter pack and must not be bundled unless its individual source
+terms permit redistribution. Automatic SE selection records the selected user
+files' hashes and uses the user-controlled usage percentage. Content-aware
+selection also records the detected event category, confidence, evidence, and
+clip-relative cue in `audio_manifest.json`; it does not copy or upload the
+source files.
+
 ## External source guide
 
 Guide links were reviewed against the official terms pages on 2026-08-06.

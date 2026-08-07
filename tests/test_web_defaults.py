@@ -303,6 +303,7 @@ def test_obs_media_profile_is_separate_and_roundtrips_for_auto_connect(
         "bgm_gain_db": -22,
         "se_gain_db": -6,
         "se_cue_seconds": 1.5,
+        "se_usage_percent": 40.0,
         "vfx_user_folder": "D:/OBS/VFX",
         "vfx_asset_id": "user:vfx:" + ("c" * 64),
         "effect_preset": "flash",

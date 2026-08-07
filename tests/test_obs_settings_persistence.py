@@ -287,6 +287,7 @@ def test_start_obs_watch_persists_media_controls_for_live_pipeline(
             "bgm_gain_db": -20,
             "se_gain_db": -5,
             "se_cue_seconds": 0.75,
+            "se_usage_percent": 40.0,
             "vfx_user_folder": "C:/OBS/VFX",
             "vfx_asset_id": "",
             "effect_preset": "punch",
