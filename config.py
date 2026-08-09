@@ -67,8 +67,7 @@ class AppConfig:
     bgm_asset_id: str = ""
     se_asset_id: str = ""
     bgm_gain_db: float = -18.0
-    se_gain_db: float = -8.0
-    se_cue_seconds: float = 0.0
+    se_gain_db: float = -6.0
     karaoke: bool = False
     highlight_prompt: str = ""
     font_config: FontConfig = field(default_factory=FontConfig)

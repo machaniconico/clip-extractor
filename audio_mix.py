@@ -48,7 +48,7 @@ class AudioMixSettings:
 
     delivery_mode: AudioDeliveryMode | str = AudioDeliveryMode.BOTH
     bgm_gain_db: float = -18.0
-    se_gain_db: float = -8.0
+    se_gain_db: float = -6.0
     se_cue_seconds: float = 0.0
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
@@ -546,13 +546,13 @@ def _se_stem_command_multi(
             "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
             f"volume={_format_number(gain_db)}dB,"
             f"atrim=start=0:end={available},asetpts=N/SR/TB,"
-            f"adelay=delays={delay_samples}S:all=1,"
-            f"apad=whole_dur={end},atrim=start=0:end={end}[{label}]"
+            f"adelay=delays={delay_samples}S:all=1[{label}]"
         )
     filters.append(
         "".join(labels)
         + f"amix=inputs={len(active)}:duration=longest:"
         "dropout_transition=0:normalize=0,"
+        "asetpts=N/SR/TB,"
         f"apad=whole_dur={end},atrim=start=0:end={end}[aout]"
     )
     command = [

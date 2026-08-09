@@ -9,6 +9,25 @@ import highlighter
 from highlighter import _extract_json_object, _parse_timestamp
 
 
+def test_se_cue_prompts_target_semantic_turning_points():
+    required_phrases = (
+        "オチ",
+        "リアクション開始",
+        "発見",
+        "成功",
+        "失敗確定",
+        "前振り中",
+        "クリップ先頭・末尾",
+        "1.25秒以上",
+        "効果がない場面",
+        "se_cues を空配列",
+    )
+
+    for prompt in (highlighter.SYSTEM_PROMPT, highlighter.GEMINI_SYSTEM_PROMPT):
+        for phrase in required_phrases:
+            assert phrase in prompt
+
+
 # ----- _extract_json_object -----
 
 def test_extract_json_plain():
@@ -139,6 +158,58 @@ def test_detect_highlights_accepts_numeric_timestamp_fields(monkeypatch):
     assert result[0]["start_sec"] == 12.0
     assert result[0]["end_sec"] == 20.0
     assert result[0]["duration"] == 8.0
+    assert result[0]["se_cues"] == []
+
+
+def test_detect_highlights_normalizes_llm_se_cues(monkeypatch):
+    monkeypatch.setattr(
+        highlighter,
+        "_call_claude",
+        lambda prompt: (
+            '{"highlights": ['
+            '{"start": "0:00:10", "end": "0:00:20", '
+            '"title": "Reveal", "reason": "surprising turn", '
+            '"se_cues": ['
+            '{"time": "0:00:12.250", "category": "surprise", '
+            '"intensity": 0.8, "reason": "reaction starts"}'
+            ']}'
+            "]}"
+        ),
+    )
+
+    result = highlighter.detect_highlights("transcript")
+
+    assert result[0]["se_cues"] == [
+        {
+            "time": "0:00:12.250",
+            "time_sec": 12.25,
+            "category": "surprise",
+            "intensity": 0.8,
+            "reason": "reaction starts",
+        }
+    ]
+
+
+def test_detect_highlights_drops_invalid_or_out_of_range_se_cues(monkeypatch):
+    monkeypatch.setattr(
+        highlighter,
+        "_call_claude",
+        lambda prompt: (
+            '{"highlights": ['
+            '{"start": "0:00:10", "end": "0:00:20", '
+            '"title": "Scene", "reason": "test", '
+            '"se_cues": ['
+            '{"time": "0:00:09", "category": "impact", "intensity": 1, "reason": "early"},'
+            '{"time": null, "category": "impact", "intensity": 1, "reason": "invalid"},'
+            '{"time": "0:00:15", "category": "unknown", "intensity": 4, "reason": "bad category"}'
+            ']}'
+            "]}"
+        ),
+    )
+
+    result = highlighter.detect_highlights("transcript")
+
+    assert result[0]["se_cues"] == []
 
 
 def test_detect_highlights_skips_bad_timestamp_types_without_crashing(monkeypatch):

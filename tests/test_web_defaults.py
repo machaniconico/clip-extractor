@@ -131,7 +131,9 @@ def test_roundtrip_shorts_fields(monkeypatch, tmp_path):
     assert loaded["shorts_title_position"] == "bottom", loaded
 
 
-def test_roundtrip_audio_delivery_fields(monkeypatch, tmp_path):
+def test_roundtrip_audio_delivery_fields_ignore_legacy_cue_seconds(
+    monkeypatch, tmp_path
+):
     loaded = _save_with(
         monkeypatch,
         tmp_path,
@@ -148,7 +150,32 @@ def test_roundtrip_audio_delivery_fields(monkeypatch, tmp_path):
     assert loaded["se_asset_id"] == "se-interface-confirmation"
     assert loaded["bgm_gain_db"] == -21
     assert loaded["se_gain_db"] == -7
-    assert loaded["se_cue_seconds"] == 1.25
+    assert "se_cue_seconds" not in loaded
+
+
+def test_load_defaults_drops_legacy_se_cue_seconds(monkeypatch, tmp_path):
+    settings_file = tmp_path / "default_settings.json"
+    settings_file.write_text(
+        json.dumps(
+            {
+                "se_cue_seconds": 9.5,
+                "obs_media": {
+                    "audio_delivery_mode": "both",
+                    "se_cue_seconds": 7.25,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(web_app, "SETTINGS_FILE", settings_file)
+
+    loaded = web_app.load_defaults()
+
+    assert "se_cue_seconds" not in loaded
+    assert "se_cue_seconds" not in loaded["obs_media"]
+    assert "se_cue_seconds" not in web_app._obs_media_settings_from_defaults(
+        loaded
+    )
 
 
 def test_roundtrip_user_media_and_vfx_fields(monkeypatch, tmp_path):
@@ -302,7 +329,6 @@ def test_obs_media_profile_is_separate_and_roundtrips_for_auto_connect(
         "se_user_folder": "D:/OBS/SE",
         "bgm_gain_db": -22,
         "se_gain_db": -6,
-        "se_cue_seconds": 1.5,
         "se_usage_percent": 40.0,
         "vfx_user_folder": "D:/OBS/VFX",
         "vfx_asset_id": "user:vfx:" + ("c" * 64),
@@ -360,6 +386,7 @@ def test_obs_recording_is_the_default_source(monkeypatch, tmp_path):
     assert AppConfig().shorts_mode == "pad"
     assert AppConfig().shorts_blur_strength == 20
     assert AppConfig().shorts_title_position == "top"
+    assert not hasattr(AppConfig(), "se_cue_seconds")
 
 
 def test_blank_saved_gemini_model_migrates_to_current_default(monkeypatch, tmp_path):

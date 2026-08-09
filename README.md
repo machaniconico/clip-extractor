@@ -135,9 +135,9 @@ Input画面の **BGM・SE・VFX素材と出力** で使います。初回だけ 
 
 自分で用意した素材は、**BGM / SE / VFXごとに別の参照フォルダ**を指定して「3フォルダを再スキャン」を押します。対応音声は AAC / FLAC / M4A / MP3 / OGG / Opus / WAV / WMA、VFXは PNG / WebM です。サブフォルダも走査し、素材は元フォルダから参照するためアプリ内へコピーしたり、自動アップロードしたりしません。選択は内容のSHA-256で保持されるので、内容を変えずに改名・移動した素材は同じものとして再検出できます。
 
-アプリ直下に `SE/` フォルダがある場合は、Input / OBS の参照先へ自動設定します。SEの手動選択を空欄のままにすると、文字起こしの単語時刻と切り抜き音声の音量ピークから、驚き・笑い・成功・警告などのイベントを検出し、ファイル名のカテゴリに合うSEをイベント時刻へ自動配置します。1クリップ内に複数のSEを配置でき、**SE使用度 (%)** は検出イベントの採用密度を調整します。0%は無効、50%はイベントの約半分、100%は検出イベントをすべて採用します。SE音量 (dB) は音量、SE使用度 (%) は使用頻度の設定です。CLIでも `--se-folder` と `--se-usage-percent` を使えます。
+アプリ直下に `SE/` フォルダがある場合は、Input / OBS の参照先へ自動設定します。ハイライト分析時にLLMが、オチ・リアクション開始・発見・成功・失敗確定など意味や盛り上がりが転換する瞬間を各クリップ0〜3件選びます。その候補を切り抜き音声の近傍ピークへ最大0.75秒だけ吸着させ、驚き・笑い・成功・警告などのカテゴリに合うSEを配置します。LLMが効果なしと判断したクリップではSEを鳴らしません。SEを手動選択した場合も時刻は同じ方法で決まり、選択を空欄にするとファイル名のカテゴリから素材も自動選択します。**SE使用度 (%)** はLLM候補の採用密度を調整します。0%は無効、50%は候補の約半分、100%は候補をすべて採用します。CLIでも `--se-folder` と `--se-usage-percent` を使えます。
 
-SE自動演出の決定内容は `audio_manifest.json` の各グループに `se_analysis.events` と `se_analysis.cues` として記録します。単一SEを手動選択した場合、または文字起こし情報を渡さないAPI利用では、従来どおり1つのSEを固定位置へ配置します。
+SEを鳴らす秒数は指定しません。LLMの意味判断とローカル音声解析による決定内容は、`audio_manifest.json` の各グループに `se_analysis.events` と `se_analysis.cues` として記録します。旧形式のハイライトには従来の単語時刻・音量ピーク分析を適用し、LLM cueも文字起こし情報もない低レベルAPI利用だけは互換動作としてクリップ先頭へ配置します。
 
 > 手持ち素材のライセンスや利用許諾はアプリでは確認しません。利用者が確認済みの素材だけを指定してください。生成時にはファイル名・SHA-256・サイズを来歴へ記録し、CC0素材としては扱いません。
 
@@ -256,7 +256,7 @@ python main.py --list-audio-assets
 
 # BGM/SEをclean MP4とは別WAVでも、完成MP4にも出力
 python main.py ./archive.mp4 --bgm bgm-brand-new-wisdom \
-  --se se-interface-confirmation --se-cue-seconds 1.5 --audio-delivery both
+  --se se-interface-confirmation --audio-delivery both
 ```
 
 > CLI のハイライト検出は既定で `claude` CLI を使います（API キー不要）。OpenAI / Gemini を CLI から使いたい場合は Web UI の利用を推奨します。
@@ -281,10 +281,9 @@ python main.py ./archive.mp4 --bgm bgm-brand-new-wisdom \
 | `--audio-fusion` | 音声の盛り上がりを順位に融合 | off |
 | `--audio-alpha` | 音声重み（0.0–1.0） | 0.35 |
 | `--bgm` / `--se` | 追加する素材ID（`--list-audio-assets` で確認） | 未選択 |
-| `--bgm-gain-db` / `--se-gain-db` | BGM / SE の出力ゲイン | -18 / -8 dB |
-| `--se-cue-seconds` | 自動演出で検出時刻へ加える基準オフセット。分析できない場合は固定再生位置 | 0 |
-| `--se-folder` | 内容分析で参照するSEフォルダ | アプリ直下の `SE/` |
-| `--se-usage-percent` | 自動演出で採用する検出イベントの密度（0–100） | 40 |
+| `--bgm-gain-db` / `--se-gain-db` | BGM / SE の出力ゲイン | -18 / -6 dB |
+| `--se-folder` | LLMの場面分類に合わせて自動選択するSEフォルダ | アプリ直下の `SE/` |
+| `--se-usage-percent` | 自動演出で採用するLLM候補の密度（0–100） | 40 |
 | `--audio-delivery` | `separate` / `mixed` / `both` | both |
 | `--karaoke` | ショートにワード単位カラオケ字幕を焼き込み | off |
 | `-p, --prompt` | ハイライト検出の追加プロンプト | "" |

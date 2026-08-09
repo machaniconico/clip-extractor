@@ -1,6 +1,7 @@
 """Highlight detection using Claude, cloud APIs, or opt-in local inference."""
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -20,7 +21,15 @@ SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパートで
       "start": "HH:MM:SS.mmm",
       "end": "HH:MM:SS.mmm",
       "title": "クリップのタイトル（短く、キャッチーに）",
-      "reason": "このシーンを選んだ理由"
+      "reason": "このシーンを選んだ理由",
+      "se_cues": [
+        {
+          "time": "HH:MM:SS.mmm",
+          "category": "surprise",
+          "intensity": 0.8,
+          "reason": "この位置でSEを鳴らす理由"
+        }
+      ]
     }
   ]
 }
@@ -30,6 +39,14 @@ SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパートで
 - 面白い・感動的・印象的・情報価値が高いシーンを優先
 - クリップ同士が重複しないように
 - 会話の途中で切れないよう、自然な区切りを意識
+- 各クリップのSE候補は0〜3件
+- timeは元動画上の絶対時刻。クリップ先頭からの相対秒にはしない
+- categoryは surprise/laugh/success/warning/impact/movement/general のいずれか
+- intensityは0〜1で、SEの演出強度を表す
+- SEはオチ・リアクション開始・発見・成功・失敗確定など、意味や盛り上がりが転換する瞬間に合わせる
+- 前振り中や機械的なクリップ先頭・末尾は避ける
+- 複数のSE候補は互いに1.25秒以上離す
+- 効果がない場面は se_cues を空配列にする
 """
 
 GEMINI_SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパートです。
@@ -41,6 +58,13 @@ GEMINI_SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパ�
 - 面白い・感動的・印象的・情報価値が高いシーンを優先
 - クリップ同士が重複しないように
 - 会話の途中で切れないよう、自然な区切りを意識
+- 各クリップの se_cues は必須の配列で、元動画上の絶対時刻にSE候補を0〜3件選ぶ
+- 各候補の time は元動画上の絶対時刻、category は surprise/laugh/success/warning/impact/movement/general のいずれか
+- 各候補の intensity は0〜1の演出強度とし、reason に選定理由を入れる
+- SEはオチ・リアクション開始・発見・成功・失敗確定など、意味や盛り上がりが転換する瞬間に合わせる
+- 前振り中や機械的なクリップ先頭・末尾は避ける
+- 複数のSE候補は互いに1.25秒以上離す
+- 効果がない場面は se_cues を空配列にする
 """
 
 
@@ -55,6 +79,17 @@ GEMINI_MODEL_CHOICES = (
     "gemini-2.5-flash-lite",
     "gemini-2.5-pro",
 )
+
+SE_CUE_CATEGORIES = (
+    "surprise",
+    "laugh",
+    "success",
+    "warning",
+    "impact",
+    "movement",
+    "general",
+)
+MAX_SE_CUES_PER_HIGHLIGHT = 3
 
 HIGHLIGHTS_JSON_SCHEMA = {
     "type": "object",
@@ -80,8 +115,37 @@ HIGHLIGHTS_JSON_SCHEMA = {
                         "type": "string",
                         "description": "このシーンを選んだ理由",
                     },
+                    "se_cues": {
+                        "type": "array",
+                        "description": "元動画上の絶対時刻で指定するSE候補（不要なら空配列）",
+                        "maxItems": MAX_SE_CUES_PER_HIGHLIGHT,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "time": {
+                                    "type": "string",
+                                    "description": "元動画上の絶対時刻（HH:MM:SS.mmm）",
+                                },
+                                "category": {
+                                    "type": "string",
+                                    "enum": list(SE_CUE_CATEGORIES),
+                                },
+                                "intensity": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "maximum": 1,
+                                },
+                                "reason": {
+                                    "type": "string",
+                                    "description": "この位置でSEを鳴らす理由",
+                                },
+                            },
+                            "required": ["time", "category", "intensity", "reason"],
+                            "additionalProperties": False,
+                        },
+                    },
                 },
-                "required": ["start", "end", "title", "reason"],
+                "required": ["start", "end", "title", "reason", "se_cues"],
                 "additionalProperties": False,
             },
         }
@@ -436,6 +500,11 @@ def detect_highlights(
             continue
         h.setdefault("title", "")
         h.setdefault("reason", "")
+        h["se_cues"] = _normalise_se_cues(
+            h.get("se_cues", []),
+            start_sec=h["start_sec"],
+            end_sec=h["end_sec"],
+        )
         valid_highlights.append(h)
 
     if not valid_highlights:
@@ -448,6 +517,64 @@ def detect_highlights(
         print(f"  {i}. [{h['start']} -> {h['end']}] {h['title']} ({h['duration']:.0f}s)")
 
     return valid_highlights
+
+
+def _normalise_se_cues(raw_cues, *, start_sec: float, end_sec: float) -> list[dict]:
+    """Validate LLM SE cues and add their absolute source time in seconds."""
+    if not isinstance(raw_cues, list):
+        return []
+
+    normalised: list[dict] = []
+    for cue in raw_cues:
+        if not isinstance(cue, dict):
+            continue
+
+        raw_time = cue.get("time")
+        if isinstance(raw_time, bool) or not isinstance(raw_time, (str, int, float)):
+            continue
+        time_value = raw_time.strip() if isinstance(raw_time, str) else raw_time
+        if time_value == "":
+            continue
+        try:
+            time_sec = float(_parse_timestamp(time_value))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if not math.isfinite(time_sec) or not (start_sec <= time_sec < end_sec):
+            continue
+
+        category_value = cue.get("category")
+        if not isinstance(category_value, str):
+            continue
+        category = category_value.strip().lower()
+        if category not in SE_CUE_CATEGORIES:
+            continue
+
+        raw_intensity = cue.get("intensity")
+        if isinstance(raw_intensity, bool):
+            continue
+        try:
+            intensity = float(raw_intensity)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(intensity) or not (0.0 <= intensity <= 1.0):
+            continue
+
+        reason_value = cue.get("reason")
+        if not isinstance(reason_value, str):
+            continue
+
+        normalised.append(
+            {
+                "time": time_value,
+                "time_sec": time_sec,
+                "category": category,
+                "intensity": intensity,
+                "reason": reason_value.strip(),
+            }
+        )
+        if len(normalised) >= MAX_SE_CUES_PER_HIGHLIGHT:
+            break
+    return normalised
 
 
 def _parse_timestamp(ts: str | int | float) -> float:

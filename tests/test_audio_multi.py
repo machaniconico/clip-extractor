@@ -50,6 +50,8 @@ def test_multiple_se_cues_are_delayed_and_recorded(tmp_path, monkeypatch):
     assert "adelay=delays=12000S:all=1" in se_filter
     assert "adelay=delays=72000S:all=1" in se_filter
     assert "amix=inputs=2" in se_filter
+    assert se_filter.count("apad=whole_dur=4") == 1
+    assert "normalize=0,asetpts=N/SR/TB,apad=whole_dur=4" in se_filter
 
     manifest = json.loads(result.manifest.read_text(encoding="utf-8"))
     cues = manifest["audio"]["se"]["cues"]

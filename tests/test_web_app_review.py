@@ -350,7 +350,9 @@ def test_render_phase_uses_mixed_paths_for_downstream_outputs(monkeypatch, tmp_p
     )
 
     assert captured["validated"].delivery_mode.value == "mixed"
+    assert captured["validated"].se_cue_seconds == 0.0
     assert captured["delivered"].bgm_asset_id == "bgm-brand-new-wisdom"
+    assert captured["delivered"].se_cue_seconds == 0.0
     assert captured["transcript_segments"] == session["segments"]
     assert captured["effects_manifest_dirs"] == {"clips": tmp_path / "clips"}
     assert [Path(path).name for path in result[5]["clip_paths"]] == [

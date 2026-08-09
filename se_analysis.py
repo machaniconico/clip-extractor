@@ -1,9 +1,9 @@
 """Content-aware sound-effect event detection and matching.
 
-The first pass intentionally uses signals already available in the clipping
-pipeline: timestamped transcript words, the clip's audio-energy peaks, and
-descriptive filenames in the user's SE folder.  It stays deterministic so a
-render can be reproduced without an external model call.
+New highlights use the LLM's semantic scene cues as the authoritative event
+set.  Local audio excitement may only snap those cues to a nearby peak; it does
+not add independent peak events.  Highlights without the ``se_cues`` key retain
+the deterministic transcript/title/audio fallback for compatibility.
 """
 
 from __future__ import annotations
@@ -22,6 +22,8 @@ from se_auto import normalise_se_usage
 MIN_EVENT_GAP_SECONDS = 1.25
 DEFAULT_MAX_EVENTS_PER_CLIP = 3
 MAX_EVENTS_PER_CLIP = 8
+LLM_AUDIO_SNAP_WINDOW_SECONDS = 0.75
+LLM_AUDIO_PEAK_THRESHOLD = 0.55
 
 
 @dataclass(frozen=True)
@@ -251,6 +253,20 @@ def build_se_content_events(
     start = _finite_float(highlight.get("start_sec"), 0.0)
     end = _finite_float(highlight.get("end_sec"), start)
     duration = max(0.001, end - start)
+
+    # Presence is the contract boundary: an explicit empty list means the LLM
+    # intentionally selected no SE.  Only legacy highlights without the key use
+    # the deterministic transcript/title/audio fallback below.
+    if "se_cues" in highlight:
+        return _build_llm_content_events(
+            highlight.get("se_cues"),
+            start=start,
+            end=end,
+            duration=duration,
+            clip_path=clip_path,
+            max_events=max_events,
+        )
+
     events: list[SeContentEvent] = []
 
     for word_start, word_end, text in _iter_timed_text(transcript_segments or ()):
@@ -301,6 +317,125 @@ def build_se_content_events(
     return _deduplicate_events(events, max_events=normalise_max_events(max_events, default=6))
 
 
+def _build_llm_content_events(
+    raw_cues: Any,
+    *,
+    start: float,
+    end: float,
+    duration: float,
+    clip_path: str | Path | None,
+    max_events: int,
+) -> tuple[SeContentEvent, ...]:
+    """Convert authoritative source-timeline LLM cues to clip-relative events."""
+
+    if not isinstance(raw_cues, Sequence) or isinstance(
+        raw_cues, (str, bytes, bytearray)
+    ):
+        return ()
+
+    audio_points = _audio_excitement_points(clip_path)
+    events: list[SeContentEvent] = []
+    for raw_cue in raw_cues:
+        if not isinstance(raw_cue, Mapping):
+            continue
+        source_seconds = _optional_finite_float(raw_cue.get("time_sec"))
+        if source_seconds is None or source_seconds < start or source_seconds >= end:
+            continue
+
+        category = str(raw_cue.get("category") or "").strip().casefold()
+        if category not in _CATEGORY_FALLBACKS:
+            continue
+        intensity = _clamp(
+            _finite_float(raw_cue.get("intensity"), 0.5),
+            0.0,
+            1.0,
+        )
+        reason = str(raw_cue.get("reason") or "").strip()
+        semantic_cue = source_seconds - start
+        cue, peak_score = _snap_to_audio_excitement(
+            semantic_cue,
+            duration,
+            audio_points,
+        )
+
+        source = "llm" if peak_score is None else "llm_audio_snap"
+        evidence = f"llm_scene:{reason}" if reason else "llm_scene"
+        if peak_score is not None:
+            evidence += (
+                f"|audio_peak:{peak_score:.3f}@{cue:.3f}"
+                f"|semantic_cue:{semantic_cue:.3f}"
+            )
+        events.append(
+            SeContentEvent(
+                event_id=_event_id(category, cue, reason, source),
+                category=category,
+                cue_seconds=cue,
+                duration_seconds=duration,
+                confidence=_clamp(0.70 + intensity * 0.25, 0.0, 1.0),
+                intensity=intensity,
+                evidence=evidence,
+                source=source,
+                text=reason,
+            )
+        )
+
+    return _deduplicate_events(
+        events,
+        max_events=normalise_max_events(max_events, default=6),
+    )
+
+
+def _audio_excitement_points(
+    clip_path: str | Path | None,
+) -> tuple[tuple[float, float], ...]:
+    """Return finite clip-relative ``(time, score)`` points, or no points."""
+
+    if not clip_path:
+        return ()
+    try:
+        from audio_energy import compute_energy_curve, excitement_scores
+
+        curve = compute_energy_curve(Path(clip_path))
+        if curve is None:
+            return ()
+        scores = excitement_scores(curve)
+        points: list[tuple[float, float]] = []
+        for raw_time, raw_score in zip(curve.times, scores):
+            time_value = _optional_finite_float(raw_time)
+            score_value = _optional_finite_float(raw_score)
+            if time_value is None or score_value is None:
+                continue
+            points.append((time_value, score_value))
+        return tuple(points)
+    except Exception:
+        # Audio analysis is only a refinement.  Keep the semantic LLM time when
+        # FFmpeg/numpy analysis is unavailable instead of dropping the cue.
+        return ()
+
+
+def _snap_to_audio_excitement(
+    semantic_cue: float,
+    duration: float,
+    audio_points: Sequence[tuple[float, float]],
+) -> tuple[float, float | None]:
+    upper = math.nextafter(max(0.0, duration), 0.0)
+    original = _clamp(semantic_cue, 0.0, upper)
+    candidates = [
+        (time_value, score_value)
+        for time_value, score_value in audio_points
+        if 0.0 <= time_value < duration
+        and abs(time_value - original) <= LLM_AUDIO_SNAP_WINDOW_SECONDS
+        and score_value >= LLM_AUDIO_PEAK_THRESHOLD
+    ]
+    if not candidates:
+        return original, None
+    peak_time, peak_score = min(
+        candidates,
+        key=lambda item: (-item[1], abs(item[0] - original), item[0]),
+    )
+    return _clamp(peak_time, 0.0, upper), peak_score
+
+
 def plan_se_cues(
     assets: Sequence[Any],
     events: Sequence[SeContentEvent],
@@ -333,10 +468,13 @@ def plan_se_cues(
             continue
         asset_id = str(getattr(asset, "id", getattr(asset, "path", "")))
         used_assets.add(asset_id)
+        upper = max(0.0, event.duration_seconds - 0.05)
+        if event.source in {"llm", "llm_audio_snap"}:
+            upper = math.nextafter(max(0.0, event.duration_seconds), 0.0)
         cue = _clamp(
             event.cue_seconds + max(0.0, _finite_float(cue_offset_seconds, 0.0)),
             0.0,
-            max(0.0, event.duration_seconds - 0.05),
+            upper,
         )
         plans.append(PlannedSeCue(asset=asset, event=event, cue_seconds=cue))
     return tuple(plans)
@@ -516,6 +654,16 @@ def _finite_float(value: Any, default: float) -> float:
     except (TypeError, ValueError):
         return float(default)
     return number if math.isfinite(number) else float(default)
+
+
+def _optional_finite_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def _clamp(value: float, low: float, high: float) -> float:

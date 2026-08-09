@@ -86,7 +86,9 @@ class AudioDeliveryOptions:
     bgm_user_folder: str = ""
     se_user_folder: str = ""
     bgm_gain_db: float = -18.0
-    se_gain_db: float = -8.0
+    se_gain_db: float = -6.0
+    # Deprecated compatibility field. Public callers may still pass an old
+    # saved value, but SE timing is analysis-owned and the value is discarded.
     se_cue_seconds: float = 0.0
     se_usage_percent: float = 100.0
 
@@ -100,7 +102,7 @@ class AudioDeliveryOptions:
             delivery_mode=self.delivery_mode,
             bgm_gain_db=self.bgm_gain_db,
             se_gain_db=self.se_gain_db,
-            se_cue_seconds=self.se_cue_seconds,
+            se_cue_seconds=0.0,
         )
         object.__setattr__(self, "delivery_mode", validated.delivery_mode)
         object.__setattr__(self, "bgm_asset_id", bgm_id)
@@ -109,7 +111,7 @@ class AudioDeliveryOptions:
         object.__setattr__(self, "se_user_folder", se_folder)
         object.__setattr__(self, "bgm_gain_db", validated.bgm_gain_db)
         object.__setattr__(self, "se_gain_db", validated.se_gain_db)
-        object.__setattr__(self, "se_cue_seconds", validated.se_cue_seconds)
+        object.__setattr__(self, "se_cue_seconds", 0.0)
         object.__setattr__(
             self,
             "se_usage_percent",
@@ -445,7 +447,7 @@ def deliver_audio_groups(
         delivery_mode=options.delivery_mode,
         bgm_gain_db=options.bgm_gain_db,
         se_gain_db=options.se_gain_db,
-        se_cue_seconds=options.se_cue_seconds,
+        se_cue_seconds=0.0,
     )
     transaction = _AudioDeliveryTransaction(
         root,
@@ -638,11 +640,28 @@ def _deliver_enabled_audio(
             selection["bgm"] = validated_bgm
 
     se_assets = _selection_assets(selection, "se")
-    content_analysis_se = (
-        bool(selection.get("se_auto"))
-        and bool(transcript_segments)
-        and normalise_se_usage(se_usage_percent, default=100.0) > 0
+    se_enabled = bool(se_assets) and (
+        normalise_se_usage(se_usage_percent, default=100.0) > 0
     )
+    llm_timing_contract = any(
+        isinstance(highlight, Mapping) and "se_cues" in highlight
+        for highlight in highlights
+    )
+    # New highlights carry an authoritative ``se_cues`` key, including an
+    # explicit empty list.  Legacy highlights need transcript content to enter
+    # the existing deterministic analysis path; otherwise fixed placement is
+    # retained only as backwards compatibility.
+    content_analysis_se = se_enabled and (
+        llm_timing_contract or bool(transcript_segments)
+    )
+    if not se_enabled:
+        se_timing_strategy = "none"
+    elif llm_timing_contract:
+        se_timing_strategy = "llm_scene_audio_peak"
+    elif content_analysis_se:
+        se_timing_strategy = "legacy_content_analysis"
+    else:
+        se_timing_strategy = "fixed_compatibility"
     se_assignments = plan_se_assignments(
         se_assets,
         highlights,
@@ -745,7 +764,6 @@ def _deliver_enabled_audio(
                     events,
                     se_usage_percent,
                     max_events_per_clip=DEFAULT_MAX_EVENTS_PER_CLIP,
-                    cue_offset_seconds=settings.se_cue_seconds,
                 )
                 computed_plans.append(plans)
                 computed_records.append(
@@ -839,7 +857,7 @@ def _deliver_enabled_audio(
         "settings": {
             "bgm_gain_db": settings.bgm_gain_db,
             "se_gain_db": settings.se_gain_db,
-            "se_cue_seconds": settings.se_cue_seconds,
+            "se_timing_strategy": se_timing_strategy,
             "se_usage_percent": normalise_se_usage(
                 se_usage_percent,
                 default=100.0,

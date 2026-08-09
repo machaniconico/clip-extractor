@@ -280,8 +280,7 @@ OBS_LIVE_MEDIA_DEFAULTS = {
     "bgm_user_folder": "",
     "se_user_folder": "",
     "bgm_gain_db": -18.0,
-    "se_gain_db": -8.0,
-    "se_cue_seconds": 0.0,
+    "se_gain_db": -6.0,
     "se_usage_percent": DEFAULT_SE_USAGE_PERCENT,
     "vfx_user_folder": "",
     "vfx_asset_id": "",
@@ -330,7 +329,7 @@ def _normalise_obs_media_settings(
         se_user_folder=base["se_user_folder"],
         bgm_gain_db=base["bgm_gain_db"],
         se_gain_db=base["se_gain_db"],
-        se_cue_seconds=base["se_cue_seconds"],
+        se_cue_seconds=0.0,
         se_usage_percent=base["se_usage_percent"],
     )
     vfx = VfxOptions(
@@ -353,7 +352,6 @@ def _normalise_obs_media_settings(
         "se_user_folder": audio.se_user_folder,
         "bgm_gain_db": audio.bgm_gain_db,
         "se_gain_db": audio.se_gain_db,
-        "se_cue_seconds": audio.se_cue_seconds,
         "se_usage_percent": audio.se_usage_percent,
         "vfx_user_folder": vfx.vfx_user_folder,
         "vfx_asset_id": vfx.vfx_asset_id,
@@ -586,8 +584,7 @@ def load_defaults() -> dict:
         "audio_delivery_mode": "both",
         "bgm_asset_id": "", "se_asset_id": "",
         "bgm_user_folder": "", "se_user_folder": "",
-        "bgm_gain_db": -18.0, "se_gain_db": -8.0,
-        "se_cue_seconds": 0.0,
+        "bgm_gain_db": -18.0, "se_gain_db": -6.0,
         "se_usage_percent": DEFAULT_SE_USAGE_PERCENT,
         "vfx_user_folder": "", "vfx_asset_id": "",
         "effect_preset": "none", "vfx_automatic": False,
@@ -610,6 +607,16 @@ def load_defaults() -> dict:
             defaults.update(saved)
         except Exception:
             pass
+    # The cue offset is no longer user-configurable. Drop legacy values at the
+    # read boundary so neither Input nor OBS auto-connect can revive them.
+    defaults.pop("se_cue_seconds", None)
+    saved_obs_media = defaults.get("obs_media")
+    if isinstance(saved_obs_media, dict):
+        defaults["obs_media"] = {
+            key: value
+            for key, value in saved_obs_media.items()
+            if key != "se_cue_seconds"
+        }
     if defaults.get("ai_provider") not in _available_ai_providers():
         defaults["ai_provider"] = "gemini"
         defaults["ai_model"] = GEMINI_DEFAULT_MODEL
@@ -631,8 +638,8 @@ def load_defaults() -> dict:
             bgm_user_folder=defaults.get("bgm_user_folder", ""),
             se_user_folder=defaults.get("se_user_folder", ""),
             bgm_gain_db=defaults.get("bgm_gain_db", -18.0),
-            se_gain_db=defaults.get("se_gain_db", -8.0),
-            se_cue_seconds=defaults.get("se_cue_seconds", 0.0),
+            se_gain_db=defaults.get("se_gain_db", -6.0),
+            se_cue_seconds=0.0,
             se_usage_percent=defaults.get(
                 "se_usage_percent",
                 DEFAULT_SE_USAGE_PERCENT,
@@ -649,7 +656,6 @@ def load_defaults() -> dict:
             "se_user_folder": audio_defaults.se_user_folder,
             "bgm_gain_db": audio_defaults.bgm_gain_db,
             "se_gain_db": audio_defaults.se_gain_db,
-            "se_cue_seconds": audio_defaults.se_cue_seconds,
             "se_usage_percent": audio_defaults.se_usage_percent,
         }
     )
@@ -751,7 +757,7 @@ def save_defaults(ai_provider, ai_model,
                   bgm_asset_id="",
                   se_asset_id="",
                   bgm_gain_db=-18.0,
-                  se_gain_db=-8.0,
+                  se_gain_db=-6.0,
                   se_cue_seconds=0.0,
                   bgm_user_folder="",
                   se_user_folder="",
@@ -783,7 +789,7 @@ def save_defaults(ai_provider, ai_model,
         se_user_folder=se_user_folder,
         bgm_gain_db=bgm_gain_db,
         se_gain_db=se_gain_db,
-        se_cue_seconds=se_cue_seconds,
+        se_cue_seconds=0.0,
         se_usage_percent=se_usage_percent,
     )
     vfx_saved = VfxOptions(
@@ -828,7 +834,6 @@ def save_defaults(ai_provider, ai_model,
         "se_user_folder": audio_saved.se_user_folder,
         "bgm_gain_db": audio_saved.bgm_gain_db,
         "se_gain_db": audio_saved.se_gain_db,
-        "se_cue_seconds": audio_saved.se_cue_seconds,
         "se_usage_percent": audio_saved.se_usage_percent,
         "vfx_user_folder": vfx_saved.vfx_user_folder,
         "vfx_asset_id": vfx_saved.vfx_asset_id,
@@ -927,7 +932,6 @@ def save_obs_processing_defaults(
         "se_asset_id": obs_se_asset_id,
         "bgm_gain_db": obs_bgm_gain_db,
         "se_gain_db": obs_se_gain_db,
-        "se_cue_seconds": obs_se_cue_seconds,
         "se_usage_percent": obs_se_usage_percent,
         "bgm_user_folder": obs_bgm_user_folder,
         "se_user_folder": obs_se_user_folder,
@@ -1624,7 +1628,7 @@ def render_phase(
     bgm_asset_id: str = "",
     se_asset_id: str = "",
     bgm_gain_db: float = -18.0,
-    se_gain_db: float = -8.0,
+    se_gain_db: float = -6.0,
     se_cue_seconds: float = 0.0,
     se_usage_percent: float = DEFAULT_SE_USAGE_PERCENT,
     bgm_user_folder: str = "",
@@ -1692,7 +1696,7 @@ def render_phase(
                 se_user_folder=se_user_folder,
                 bgm_gain_db=bgm_gain_db,
                 se_gain_db=se_gain_db,
-                se_cue_seconds=se_cue_seconds,
+                se_cue_seconds=0.0,
                 se_usage_percent=se_usage_percent,
             )
             if modes.enable_clips or modes.enable_shorts:
@@ -1708,8 +1712,14 @@ def render_phase(
                     f"se_usage={audio_options.se_usage_percent:g}%, "
                     f"mode={audio_options.delivery_mode.value}"
                 )
-                if audio_options.se_user_folder and not audio_options.se_asset_id:
-                    log("  SE自動演出: 発話キーワードと音量ピークからクリップ内の時刻を決定")
+                if (
+                    audio_options.se_usage_percent > 0
+                    and (audio_options.se_asset_id or audio_options.se_user_folder)
+                ):
+                    log(
+                        "  SE自動演出: LLMが選んだ場面を近傍の音声ピークへ"
+                        "微調整して配置"
+                    )
                 if audio_options.delivery_mode is AudioDeliveryMode.BOTH:
                     log(
                         "  出力方法=両方: clean MP4を主ファイルとして残し、"
@@ -2071,7 +2081,7 @@ def maybe_render_phase(
     bgm_asset_id: str = "",
     se_asset_id: str = "",
     bgm_gain_db: float = -18.0,
-    se_gain_db: float = -8.0,
+    se_gain_db: float = -6.0,
     se_cue_seconds: float = 0.0,
     se_usage_percent: float = DEFAULT_SE_USAGE_PERCENT,
     bgm_user_folder: str = "",
@@ -2121,7 +2131,7 @@ def maybe_render_phase(
         se_asset_id=se_asset_id,
         bgm_gain_db=bgm_gain_db,
         se_gain_db=se_gain_db,
-        se_cue_seconds=se_cue_seconds,
+        se_cue_seconds=0.0,
         se_usage_percent=se_usage_percent,
         bgm_user_folder=bgm_user_folder,
         se_user_folder=se_user_folder,
@@ -2691,10 +2701,8 @@ def _run_obs_detect_render(
             bgm_asset_id=s.get("bgm_asset_id", ""),
             se_asset_id=s.get("se_asset_id", ""),
             bgm_gain_db=_coerce_float(s.get("bgm_gain_db", -18.0), -18.0),
-            se_gain_db=_coerce_float(s.get("se_gain_db", -8.0), -8.0),
-            se_cue_seconds=_coerce_float(
-                s.get("se_cue_seconds", 0.0), 0.0
-            ),
+            se_gain_db=_coerce_float(s.get("se_gain_db", -6.0), -6.0),
+            se_cue_seconds=0.0,
             se_usage_percent=normalise_se_usage(
                 s.get("se_usage_percent", DEFAULT_SE_USAGE_PERCENT),
                 default=DEFAULT_SE_USAGE_PERCENT,
@@ -4380,7 +4388,6 @@ def start_obs_watch(
         "se_asset_id": obs_se_asset_id,
         "bgm_gain_db": obs_bgm_gain_db,
         "se_gain_db": obs_se_gain_db,
-        "se_cue_seconds": obs_se_cue_seconds,
         "se_usage_percent": obs_se_usage_percent,
         "bgm_user_folder": obs_bgm_user_folder,
         "se_user_folder": obs_se_user_folder,
@@ -6007,7 +6014,7 @@ def create_ui():
                             minimum=-36,
                             maximum=0,
                             step=1,
-                            value=defaults.get("se_gain_db", -8.0),
+                            value=defaults.get("se_gain_db", -6.0),
                             label="SE音量 (dB)",
                         )
                         se_usage_percent = gr.Slider(
@@ -6019,14 +6026,10 @@ def create_ui():
                                 DEFAULT_SE_USAGE_PERCENT,
                             ),
                             label="SE使用度 (%)",
-                            info="0=なし / 50=検出イベントの半分 / 100=検出イベントをすべて採用",
+                            info="0=なし / 50=LLM候補の半分 / 100=LLM候補をすべて採用",
                         )
                     with gr.Row():
-                        se_cue_seconds = gr.Number(
-                            minimum=0,
-                            value=defaults.get("se_cue_seconds", 0.0),
-                            label="SEを鳴らす位置 (秒)",
-                        )
+                        se_cue_seconds = gr.State(0.0)
                         audio_delivery_mode = gr.Radio(
                             choices=[
                                 ("別ファイル（編集向け）", "separate"),
@@ -6742,14 +6745,10 @@ def create_ui():
                                 step=5,
                                 value=obs_media_defaults["se_usage_percent"],
                                 label="OBS用SE使用度 (%)",
-                                info="0=なし / 50=検出イベントの半分 / 100=検出イベントをすべて採用",
+                                info="0=なし / 50=LLM候補の半分 / 100=LLM候補をすべて採用",
                             )
                         with gr.Row():
-                            obs_se_cue_seconds = gr.Number(
-                                minimum=0,
-                                value=obs_media_defaults["se_cue_seconds"],
-                                label="OBS用SEを鳴らす位置 (秒)",
-                            )
+                            obs_se_cue_seconds = gr.State(0.0)
                             obs_audio_delivery_mode = gr.Radio(
                                 choices=[
                                     ("別ファイル（編集向け）", "separate"),

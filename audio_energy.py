@@ -15,6 +15,7 @@ LEVEL_WEIGHT = 0.7
 SPIKE_WEIGHT = 0.3
 _AUDIO_SAMPLE_RATE = "16000"
 _PCM_FULL_SCALE = 32768.0
+_DB_FLOOR = -120.0
 
 
 @dataclass
@@ -87,7 +88,12 @@ def excitement_scores(
     spike_weight: float = SPIKE_WEIGHT,
 ) -> np.ndarray:
     """Return 0..1 excitement scores from loudness level and sudden onsets."""
-    db = np.asarray(curve.db, dtype=float)
+    # Digital silence can arrive as roughly -6000 dBFS after the tiny RMS
+    # guard.  Treating that as a physical level makes codec residue around
+    # -70 dBFS look like a larger onset than the real programme audio.  Keep
+    # the measured curve intact for diagnostics, but score against a practical
+    # digital-silence floor.
+    db = np.maximum(np.asarray(curve.db, dtype=float), _DB_FLOOR)
     if db.size == 0:
         return np.array([], dtype=float)
 

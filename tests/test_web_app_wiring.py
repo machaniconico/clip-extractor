@@ -284,7 +284,7 @@ def test_save_defaults_signature_matches_save_button_inputs():
     assert "shorts_title_position" in args
 
 
-def test_audio_delivery_controls_are_persisted_and_rendered():
+def test_audio_delivery_controls_are_wired_with_internal_zero_cue_state():
     module = _module()
     source = WEB_APP.read_text(encoding="utf-8")
     expected = [
@@ -314,6 +314,9 @@ def test_audio_delivery_controls_are_persisted_and_rendered():
     assert 'label="BGM・SEの出力方法"' in source
     assert 'label="VFXと簡易エフェクトの選択・配置を自動にする"' in source
     assert "fn=vfx_manual_control_updates" in source
+    assert "se_cue_seconds = gr.State(0.0)" in source
+    assert "obs_se_cue_seconds = gr.State(0.0)" in source
+    assert "SEを鳴らす位置" not in source
     for event_name in ("render_phase", "maybe_render_phase"):
         event_inputs = _event_input_names(module, event_name, "then")
         assert event_inputs[-19:] == expected

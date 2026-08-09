@@ -160,7 +160,12 @@ def test_call_gemini_uses_google_genai_with_structured_json_config(fake_genai_sd
     assert highlights["type"] == "array"
     item = highlights["items"]
     assert item["type"] == "object"
-    assert {"start", "end", "title", "reason"} <= set(item["required"])
+    assert {"start", "end", "title", "reason", "se_cues"} <= set(item["required"])
+    se_cues = item["properties"]["se_cues"]
+    assert se_cues["type"] == "array"
+    assert {"time", "category", "intensity", "reason"} == set(
+        se_cues["items"]["required"]
+    )
 
     # Structured output remains compatible with the defensive downstream parser.
     assert highlighter._extract_json_object(result) == {

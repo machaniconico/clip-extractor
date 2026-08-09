@@ -104,10 +104,8 @@ def main():
                         help="追加するSE素材ID (--list-audio-assets で確認)")
     parser.add_argument("--bgm-gain-db", type=float, default=-18.0,
                         help="BGM出力ゲイン (default: -18 dB)")
-    parser.add_argument("--se-gain-db", type=float, default=-8.0,
-                        help="SE出力ゲイン (default: -8 dB)")
-    parser.add_argument("--se-cue-seconds", type=float, default=0.0,
-                        help="各クリップ先頭からSEを鳴らす相対秒 (default: 0)")
+    parser.add_argument("--se-gain-db", type=float, default=-6.0,
+                        help="SE出力ゲイン (default: -6 dB)")
     default_se_folder = Path(__file__).resolve().parent / "SE"
     parser.add_argument(
         "--se-folder",
@@ -118,7 +116,7 @@ def main():
         "--se-usage-percent",
         type=float,
         default=DEFAULT_SE_USAGE_PERCENT,
-        help="SE自動演出で採用する検出イベントの密度 0-100 (default: 40)",
+        help="SE自動演出で採用するLLM候補の密度 0-100 (default: 40)",
     )
     parser.add_argument(
         "--audio-delivery",
@@ -294,7 +292,7 @@ def main():
             se_asset_id=args.se,
             bgm_gain_db=args.bgm_gain_db,
             se_gain_db=args.se_gain_db,
-            se_cue_seconds=args.se_cue_seconds,
+            se_cue_seconds=0.0,
             se_usage_percent=args.se_usage_percent,
             se_user_folder=args.se_folder,
         )
