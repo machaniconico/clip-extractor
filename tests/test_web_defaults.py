@@ -50,24 +50,6 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         obs_launch_on_startup=False,
         obs_auto_connect_on_startup=False,
         obs_executable_path="",
-        audio_delivery_mode="both",
-        bgm_asset_id="",
-        se_asset_id="",
-        bgm_gain_db=-18.0,
-        se_gain_db=-8.0,
-        se_cue_seconds=0.0,
-        bgm_user_folder="",
-        se_user_folder="",
-        vfx_user_folder="",
-        vfx_asset_id="",
-        effect_preset="none",
-        vfx_automatic=False,
-        vfx_cue_seconds=0.0,
-        vfx_duration_seconds=1.0,
-        vfx_anchor="center",
-        vfx_scale_percent=100.0,
-        vfx_opacity_percent=100.0,
-        vfx_target="both",
     )
     args.update(overrides)
 
@@ -91,27 +73,17 @@ def _save_with(monkeypatch, tmp_path, **overrides):
         args["obs_launch_on_startup"],
         args["obs_executable_path"],
         args["obs_auto_connect_on_startup"],
-        args["audio_delivery_mode"],
-        args["bgm_asset_id"],
-        args["se_asset_id"],
-        args["bgm_gain_db"],
-        args["se_gain_db"],
-        args["se_cue_seconds"],
-        args["bgm_user_folder"],
-        args["se_user_folder"],
-        args["vfx_user_folder"],
-        args["vfx_asset_id"],
-        args["effect_preset"],
-        args["vfx_automatic"],
-        args["vfx_cue_seconds"],
-        args["vfx_duration_seconds"],
-        args["vfx_anchor"],
-        args["vfx_scale_percent"],
-        args["vfx_opacity_percent"],
-        args["vfx_target"],
     )
     assert settings_file.exists(), "save_defaults should write SETTINGS_FILE"
     return web_app.load_defaults()
+
+
+def test_fresh_application_defaults_use_sixty_second_minimum(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_app, "SETTINGS_FILE", tmp_path / "missing.json")
+
+    assert web_app.load_defaults()["min_duration"] == 60
+    assert web_app.OBS_PROCESSING_DEFAULTS["min_duration"] == 60
+    assert AppConfig().clip_min_duration == 60
 
 
 def test_roundtrip_shorts_fields(monkeypatch, tmp_path):
@@ -131,34 +103,15 @@ def test_roundtrip_shorts_fields(monkeypatch, tmp_path):
     assert loaded["shorts_title_position"] == "bottom", loaded
 
 
-def test_roundtrip_audio_delivery_fields_ignore_legacy_cue_seconds(
-    monkeypatch, tmp_path
-):
-    loaded = _save_with(
-        monkeypatch,
-        tmp_path,
-        audio_delivery_mode="separate",
-        bgm_asset_id="bgm-brand-new-wisdom",
-        se_asset_id="se-interface-confirmation",
-        bgm_gain_db=-21,
-        se_gain_db=-7,
-        se_cue_seconds=1.25,
-    )
-
-    assert loaded["audio_delivery_mode"] == "separate"
-    assert loaded["bgm_asset_id"] == "bgm-brand-new-wisdom"
-    assert loaded["se_asset_id"] == "se-interface-confirmation"
-    assert loaded["bgm_gain_db"] == -21
-    assert loaded["se_gain_db"] == -7
-    assert "se_cue_seconds" not in loaded
-
-
-def test_load_defaults_drops_legacy_se_cue_seconds(monkeypatch, tmp_path):
+def test_load_defaults_drops_removed_media_settings(monkeypatch, tmp_path):
     settings_file = tmp_path / "default_settings.json"
     settings_file.write_text(
         json.dumps(
             {
+                "audio_delivery_mode": "both",
+                "bgm_asset_id": "legacy-track",
                 "se_cue_seconds": 9.5,
+                "vfx_asset_id": "legacy-overlay",
                 "obs_media": {
                     "audio_delivery_mode": "both",
                     "se_cue_seconds": 7.25,
@@ -171,43 +124,8 @@ def test_load_defaults_drops_legacy_se_cue_seconds(monkeypatch, tmp_path):
 
     loaded = web_app.load_defaults()
 
-    assert "se_cue_seconds" not in loaded
-    assert "se_cue_seconds" not in loaded["obs_media"]
-    assert "se_cue_seconds" not in web_app._obs_media_settings_from_defaults(
-        loaded
-    )
-
-
-def test_roundtrip_user_media_and_vfx_fields(monkeypatch, tmp_path):
-    loaded = _save_with(
-        monkeypatch,
-        tmp_path,
-        bgm_user_folder="D:/Media/BGM",
-        se_user_folder="D:/Media/SE",
-        vfx_user_folder="D:/Media/VFX",
-        vfx_asset_id="user:vfx:" + ("a" * 64),
-        effect_preset="punch",
-        vfx_automatic=True,
-        vfx_cue_seconds=1.25,
-        vfx_duration_seconds=2.5,
-        vfx_anchor="bottom-right",
-        vfx_scale_percent=65,
-        vfx_opacity_percent=80,
-        vfx_target="shorts",
-    )
-
-    assert loaded["bgm_user_folder"] == "D:/Media/BGM"
-    assert loaded["se_user_folder"] == "D:/Media/SE"
-    assert loaded["vfx_user_folder"] == "D:/Media/VFX"
-    assert loaded["vfx_asset_id"] == "user:vfx:" + ("a" * 64)
-    assert loaded["effect_preset"] == "punch"
-    assert loaded["vfx_automatic"] is True
-    assert loaded["vfx_cue_seconds"] == 1.25
-    assert loaded["vfx_duration_seconds"] == 2.5
-    assert loaded["vfx_anchor"] == "bottom-right"
-    assert loaded["vfx_scale_percent"] == 65
-    assert loaded["vfx_opacity_percent"] == 80
-    assert loaded["vfx_target"] == "shorts"
+    for key in ("audio_delivery_mode", "bgm_asset_id", "se_cue_seconds", "vfx_asset_id", "obs_media"):
+        assert key not in loaded
 
 
 def test_obs_processing_profile_is_separate_from_archive_defaults(
@@ -277,72 +195,6 @@ def test_obs_processing_profile_is_separate_from_archive_defaults(
     }
 
 
-def test_obs_media_profile_is_separate_and_roundtrips_for_auto_connect(
-    monkeypatch, tmp_path
-):
-    _save_with(monkeypatch, tmp_path)
-
-    web_app.save_obs_processing_defaults(
-        True,
-        "",
-        True,
-        "",
-        False,
-        5,
-        30,
-        90,
-        "combined",
-        True,
-        "pad",
-        "center",
-        True,
-        False,
-        False,
-        0.35,
-        False,
-        obs_audio_delivery_mode="separate",
-        obs_bgm_asset_id="bgm-obs-track",
-        obs_se_asset_id="se-obs-hit",
-        obs_bgm_gain_db=-22,
-        obs_se_gain_db=-6,
-        obs_se_cue_seconds=1.5,
-        obs_bgm_user_folder="D:/OBS/BGM",
-        obs_se_user_folder="D:/OBS/SE",
-        obs_vfx_user_folder="D:/OBS/VFX",
-        obs_vfx_asset_id="user:vfx:" + ("c" * 64),
-        obs_effect_preset="flash",
-        obs_vfx_automatic=True,
-        obs_vfx_cue_seconds=0.5,
-        obs_vfx_duration_seconds=1.75,
-        obs_vfx_anchor="top-right",
-        obs_vfx_scale_percent=80,
-        obs_vfx_opacity_percent=75,
-        obs_vfx_target="shorts",
-    )
-
-    loaded = web_app.load_defaults()
-    assert loaded["obs_media"] == {
-        "audio_delivery_mode": "separate",
-        "bgm_asset_id": "bgm-obs-track",
-        "se_asset_id": "se-obs-hit",
-        "bgm_user_folder": "D:/OBS/BGM",
-        "se_user_folder": "D:/OBS/SE",
-        "bgm_gain_db": -22,
-        "se_gain_db": -6,
-        "se_usage_percent": 40.0,
-        "vfx_user_folder": "D:/OBS/VFX",
-        "vfx_asset_id": "user:vfx:" + ("c" * 64),
-        "effect_preset": "flash",
-        "vfx_automatic": True,
-        "vfx_cue_seconds": 0.5,
-        "vfx_duration_seconds": 1.75,
-        "vfx_anchor": "top-right",
-        "vfx_scale_percent": 80,
-        "vfx_opacity_percent": 75,
-        "vfx_target": "shorts",
-    }
-
-
 def test_roundtrip_preserves_defaults(monkeypatch, tmp_path):
     loaded = _save_with(monkeypatch, tmp_path)
     assert loaded["generate_shorts"] is False, loaded
@@ -386,7 +238,6 @@ def test_obs_recording_is_the_default_source(monkeypatch, tmp_path):
     assert AppConfig().shorts_mode == "pad"
     assert AppConfig().shorts_blur_strength == 20
     assert AppConfig().shorts_title_position == "top"
-    assert not hasattr(AppConfig(), "se_cue_seconds")
 
 
 def test_blank_saved_gemini_model_migrates_to_current_default(monkeypatch, tmp_path):

@@ -21,32 +21,15 @@ SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパートで
       "start": "HH:MM:SS.mmm",
       "end": "HH:MM:SS.mmm",
       "title": "クリップのタイトル（短く、キャッチーに）",
-      "reason": "このシーンを選んだ理由",
-      "se_cues": [
-        {
-          "time": "HH:MM:SS.mmm",
-          "category": "surprise",
-          "intensity": 0.8,
-          "reason": "この位置でSEを鳴らす理由"
-        }
-      ]
+      "reason": "このシーンを選んだ理由"
     }
   ]
 }
 
 選定基準：
-- 各クリップは30〜90秒程度
 - 面白い・感動的・印象的・情報価値が高いシーンを優先
 - クリップ同士が重複しないように
 - 会話の途中で切れないよう、自然な区切りを意識
-- 各クリップのSE候補は0〜3件
-- timeは元動画上の絶対時刻。クリップ先頭からの相対秒にはしない
-- categoryは surprise/laugh/success/warning/impact/movement/general のいずれか
-- intensityは0〜1で、SEの演出強度を表す
-- SEはオチ・リアクション開始・発見・成功・失敗確定など、意味や盛り上がりが転換する瞬間に合わせる
-- 前振り中や機械的なクリップ先頭・末尾は避ける
-- 複数のSE候補は互いに1.25秒以上離す
-- 効果がない場面は se_cues を空配列にする
 """
 
 GEMINI_SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパートです。
@@ -54,17 +37,9 @@ GEMINI_SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパ�
 ショート動画として切り抜くべき見どころシーンを特定してください。
 
 選定基準：
-- 各クリップは30〜90秒程度
 - 面白い・感動的・印象的・情報価値が高いシーンを優先
 - クリップ同士が重複しないように
 - 会話の途中で切れないよう、自然な区切りを意識
-- 各クリップの se_cues は必須の配列で、元動画上の絶対時刻にSE候補を0〜3件選ぶ
-- 各候補の time は元動画上の絶対時刻、category は surprise/laugh/success/warning/impact/movement/general のいずれか
-- 各候補の intensity は0〜1の演出強度とし、reason に選定理由を入れる
-- SEはオチ・リアクション開始・発見・成功・失敗確定など、意味や盛り上がりが転換する瞬間に合わせる
-- 前振り中や機械的なクリップ先頭・末尾は避ける
-- 複数のSE候補は互いに1.25秒以上離す
-- 効果がない場面は se_cues を空配列にする
 """
 
 
@@ -79,17 +54,6 @@ GEMINI_MODEL_CHOICES = (
     "gemini-2.5-flash-lite",
     "gemini-2.5-pro",
 )
-
-SE_CUE_CATEGORIES = (
-    "surprise",
-    "laugh",
-    "success",
-    "warning",
-    "impact",
-    "movement",
-    "general",
-)
-MAX_SE_CUES_PER_HIGHLIGHT = 3
 
 HIGHLIGHTS_JSON_SCHEMA = {
     "type": "object",
@@ -115,37 +79,8 @@ HIGHLIGHTS_JSON_SCHEMA = {
                         "type": "string",
                         "description": "このシーンを選んだ理由",
                     },
-                    "se_cues": {
-                        "type": "array",
-                        "description": "元動画上の絶対時刻で指定するSE候補（不要なら空配列）",
-                        "maxItems": MAX_SE_CUES_PER_HIGHLIGHT,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "time": {
-                                    "type": "string",
-                                    "description": "元動画上の絶対時刻（HH:MM:SS.mmm）",
-                                },
-                                "category": {
-                                    "type": "string",
-                                    "enum": list(SE_CUE_CATEGORIES),
-                                },
-                                "intensity": {
-                                    "type": "number",
-                                    "minimum": 0,
-                                    "maximum": 1,
-                                },
-                                "reason": {
-                                    "type": "string",
-                                    "description": "この位置でSEを鳴らす理由",
-                                },
-                            },
-                            "required": ["time", "category", "intensity", "reason"],
-                            "additionalProperties": False,
-                        },
-                    },
                 },
-                "required": ["start", "end", "title", "reason", "se_cues"],
+                "required": ["start", "end", "title", "reason"],
                 "additionalProperties": False,
             },
         }
@@ -210,7 +145,7 @@ def validate_local_llm_base_url(value: str) -> str:
 
 def _build_user_prompt(transcript, num_clips, min_duration, max_duration, custom_prompt):
     user_prompt = f"""以下の配信トランスクリプトから、最も魅力的な {num_clips} 個のシーンを選んでください。
-各クリップは {min_duration}〜{max_duration} 秒程度にしてください。
+各クリップは必ず {min_duration}〜{max_duration} 秒にしてください。
 
 """
     if custom_prompt:
@@ -458,8 +393,14 @@ def detect_highlights(
     ai_provider: str = "claude",
     api_key: str = "",
     ai_model: str = "",
+    video_duration: float | None = None,
 ) -> list[dict]:
     """Detect highlight moments in the transcript using the selected AI provider."""
+    min_duration, max_duration, video_duration = _validate_duration_bounds(
+        min_duration,
+        max_duration,
+        video_duration,
+    )
     user_prompt = _build_user_prompt(transcript, num_clips, min_duration, max_duration, custom_prompt)
 
     if ai_provider == "openai":
@@ -492,19 +433,23 @@ def detect_highlights(
             print(f"[Warn] skipping highlight missing start/end keys: {h!r}")
             continue
         try:
-            h["start_sec"] = _parse_timestamp(h["start"])
-            h["end_sec"] = _parse_timestamp(h["end"])
-            h["duration"] = h["end_sec"] - h["start_sec"]
+            start_sec, end_sec = normalize_highlight_range(
+                _parse_timestamp(h["start"]),
+                _parse_timestamp(h["end"]),
+                min_duration=min_duration,
+                max_duration=max_duration,
+                video_duration=video_duration,
+            )
         except (ValueError, TypeError, AttributeError) as e:
             print(f"[Warn] skipping highlight with bad timestamp ({e}): {h!r}")
             continue
+        h["start_sec"] = start_sec
+        h["end_sec"] = end_sec
+        h["duration"] = end_sec - start_sec
+        h["start"] = _format_timestamp(start_sec)
+        h["end"] = _format_timestamp(end_sec)
         h.setdefault("title", "")
         h.setdefault("reason", "")
-        h["se_cues"] = _normalise_se_cues(
-            h.get("se_cues", []),
-            start_sec=h["start_sec"],
-            end_sec=h["end_sec"],
-        )
         valid_highlights.append(h)
 
     if not valid_highlights:
@@ -519,62 +464,83 @@ def detect_highlights(
     return valid_highlights
 
 
-def _normalise_se_cues(raw_cues, *, start_sec: float, end_sec: float) -> list[dict]:
-    """Validate LLM SE cues and add their absolute source time in seconds."""
-    if not isinstance(raw_cues, list):
-        return []
+def _validate_duration_bounds(min_duration, max_duration, video_duration=None):
+    """Return finite clip bounds and reject impossible source durations."""
+    min_value = float(min_duration)
+    max_value = float(max_duration)
+    if not math.isfinite(min_value) or min_value <= 0:
+        raise ValueError("Minimum clip duration must be a positive finite number")
+    if not math.isfinite(max_value) or max_value < min_value:
+        raise ValueError("Maximum clip duration must be at least the minimum")
 
-    normalised: list[dict] = []
-    for cue in raw_cues:
-        if not isinstance(cue, dict):
-            continue
+    source_value = None
+    if video_duration is not None:
+        source_value = float(video_duration)
+        if not math.isfinite(source_value) or source_value <= 0:
+            raise ValueError("Video duration must be a positive finite number")
+        if source_value + 1e-9 < min_value:
+            raise ValueError(
+                f"Video duration ({source_value:.3f}s) is shorter than the "
+                f"minimum clip duration ({min_value:.3f}s)"
+            )
+    return min_value, max_value, source_value
 
-        raw_time = cue.get("time")
-        if isinstance(raw_time, bool) or not isinstance(raw_time, (str, int, float)):
-            continue
-        time_value = raw_time.strip() if isinstance(raw_time, str) else raw_time
-        if time_value == "":
-            continue
-        try:
-            time_sec = float(_parse_timestamp(time_value))
-        except (ValueError, TypeError, AttributeError):
-            continue
-        if not math.isfinite(time_sec) or not (start_sec <= time_sec < end_sec):
-            continue
 
-        category_value = cue.get("category")
-        if not isinstance(category_value, str):
-            continue
-        category = category_value.strip().lower()
-        if category not in SE_CUE_CATEGORIES:
-            continue
+def normalize_highlight_range(
+    start_sec,
+    end_sec,
+    *,
+    min_duration,
+    max_duration,
+    video_duration=None,
+) -> tuple[float, float]:
+    """Clamp one AI-selected range to the configured duration and source bounds."""
+    min_value, max_value, source_value = _validate_duration_bounds(
+        min_duration,
+        max_duration,
+        video_duration,
+    )
+    start = float(start_sec)
+    end = float(end_sec)
+    if not math.isfinite(start) or not math.isfinite(end):
+        raise ValueError("Highlight timestamps must be finite numbers")
+    if end <= start:
+        raise ValueError("Highlight end must be after its start")
 
-        raw_intensity = cue.get("intensity")
-        if isinstance(raw_intensity, bool):
-            continue
-        try:
-            intensity = float(raw_intensity)
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(intensity) or not (0.0 <= intensity <= 1.0):
-            continue
+    start = max(0.0, start)
+    if source_value is not None:
+        start = min(start, source_value)
+        end = min(max(0.0, end), source_value)
+        if end <= start:
+            raise ValueError("Highlight is outside the source video")
 
-        reason_value = cue.get("reason")
-        if not isinstance(reason_value, str):
-            continue
+    current_duration = end - start
+    target_duration = min(max(current_duration, min_value), max_value)
+    center = (start + end) / 2.0
+    normalized_start = center - target_duration / 2.0
+    normalized_end = normalized_start + target_duration
 
-        normalised.append(
-            {
-                "time": time_value,
-                "time_sec": time_sec,
-                "category": category,
-                "intensity": intensity,
-                "reason": reason_value.strip(),
-            }
-        )
-        if len(normalised) >= MAX_SE_CUES_PER_HIGHLIGHT:
-            break
-    return normalised
+    if normalized_start < 0.0:
+        normalized_start = 0.0
+        normalized_end = target_duration
+    if source_value is not None and normalized_end > source_value:
+        normalized_end = source_value
+        normalized_start = source_value - target_duration
+
+    normalized_start = max(0.0, normalized_start)
+    normalized_end = normalized_start + target_duration
+    if source_value is not None:
+        normalized_end = min(source_value, normalized_end)
+        normalized_start = normalized_end - target_duration
+    return float(normalized_start), float(normalized_end)
+
+
+def _format_timestamp(seconds: float) -> str:
+    total_ms = max(0, int(round(float(seconds) * 1000)))
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{milliseconds:03d}"
 
 
 def _parse_timestamp(ts: str | int | float) -> float:
