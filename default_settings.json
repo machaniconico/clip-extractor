@@ -54,7 +54,7 @@
     "shorts_title": true,
     "shorts_title_position": "top",
     "generate_thumbnails": true,
-    "audio_fusion": false,
+    "audio_fusion": true,
     "audio_alpha": 0.35,
     "karaoke": false
   }

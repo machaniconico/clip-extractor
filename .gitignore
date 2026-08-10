@@ -22,8 +22,14 @@ output_*/
 output/
 *.zip
 
-# Local sound-effect library
+# Local audio libraries
+BGM/*
+!BGM/SOURCES.md
 SE/
+VFX/*
+!VFX/SOURCES.md
+EFFECT/*
+!EFFECT/SOURCES.md
 
 # Editor / OS
 .vscode/
