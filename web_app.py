@@ -25,6 +25,12 @@ from typing import Callable
 os.environ["MPLBACKEND"] = "Agg"
 
 import gradio as gr
+from x_post import (
+    DEFAULT_X_POST_TEMPLATE,
+    open_x_post_composer,
+    parse_destination_links,
+    render_x_post_text,
+)
 
 
 @dataclass
@@ -201,6 +207,9 @@ OBS_CONNECTION_DEFAULTS = {
     "obs_stop_event": "record",
     "obs_watch_folder": "",
     "obs_auto_process": True,
+    "obs_x_post_on_stream_start": False,
+    "obs_x_post_template": DEFAULT_X_POST_TEMPLATE,
+    "obs_x_post_destinations": "",
 }
 
 
@@ -514,6 +523,9 @@ def _save_obs_connection_defaults(
     watch_folder: str,
     auto_process: bool,
     processing_settings: dict | None = None,
+    x_post_on_stream_start: bool = False,
+    x_post_template: str = DEFAULT_X_POST_TEMPLATE,
+    x_post_destinations: str = "",
 ) -> None:
     """Persist OBS controls while keeping the password out of tracked JSON."""
     data = load_defaults()
@@ -526,6 +538,9 @@ def _save_obs_connection_defaults(
             "obs_stop_event": stop_event,
             "obs_watch_folder": watch_folder,
             "obs_auto_process": bool(auto_process),
+            "obs_x_post_on_stream_start": bool(x_post_on_stream_start),
+            "obs_x_post_template": str(x_post_template or DEFAULT_X_POST_TEMPLATE),
+            "obs_x_post_destinations": str(x_post_destinations or ""),
         }
     )
     if processing_settings is not None:
@@ -2540,6 +2555,159 @@ def _append_obs_chapters_to_archive(
             )
 
 
+def _obs_make_x_post_callbacks(
+    settings: dict,
+    generation: int | None = None,
+) -> tuple[Callable[..., None], Callable[[], None]]:
+    """Build stream callbacks that open a fresh, prefilled X composer.
+
+    The browser action is independent from OBS clip generation. YouTube is
+    queried only when its existing authentication is already available; a
+    missing YouTube URL never prevents configured simulcast links from being
+    posted.
+    """
+    state_lock = threading.Lock()
+    stream_active = False
+
+    def _is_current() -> bool:
+        return generation is None or generation == _obs_generation
+
+    def _on_stream_started(proactive: bool = False) -> None:
+        nonlocal stream_active
+        if not _is_current():
+            return
+        with state_lock:
+            if stream_active:
+                return
+            stream_active = True
+
+        def _worker_body() -> None:
+            youtube_url = ""
+            title = ""
+            try:
+                if _is_current():
+                    try:
+                        auth = youtube_api.check_auth_status()
+                    except Exception as exc:
+                        auth = {"authenticated": False}
+                        _obs_append_status(f"X投稿用のYouTube確認をスキップ: {exc}")
+                    if auth.get("authenticated"):
+                        service = youtube_api.get_youtube_service()
+                        started_after = (
+                            None
+                            if proactive
+                            else datetime.now(timezone.utc) - timedelta(seconds=60)
+                        )
+                        for attempt in range(3):
+                            broadcast = youtube_api.find_active_broadcast(
+                                service,
+                                started_after=started_after,
+                            )
+                            if broadcast:
+                                video_id = str(broadcast.get("video_id") or "")
+                                if video_id:
+                                    youtube_url = (
+                                        "https://www.youtube.com/watch?v="
+                                        f"{video_id}"
+                                    )
+                                    title = str(broadcast.get("title") or "")
+                                break
+                            if attempt < 2 and _is_current():
+                                time.sleep(2)
+                    else:
+                        _obs_append_status(
+                            "X投稿用のYouTubeライブURLは未取得です。"
+                            "設定済みの配信先URLで投稿します"
+                        )
+            except Exception as exc:
+                logger.warning("X post YouTube lookup failed: %s", exc)
+                _obs_append_status(
+                    f"X投稿用のYouTubeライブURL取得に失敗: {exc}。"
+                    "設定済みの配信先URLで投稿します"
+                )
+
+            if not _is_current():
+                return
+            post_text = render_x_post_text(
+                settings.get("obs_x_post_template", DEFAULT_X_POST_TEMPLATE),
+                youtube_url=youtube_url,
+                title=title,
+                destinations=settings.get("obs_x_post_destinations", ""),
+            )
+            if not post_text.strip():
+                _obs_append_status("X投稿文が空のため、投稿画面を開きませんでした")
+                return
+            try:
+                open_x_post_composer(post_text)
+                target_count = len(
+                    parse_destination_links(
+                        settings.get("obs_x_post_destinations", "")
+                    )
+                ) + (1 if youtube_url else 0)
+                _obs_append_status(
+                    "X投稿作成画面を開きました。内容を確認して「ポスト」を押してください"
+                    f"（配信先リンク {target_count}件）"
+                )
+            except Exception as exc:
+                logger.warning("X post composer open failed: %s", exc)
+                _obs_append_status(f"X投稿作成画面を開けませんでした: {exc}")
+
+        def _worker() -> None:
+            try:
+                _worker_body()
+            finally:
+                _unregister_obs_worker(threading.current_thread())
+
+        worker = threading.Thread(target=_worker, daemon=True)
+        _register_obs_worker(worker)
+        worker.start()
+
+    def _on_stream_finished() -> None:
+        nonlocal stream_active
+        with state_lock:
+            stream_active = False
+
+    return _on_stream_started, _on_stream_finished
+
+
+def _obs_compose_stream_started_callbacks(
+    *callbacks: Callable[..., None] | None,
+) -> Callable[..., None] | None:
+    active_callbacks = tuple(callback for callback in callbacks if callback is not None)
+    if not active_callbacks:
+        return None
+    if len(active_callbacks) == 1:
+        return active_callbacks[0]
+
+    def _composed(proactive: bool = False) -> None:
+        for callback in active_callbacks:
+            try:
+                callback(proactive=proactive)
+            except Exception:
+                logger.exception("OBS stream-start callback failed")
+
+    return _composed
+
+
+def _obs_compose_stream_finished_callbacks(
+    *callbacks: Callable[[], None] | None,
+) -> Callable[[], None] | None:
+    active_callbacks = tuple(callback for callback in callbacks if callback is not None)
+    if not active_callbacks:
+        return None
+    if len(active_callbacks) == 1:
+        return active_callbacks[0]
+
+    def _composed() -> None:
+        for callback in active_callbacks:
+            try:
+                callback()
+            except Exception:
+                logger.exception("OBS stream-finished callback failed")
+
+    return _composed
+
+
 def _obs_make_stream_pipeline_callbacks(
     auto_process: bool,
     settings: dict,
@@ -3490,6 +3658,9 @@ def _start_obs_watch_impl(
     whisper_model: str,
     output_base_dir: str,
     obs_processing_settings: dict | None = None,
+    x_post_on_stream_start: bool = False,
+    x_post_template: str = DEFAULT_X_POST_TEMPLATE,
+    x_post_destinations: str = "",
 ) -> str:
     """Implementation shared by manual and automatic OBS connection starts."""
     global _obs_watcher, _obs_generation, _obs_retry_handler
@@ -3572,6 +3743,11 @@ def _start_obs_watch_impl(
         settings["whisper_model"] = whisper_model
     if output_base_dir is not None:
         settings["output_base_dir"] = output_base_dir
+    settings["obs_x_post_on_stream_start"] = bool(x_post_on_stream_start)
+    settings["obs_x_post_template"] = str(
+        x_post_template or DEFAULT_X_POST_TEMPLATE
+    )
+    settings["obs_x_post_destinations"] = str(x_post_destinations or "")
     profile_auto_append = obs_profile.get(
         "auto_append_youtube",
         auto_append_youtube,
@@ -3624,6 +3800,9 @@ def _start_obs_watch_impl(
             config["watch_folder"],
             bool(auto_process),
             processing_settings=obs_profile,
+            x_post_on_stream_start=bool(x_post_on_stream_start),
+            x_post_template=settings["obs_x_post_template"],
+            x_post_destinations=settings["obs_x_post_destinations"],
         )
     except Exception as exc:
         msg = f"OBS連携設定の保存に失敗しました: {exc}"
@@ -3662,6 +3841,8 @@ def _start_obs_watch_impl(
     recording_stopped = None
     archive_started = None
     archive_finished = None
+    x_post_started = None
+    x_post_finished = None
     if recording_primary_mode:
         callback, recording_stopped, archive_started, archive_finished = (
             _obs_make_recording_primary_callbacks(
@@ -3678,14 +3859,32 @@ def _start_obs_watch_impl(
             settings,
             gen,
         )
+    if bool(x_post_on_stream_start) and trigger_method == "websocket":
+        x_post_started, x_post_finished = _obs_make_x_post_callbacks(
+            settings,
+            gen,
+        )
+    elif bool(x_post_on_stream_start):
+        _obs_append_status(
+            "X配信開始ポストはWebSocket方式でのみ利用できます。"
+            "folder方式では無効化しました"
+        )
+    stream_started = _obs_compose_stream_started_callbacks(
+        archive_started,
+        x_post_started,
+    )
+    stream_finished = _obs_compose_stream_finished_callbacks(
+        archive_finished,
+        x_post_finished,
+    )
     try:
         watcher = obs_integration.create_watcher(
             method,
             config,
             callback,
             on_recording_stopped=recording_stopped,
-            on_stream_started=archive_started,
-            on_stream_finished=archive_finished,
+            on_stream_started=stream_started,
+            on_stream_finished=stream_finished,
         )
     except Exception as e:
         msg = f"ウォッチャー生成エラー: {e}"
@@ -3720,7 +3919,7 @@ def _start_obs_watch_impl(
             if _obs_watcher is watcher and _obs_generation == gen:
                 _obs_retry_handler = retry_handler
     if (
-        archive_started is not None
+        stream_started is not None
         and str(status).lower().startswith("connected")
         and not bool(getattr(watcher, "stream_status_checked", False))
         and not bool(getattr(watcher, "stream_active", False))
@@ -3728,7 +3927,7 @@ def _start_obs_watch_impl(
         # Compatibility fallback for older/mocked obsws-python clients that
         # cannot query GetStreamStatus. Current clients invoke the callback
         # only when output_active is true.
-        archive_started(proactive=True)
+        stream_started(proactive=True)
     return status
 
 
@@ -3764,6 +3963,9 @@ def start_obs_watch(
     obs_auto_start_without_prompt_confirmation=None,
     obs_shorts_blur_strength=None,
     obs_shorts_title_position=None,
+    obs_x_post_on_stream_start=None,
+    obs_x_post_template=None,
+    obs_x_post_destinations=None,
 ) -> str:
     """Manually (re)start OBS integration from the Gradio controls.
 
@@ -3834,6 +4036,24 @@ def start_obs_watch(
             whisper_model=whisper_model,
             output_base_dir=output_base_dir,
             obs_processing_settings=obs_processing_settings,
+            x_post_on_stream_start=bool(
+                obs_x_post_on_stream_start
+                if obs_x_post_on_stream_start is not None
+                else load_defaults().get("obs_x_post_on_stream_start", False)
+            ),
+            x_post_template=(
+                obs_x_post_template
+                if obs_x_post_template is not None
+                else load_defaults().get(
+                    "obs_x_post_template",
+                    DEFAULT_X_POST_TEMPLATE,
+                )
+            ),
+            x_post_destinations=(
+                obs_x_post_destinations
+                if obs_x_post_destinations is not None
+                else load_defaults().get("obs_x_post_destinations", "")
+            ),
         )
 
 
@@ -3956,6 +4176,17 @@ def start_obs_watch_from_defaults(
                 ai_provider=settings.get("ai_provider", "gemini"),
                 whisper_model=settings.get("whisper_model", "large-v3"),
                 output_base_dir=settings.get("output_base_dir", ""),
+                x_post_on_stream_start=bool(
+                    settings.get("obs_x_post_on_stream_start", False)
+                ),
+                x_post_template=settings.get(
+                    "obs_x_post_template",
+                    DEFAULT_X_POST_TEMPLATE,
+                ),
+                x_post_destinations=settings.get(
+                    "obs_x_post_destinations",
+                    "",
+                ),
             )
         except Exception as exc:
             logger.exception("OBS startup auto-connect failed")
@@ -5349,6 +5580,44 @@ def create_ui():
                             value="",
                         )
 
+                with gr.Accordion("X 配信開始ポスト", open=False):
+                    gr.Markdown(
+                        "WebSocket方式で配信開始を検知したら、配信先リンク入りの"
+                        "X投稿作成画面を開きます。本文を確認してから手動でポストします。"
+                    )
+                    obs_x_post_on_stream_start = gr.Checkbox(
+                        label="配信開始時にXの投稿作成画面を開く",
+                        value=bool(
+                            defaults.get("obs_x_post_on_stream_start", False)
+                        ),
+                        info="配信開始ごとに新しい投稿文を作成します",
+                    )
+                    obs_x_post_destinations = gr.Textbox(
+                        label="同時配信先URL（1行1件）",
+                        value=defaults.get("obs_x_post_destinations", ""),
+                        lines=3,
+                        placeholder=(
+                            "Twitch|https://www.twitch.tv/your_channel\n"
+                            "Kick|https://kick.com/your_channel"
+                        ),
+                        info=(
+                            "YouTubeのライブURLは認証済みなら自動取得します。"
+                            "他サイトはチャンネルURLを登録してください"
+                        ),
+                    )
+                    obs_x_post_template = gr.Textbox(
+                        label="X投稿文テンプレート",
+                        value=defaults.get(
+                            "obs_x_post_template",
+                            DEFAULT_X_POST_TEMPLATE,
+                        ),
+                        lines=3,
+                        info=(
+                            "置換: {links}=配信先一覧、{youtube_url}=YouTubeライブURL、"
+                            "{title}=YouTubeタイトル"
+                        ),
+                    )
+
                 with gr.Accordion(
                     "OBS自動処理の生成設定",
                     open=True,
@@ -6159,6 +6428,9 @@ def create_ui():
                 obs_auto_start_without_prompt_confirmation,
                 obs_shorts_blur_strength,
                 obs_shorts_title_position,
+                obs_x_post_on_stream_start,
+                obs_x_post_template,
+                obs_x_post_destinations,
             ],
             outputs=obs_status_box,
         )

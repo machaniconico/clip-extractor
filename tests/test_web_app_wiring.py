@@ -707,6 +707,8 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_audio_alpha", "obs_karaoke",
         "obs_auto_start_without_prompt_confirmation",
         "obs_shorts_blur_strength", "obs_shorts_title_position",
+        "obs_x_post_on_stream_start", "obs_x_post_template",
+        "obs_x_post_destinations",
     ]
     assert _click_input_names(module, "obs_start_btn") == [
         "obs_trigger_radio", "obs_host", "obs_port", "obs_password",
@@ -719,7 +721,22 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_generate_thumbnails", "obs_audio_fusion", "obs_audio_alpha",
         "obs_karaoke", "obs_auto_start_without_prompt_confirmation",
         "obs_shorts_blur_strength", "obs_shorts_title_position",
+        "obs_x_post_on_stream_start", "obs_x_post_template",
+        "obs_x_post_destinations",
     ]
+
+
+def test_obs_x_post_controls_are_saved_and_explain_dynamic_links():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert 'label="配信開始時にXの投稿作成画面を開く"' in source
+    assert 'label="同時配信先URL（1行1件）"' in source
+    assert 'label="X投稿文テンプレート"' in source
+    assert "obs_x_post_on_stream_start" in source
+    assert "obs_x_post_destinations" in source
+    assert "obs_x_post_template" in source
+    assert "{links}=配信先一覧" in source
+    assert "本文を確認してから手動でポストします" in source
 
 
 def test_obs_help_explains_recording_primary_setup_and_archive_fallback():

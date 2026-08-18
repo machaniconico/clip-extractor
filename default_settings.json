@@ -36,6 +36,9 @@
   "obs_stop_event": "record",
   "obs_watch_folder": "",
   "obs_auto_process": true,
+  "obs_x_post_on_stream_start": false,
+  "obs_x_post_template": "配信開始しました！\n{links}",
+  "obs_x_post_destinations": "",
   "obs_processing": {
     "enable_clips": true,
     "clip_prompt": "",
