@@ -13,7 +13,6 @@ YouTube / Twitch 配信アーカイブ（または手元の動画ファイル）
 - **ワード単位カラオケ字幕** — ショート専用。ASS の `\k` タイミングで読み上げに同期して色が動く字幕を焼き込み
 - **サムネイル候補の自動生成** — 代表フレームを抽出し、タイトルを焼き込んだ候補画像を生成
 - **音声の盛り上がり融合** — 音量（dBFS）カーブ＋スパイク検出で「盛り上がりスコア」を作り、AI のハイライト順位に融合して再ランク（失敗時は元の順位を維持する fail-open）
-- **BGM・SE・軽量VFX** — 任意導入の検証済み音声パックまたは手持ち素材フォルダを使い、音声の別ファイル／ミックス出力と、PNG・WebM VFX＋簡易エフェクトの焼き込みに対応
 - **概要欄タイムスタンプ生成** — チャプター（タイムスタンプ）テキストを生成。YouTube の概要欄へ自動追記も可能
 - **Premiere Pro 連携** — 元動画をV1、通常切り抜きをV2、同時生成したショートをV3へ元時刻に合わせて自動配置。combined / individual の XML 手動読み込みも維持
 - **2フェーズ Web UI** — 「検出」と「レンダリング」を分離。検出後に各クリップの **イン/アウト点・タイトルをプレビューしながら編集** してから書き出せる（再文字起こし不要）
@@ -32,8 +31,6 @@ YouTube / Twitch 配信アーカイブ（または手元の動画ファイル）
   └─ 切り抜き生成（ffmpeg）
         ├─ 縦型ショート（--shorts）＋タイトル焼き込み
         ├─ カラオケ字幕（--karaoke）
-        ├─ 任意のBGM・SE（separate / mixed / both）
-        ├─ 手持ちVFX＋簡易エフェクト（手動 / 自動選択・配置）
         └─ サムネ候補（--thumbnails）
   └─ 概要欄タイムスタンプ生成（YouTube入力時。+ 任意で YouTube へ追記）
   └─ Premiere Proへ直接送信（または XML 書き出し）
@@ -127,52 +124,6 @@ python launcher.py
 
 Windows では `Clip Extractor.bat` をダブルクリックでも起動できます。起動後 `http://localhost:7860` を開きます。
 
-### BGM・SE・VFX素材と出力モード
-
-Input画面の **BGM・SE・VFX素材と出力** で使います。初回だけ **「日本語ショート向け素材をダウンロード」** を押すと、約13.4 MBのBGM 8曲・SE 23点を取得します。内訳は、[Kenney Interface Sounds](https://kenney.nl/assets/interface-sounds)、[Kenney Impact Sounds](https://kenney.nl/assets/impact-sounds)、[OpenGameArt Short Loops Background Music Pack](https://opengameart.org/content/short-loops-background-music-pack) から選定したCC0素材20点と、[OtoLogic](https://otologic.jp/)から選定した日本語ショート向けのCC BY 4.0素材11点です。OtoLogicの追加分は、ひらめき、カウントダウン、自主規制音のSEと、木琴系のゆったり・コミカル・不安系BGMです。
-
-> OtoLogic素材はクレジット必須です。選択肢に **「要クレジット」** と表示し、生成時に `THIRD_PARTY_NOTICES_AUDIO.txt` へ `音素材：OtoLogic (https://otologic.jp/) / CC BY 4.0` を出力します。動画公開時はこの文を概要欄などへ記載してください。CC0素材はクレジット不要です。
-
-自分で用意した素材は、**BGM / SE / VFXごとに別の参照フォルダ**を指定して「3フォルダを再スキャン」を押します。対応音声は AAC / FLAC / M4A / MP3 / OGG / Opus / WAV / WMA、VFXは PNG / WebM です。サブフォルダも走査し、素材は元フォルダから参照するためアプリ内へコピーしたり、自動アップロードしたりしません。選択は内容のSHA-256で保持されるので、内容を変えずに改名・移動した素材は同じものとして再検出できます。
-
-アプリ直下に `SE/` フォルダがある場合は、Input / OBS の参照先へ自動設定します。SEの手動選択を空欄のままにすると、文字起こしの単語時刻と切り抜き音声の音量ピークから、驚き・笑い・成功・警告などのイベントを検出し、ファイル名のカテゴリに合うSEをイベント時刻へ自動配置します。1クリップ内に複数のSEを配置でき、**SE使用度 (%)** は検出イベントの採用密度を調整します。0%は無効、50%はイベントの約半分、100%は検出イベントをすべて採用します。SE音量 (dB) は音量、SE使用度 (%) は使用頻度の設定です。CLIでも `--se-folder` と `--se-usage-percent` を使えます。
-
-SE自動演出の決定内容は `audio_manifest.json` の各グループに `se_analysis.events` と `se_analysis.cues` として記録します。単一SEを手動選択した場合、または文字起こし情報を渡さないAPI利用では、従来どおり1つのSEを固定位置へ配置します。
-
-> 手持ち素材のライセンスや利用許諾はアプリでは確認しません。利用者が確認済みの素材だけを指定してください。生成時にはファイル名・SHA-256・サイズを来歴へ記録し、CC0素材としては扱いません。
-
-配布時は、利用許諾を確認できた素材だけを `SE/` として同梱してください。確認できない手持ち素材は配布物へ含めず、配布先で各自の `SE/` フォルダを指定します。代替として、既存の **日本語ショート向け素材をダウンロード** ボタン、または `python main.py --install-audio-pack` で、カタログに固定した再配布可能なスターターパックを明示的に取得できます。
-
-#### フリー素材の入手先（外部サイト）
-
-UIの **「フリー素材サイトの案内（外部サイト）」** からも同じリンクを開けます。素材は各公式サイトから自分でダウンロードし、BGM / SE / VFXフォルダへ保存してから再スキャンしてください。この案内リンクから素材を自動取得・スクレイピングしません。上記スターターパックだけは、公式規約で再配布可能と確認した選定素材を、利用者がボタンを押した時に限り取得します。
-
-| 入手先 | 主な素材 | 利用時の要点（2026-08-06確認） |
-|---|---|---|
-| [DOVA-SYNDROME](https://dova-s.jp/) | BGM・SE | 商用動画の背景利用向け。[利用条件](https://dova-s.jp/help/articles/license-usage/)と作者別条件を確認 |
-| [効果音ラボ](https://soundeffect-lab.info/) | SE | 商用動画で利用可・クレジット不要。素材再配布やアプリへの初期素材同梱は不可（[利用規約](https://soundeffect-lab.info/agreement/)） |
-| [OtoLogic](https://otologic.jp/) | BGM・SE | CC BY 4.0。無料利用には「OtoLogic」のクレジットが必要（[利用規約](https://otologic.jp/free/license.html)） |
-| [Pixabay](https://pixabay.com/) | BGM・SE・動画/VFX | 作品内利用・加工可、単体再配布不可。音楽はContent ID表示にも注意（[Content License](https://pixabay.com/service/license-summary/)） |
-| [Mixkit](https://mixkit.co/) | BGM・SE・動画/VFX | Free / Restrictedなど素材種別・アイテムごとの条件を確認（[License](https://mixkit.co/license/)） |
-
-> この表は入手先の案内であり、掲載素材すべての利用可否をアプリが保証するものではありません。各素材の配布ページ・作者条件・最新規約が優先されます。公開時に確認できるよう、素材ページと規約のURL・取得日を控えてください。
-
-VFX素材にはクリップ先頭を0秒とする開始位置・表示時間、9方向の配置、倍率、不透明度、通常版／Shortsの適用先を指定できます。簡易エフェクトは完成映像全体の先頭・末尾にかかる `fade`、指定位置の短い `punch` / `flash` です。**「VFXと簡易エフェクトの選択・配置を自動にする」** をONにすると、切り抜きごとにVFX・簡易エフェクト・開始位置・配置を自動決定します。追加のAI/API通信は行わず、同じハイライトと素材集合なら同じ結果になります。VFX・タイトル・字幕は1回のFFmpeg映像処理で合成し、`clips/` または `shorts/` の `effects_manifest.json` に編集用の適用秒・配置・素材SHA-256を残します。`mixed` 出力では、この来歴の `output_file` も最終的な `_mixed.mp4` へ更新されます。
-
-- 生成のたびにネットへ接続せず、`%LOCALAPPDATA%/ClipExtractor/asset-packs/` のバージョン別キャッシュを使います
-- ダウンロード元・リダイレクト先、バイト数、SHA-256、音声ストリームを検証してから有効化します
-- BGM/SEを選ばなければ、従来どおりclean MP4だけを生成します
-- 元の会話音声は1回だけ保持し、BGM/SEを加算した後にピークリミッターを適用します
-- ミックス後のAACを4倍サンプルレートで再検査し、-1 dBFSを超える場合は自動減衰して再エンコードします
-
-| 出力方法 | 生成物 |
-|---|---|
-| 別ファイル（`separate`） | clean `.mp4`、選択した `_bgm.wav` / `_se.wav`、編集設定 `_audio.json` |
-| 動画へミックス（`mixed`） | `_mixed.mp4`。中間WAVとclean MP4は残しません |
-| 両方（`both`、既定） | clean MP4、選択したWAV、JSON、`_mixed.mp4` |
-
-WAVはクリップ先頭を0秒とした48kHz stereo PCMです。各出力フォルダには `audio_manifest.json` と `THIRD_PARTY_NOTICES_AUDIO.txt` も作成します。素材パックの作者・取得元・ライセンスURL・帰属表示要否・確認日・元ファイルSHA-256を記録し、OtoLogic使用時は公開用クレジット文も出力します。手持ち素材はファイル名・SHA-256・サイズと「利用者管理」であることを記録します。再生成で以前の音声成果物を入れ替える場合、既存ファイルは削除せず、出力直下の `.audio_delivery_recovery-*` に元の相対パスを記した `RECOVERY.json` と一緒に退避します。Premiere連携ではBGM/SEトラックをまだ自動配置しないため、`separate` / `both` のWAVは手動で読み込んでください。権利確認記録は [`docs/compliance/audio-assets.md`](docs/compliance/audio-assets.md) にあります。
-
 ### OBS Studio と同時起動（Windows）
 
 Settings / 設定タブの **「Clip Extractor起動時にOBS Studioも起動」** をONにし、画面下の **「デフォルトに設定」** で保存すると、次回から通常のClip Extractor起動時にOBSも一緒に開きます。**「起動時にOBS連携も自動開始」** は初期状態でONです。OBSが後から起動した場合もWebSocketの準備完了まで待機し、接続後は配信開始を自動検知します。
@@ -205,6 +156,12 @@ OBS側では最初に次を設定してください。
 2. `stream` — OBS録画を使わず、再エンコード後のYouTube完成アーカイブだけをDLして処理
 
 WebSocket方式の自動処理にはSettingsのYouTube認証が必要で、アーカイブは公開または限定公開にしてください。完成アーカイブの待機上限は6時間です。上限を超えた場合は、後日 **Input** タブへ完成アーカイブURLを貼って生成できます。
+
+配信開始時にXへ告知する場合は、OBS連携タブの **「X 配信開始ポスト」** をONにします。WebSocketで配信開始を検知すると、毎回その配信用の本文を作ります。`{links}` には、認証済みYouTubeから取得したライブURLと、設定欄に1行1件で登録したTwitch・Kickなどの同時配信先URLが入ります。
+
+**「X APIで完全自動投稿する」** がOFFなら、従来どおり本文を入力済みにした投稿作成画面を開き、内容を確認して手動でポストします。完全自動投稿を使う場合は、X Developer Consoleで自分のアプリに投稿権限を設定し、API Key / API Key Secret / Access Token / Access Token Secretの4項目を入力してからONにします。認証情報が不足している場合やAPI投稿に失敗した場合は、自動的に手動の投稿作成画面へフォールバックします。1回の配信開始でAPI投稿を試みるのは最大1回です。
+
+4つの認証情報は通常設定JSONへ入れず、Git除外されたローカルの `.x_credentials.json` に保存します。画面では常にマスクし、保存済みの値をブラウザへ再送しません。このファイルは暗号化されないため、PCの利用者とファイル権限を適切に管理してください。X APIはユーザー自身のDeveloperアカウントに課金・利用上限が適用されます。現在の確認記録は [`docs/compliance/x-api.md`](docs/compliance/x-api.md) を参照してください。
 
 `folder`監視はローカル録画専用です。配信IDを対応付けられないため、アーカイブへのフォールバックとYouTube概要欄への自動反映は行いません。
 
@@ -249,14 +206,6 @@ python main.py ./archive.mp4 --prompt "面白いシーンだけ選んで"
 
 # ショート + カラオケ字幕 + サムネ + 音声融合まで一気に
 python main.py ./archive.mp4 --shorts --karaoke --thumbnails --audio-fusion
-
-# 日本語ショート向け素材を一度だけ導入し、素材IDを確認
-python main.py --install-audio-pack
-python main.py --list-audio-assets
-
-# BGM/SEをclean MP4とは別WAVでも、完成MP4にも出力
-python main.py ./archive.mp4 --bgm bgm-brand-new-wisdom \
-  --se se-interface-confirmation --se-cue-seconds 1.5 --audio-delivery both
 ```
 
 > CLI のハイライト検出は既定で `claude` CLI を使います（API キー不要）。OpenAI / Gemini を CLI から使いたい場合は Web UI の利用を推奨します。
@@ -280,15 +229,9 @@ python main.py ./archive.mp4 --bgm bgm-brand-new-wisdom \
 | `--thumbnails` | サムネイル候補画像を生成 | off |
 | `--audio-fusion` | 音声の盛り上がりを順位に融合 | off |
 | `--audio-alpha` | 音声重み（0.0–1.0） | 0.35 |
-| `--bgm` / `--se` | 追加する素材ID（`--list-audio-assets` で確認） | 未選択 |
-| `--bgm-gain-db` / `--se-gain-db` | BGM / SE の出力ゲイン | -18 / -8 dB |
-| `--se-cue-seconds` | 自動演出で検出時刻へ加える基準オフセット。分析できない場合は固定再生位置 | 0 |
-| `--se-folder` | 内容分析で参照するSEフォルダ | アプリ直下の `SE/` |
-| `--se-usage-percent` | 自動演出で採用する検出イベントの密度（0–100） | 40 |
-| `--audio-delivery` | `separate` / `mixed` / `both` | both |
 | `--karaoke` | ショートにワード単位カラオケ字幕を焼き込み | off |
 | `-p, --prompt` | ハイライト検出の追加プロンプト | "" |
-| `--min-duration` / `--max-duration` | クリップの最短/最長秒数 | 30 / 90 |
+| `--min-duration` / `--max-duration` | クリップの最短/最長秒数 | 60 / 90 |
 | `--whisper-model` | Whisper モデルサイズ | large-v3 |
 | `--language` | 言語コード | ja |
 | `--font-config` | フォント設定 JSON のパス | — |
@@ -303,7 +246,6 @@ python main.py ./archive.mp4 --bgm bgm-brand-new-wisdom \
 | `--auto-append-youtube` | 生成したタイムスタンプを YouTube 概要欄へ自動追記（URL 入力 + `credentials.json` 必須） |
 | `--youtube-setup` / `--youtube-status` / `--youtube-revoke` | YouTube OAuth の認証 / 状態確認 / 解除 |
 | `--drive-setup` / `--drive-status` / `--drive-revoke` | Google Drive OAuth の認証 / 状態確認 / 解除 |
-| `--install-audio-pack` / `--audio-pack-status` / `--list-audio-assets` | 日本語ショート向け素材パックの導入 / 状態 / 素材ID一覧 |
 
 YouTube / Drive 連携のセットアップ手順は `CREDENTIALS_SETUP.txt` を参照してください（初心者向けの図解版は `SETUP_GUIDE.html`）。
 
@@ -320,9 +262,6 @@ Twitch側でVOD保存が有効になっており、VODが公開されている�
 - 切り抜き動画（横）と、`--shorts` 指定時は縦型ショート（9:16）
 - `--karaoke` 指定時はカラオケ字幕を焼き込んだショート
 - `--thumbnails` 指定時はサムネイル候補画像
-- BGM/SE選択時は出力モードに応じた48kHz WAVステム、ミックス済みMP4、編集用JSON
-- 使用音声素材の `audio_manifest.json` と `THIRD_PARTY_NOTICES_AUDIO.txt`
-- VFXまたは簡易エフェクト使用時は適用内容を記録した `effects_manifest.json`
 - 概要欄用タイムスタンプ（テキスト）
 - Premiere Pro 用 XML（combined / individual）
 
@@ -345,9 +284,6 @@ Twitch側でVOD保存が有効になっており、VODが公開されている�
 | `transcriber.py` | faster-whisper 文字起こし（ワード単位タイムスタンプ対応） |
 | `highlighter.py` | AI ハイライト検出（Claude / OpenAI / Gemini） |
 | `audio_energy.py` | 音声の盛り上がりスコア化・順位融合 |
-| `audio_assets.py` | 検証済み素材カタログ・ライセンス表示・バージョン別キャッシュ |
-| `audio_mix.py` / `audio_delivery.py` | BGM/SEステム・ミックス・来歴sidecar出力 |
-| `user_media.py` / `video_effects.py` | 手持ちBGM・SE・VFXの安全な走査と軽量エフェクト計画 |
 | `clipper.py` | 切り抜き・ショート変換・サムネ生成（ffmpeg） |
 | `subtitles.py` | SRT / カラオケ ASS 字幕生成 |
 | `chapters.py` | 概要欄タイムスタンプ生成 |

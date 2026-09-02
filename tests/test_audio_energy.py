@@ -82,6 +82,19 @@ def test_excitement_scores_are_bounded_and_peak_percentile_tracks_loud_spike():
     assert scores[0] == pytest.approx(0.0)
 
 
+def test_excitement_scores_do_not_rank_codec_noise_above_a_real_onset():
+    curve = EnergyCurve(
+        times=np.array([0.0, 0.5, 1.0, 1.5]),
+        db=np.array([-6243.0, -72.0, -29.0, -6243.0]),
+        hop_sec=0.5,
+    )
+
+    scores = excitement_scores(curve)
+
+    assert scores[2] > scores[1]
+    assert scores[2] >= 0.95
+
+
 def test_clip_audio_score_is_peak_biased_and_empty_range_is_zero():
     curve = EnergyCurve(
         times=np.array([0.0, 1.0, 2.0, 3.0]),

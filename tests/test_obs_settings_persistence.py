@@ -4,7 +4,6 @@ import ast
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -28,154 +27,13 @@ class _FakeWatcher:
         self.status = "stopped"
 
 
-def test_obs_render_settings_reload_latest_media_and_clear_stale_in_memory(
-    monkeypatch,
-):
-    bgm_id = "user:bgm:" + ("a" * 64)
-    stale_vfx_id = "user:vfx:" + ("b" * 64)
-    monkeypatch.setattr(
-        web_app,
-        "load_defaults",
-        lambda: {
-            "bgm_asset_id": bgm_id,
-            "bgm_user_folder": "D:/media/bgm",
-            "se_asset_id": "se-missing-pack",
-            "vfx_asset_id": stale_vfx_id,
-            "vfx_user_folder": "D:/media/vfx",
-            "vfx_automatic": True,
-            "vfx_anchor": "bottom-right",
-        },
-    )
+def test_obs_render_settings_preserve_direct_call():
+    original = {"output_mode": "combined", "num_clips": 3}
 
-    def resolve(_folder, _asset_id, kind):
-        if kind == "bgm":
-            return SimpleNamespace(kind="bgm")
-        raise web_app.UserMediaError("missing")
+    prepared = web_app._obs_settings_for_render(original)
 
-    monkeypatch.setattr(web_app, "resolve_user_media_asset", resolve)
-    monkeypatch.setattr(web_app, "scan_optional_user_media", lambda *_args: ())
-    monkeypatch.setattr(
-        web_app,
-        "get_installed_asset",
-        lambda _asset_id: (_ for _ in ()).throw(
-            web_app.AudioAssetError("pack missing")
-        ),
-    )
-    statuses = []
-    monkeypatch.setattr(web_app, "_obs_append_status", statuses.append)
-
-    refreshed = web_app._obs_settings_for_render(
-        {
-            "num_clips": 12,
-            "bgm_asset_id": "old",
-            web_app._OBS_RELOAD_MEDIA_DEFAULTS_KEY: True,
-        }
-    )
-
-    assert refreshed["num_clips"] == 12
-    assert refreshed["bgm_asset_id"] == bgm_id
-    assert refreshed["se_asset_id"] == ""
-    assert refreshed["vfx_asset_id"] == ""
-    assert refreshed["vfx_automatic"] is True
-    assert refreshed["vfx_anchor"] == "bottom-right"
-    assert web_app._OBS_RELOAD_MEDIA_DEFAULTS_KEY not in refreshed
-    assert any("SE素材" in message for message in statuses)
-    assert any("VFX素材" in message for message in statuses)
-
-
-def test_obs_render_settings_prefer_saved_obs_media_profile(monkeypatch):
-    monkeypatch.setattr(
-        web_app,
-        "load_defaults",
-        lambda: {
-            "audio_delivery_mode": "both",
-            "bgm_asset_id": "input-bgm",
-            "obs_media": {
-                "audio_delivery_mode": "mixed",
-                "bgm_asset_id": "obs-bgm",
-                "se_asset_id": "obs-se",
-                "bgm_user_folder": "D:/obs/bgm",
-                "se_user_folder": "D:/obs/se",
-                "vfx_user_folder": "",
-                "vfx_asset_id": "",
-                "effect_preset": "none",
-                "vfx_automatic": False,
-                "vfx_cue_seconds": 0.0,
-                "vfx_duration_seconds": 1.0,
-                "vfx_anchor": "center",
-                "vfx_scale_percent": 100.0,
-                "vfx_opacity_percent": 100.0,
-                "vfx_target": "both",
-            },
-        },
-    )
-    monkeypatch.setattr(
-        web_app,
-        "get_installed_asset",
-        lambda asset_id: SimpleNamespace(
-            kind="bgm" if asset_id == "obs-bgm" else "se"
-        ),
-    )
-    monkeypatch.setattr(
-        web_app,
-        "resolve_user_media_asset",
-        lambda *_args: SimpleNamespace(kind="se"),
-    )
-
-    refreshed = web_app._obs_settings_for_render(
-        {web_app._OBS_RELOAD_MEDIA_DEFAULTS_KEY: True}
-    )
-
-    assert refreshed["audio_delivery_mode"] == "mixed"
-    assert refreshed["bgm_asset_id"] == "obs-bgm"
-    assert refreshed["se_asset_id"] == "obs-se"
-    assert refreshed["bgm_user_folder"] == "D:/obs/bgm"
-
-
-def test_obs_render_settings_auto_vfx_missing_folder_uses_builtin_effects(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        web_app,
-        "load_defaults",
-        lambda: {
-            "vfx_user_folder": "D:/removed/vfx",
-            "vfx_asset_id": "",
-            "vfx_automatic": True,
-            "effect_preset": "none",
-        },
-    )
-    monkeypatch.setattr(
-        web_app,
-        "scan_optional_user_media",
-        lambda *_args: (_ for _ in ()).throw(
-            web_app.UserMediaError("folder was removed")
-        ),
-    )
-    statuses = []
-    monkeypatch.setattr(web_app, "_obs_append_status", statuses.append)
-
-    refreshed = web_app._obs_settings_for_render(
-        {web_app._OBS_RELOAD_MEDIA_DEFAULTS_KEY: True}
-    )
-
-    assert refreshed["vfx_automatic"] is True
-    assert refreshed["vfx_user_folder"] == ""
-    assert refreshed["vfx_asset_id"] == ""
-    assert any("内蔵エフェクトのみ" in message for message in statuses)
-
-
-def test_obs_render_settings_without_reload_marker_preserve_direct_call(
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        web_app,
-        "load_defaults",
-        lambda: pytest.fail("direct compatibility calls must not reload defaults"),
-    )
-    original = {"bgm_asset_id": "direct", "num_clips": 3}
-
-    assert web_app._obs_settings_for_render(original) == original
+    assert prepared == original
+    assert prepared is not original
 
 
 def test_start_obs_watch_persists_password_for_next_launch(monkeypatch, tmp_path):
@@ -223,82 +81,6 @@ def test_start_obs_watch_persists_password_for_next_launch(monkeypatch, tmp_path
         assert reloaded["obs_stop_event"] == "record"
         assert reloaded["obs_watch_folder"] == "C:/recordings"
         assert reloaded["obs_auto_process"] is False
-    finally:
-        web_app.stop_obs_watch()
-
-
-def test_start_obs_watch_persists_media_controls_for_live_pipeline(
-    monkeypatch, tmp_path
-):
-    settings_file = tmp_path / "default_settings.json"
-    password_file = tmp_path / ".obs_password"
-    monkeypatch.setattr(web_app, "SETTINGS_FILE", settings_file)
-    monkeypatch.setattr(web_app, "OBS_PASSWORD_FILE", password_file)
-    monkeypatch.setattr(
-        obs_integration,
-        "create_watcher",
-        lambda *_args, **_kwargs: _FakeWatcher(),
-    )
-
-    try:
-        status = web_app.start_obs_watch(
-            "folder",
-            "localhost",
-            4455,
-            "",
-            False,
-            "record",
-            "C:/recordings",
-            False,
-            False,
-            5,
-            "combined",
-            False,
-            "gemini",
-            "large-v3",
-            "",
-            obs_audio_delivery_mode="mixed",
-            obs_bgm_asset_id="bgm-obs",
-            obs_se_asset_id="se-obs",
-            obs_bgm_gain_db=-20,
-            obs_se_gain_db=-5,
-            obs_se_cue_seconds=0.75,
-            obs_bgm_user_folder="C:/OBS/BGM",
-            obs_se_user_folder="C:/OBS/SE",
-            obs_vfx_user_folder="C:/OBS/VFX",
-            obs_vfx_asset_id="",
-            obs_effect_preset="punch",
-            obs_vfx_automatic=False,
-            obs_vfx_cue_seconds=0.25,
-            obs_vfx_duration_seconds=1.25,
-            obs_vfx_anchor="bottom",
-            obs_vfx_scale_percent=90,
-            obs_vfx_opacity_percent=85,
-            obs_vfx_target="both",
-        )
-
-        assert status == "connected"
-        assert web_app.load_defaults()["obs_media"] == {
-            "audio_delivery_mode": "mixed",
-            "bgm_asset_id": "bgm-obs",
-            "se_asset_id": "se-obs",
-            "bgm_user_folder": "C:/OBS/BGM",
-            "se_user_folder": "C:/OBS/SE",
-            "bgm_gain_db": -20,
-            "se_gain_db": -5,
-            "se_cue_seconds": 0.75,
-            "se_usage_percent": 40.0,
-            "vfx_user_folder": "C:/OBS/VFX",
-            "vfx_asset_id": "",
-            "effect_preset": "punch",
-            "vfx_automatic": False,
-            "vfx_cue_seconds": 0.25,
-            "vfx_duration_seconds": 1.25,
-            "vfx_anchor": "bottom",
-            "vfx_scale_percent": 90,
-            "vfx_opacity_percent": 85,
-            "vfx_target": "both",
-        }
     finally:
         web_app.stop_obs_watch()
 
@@ -587,3 +369,102 @@ def test_obs_password_is_never_rendered_as_a_textbox_initial_value():
     assert 'elem_classes="obs-password-save"' in source
     assert "保存済みPasswordを削除" not in source
     assert "obs_clear_password_btn" not in source
+
+
+def test_start_obs_watch_persists_x_credentials_outside_settings_json(
+    monkeypatch,
+    tmp_path,
+):
+    settings_file = tmp_path / "default_settings.json"
+    password_file = tmp_path / ".obs_password"
+    credentials_file = tmp_path / ".x_credentials.json"
+    monkeypatch.setattr(web_app, "SETTINGS_FILE", settings_file)
+    monkeypatch.setattr(web_app, "OBS_PASSWORD_FILE", password_file)
+    monkeypatch.setattr(web_app, "X_CREDENTIALS_FILE", credentials_file)
+    monkeypatch.setattr(
+        obs_integration,
+        "create_watcher",
+        lambda *_args, **_kwargs: _FakeWatcher(),
+    )
+
+    try:
+        status = web_app.start_obs_watch(
+            "websocket",
+            "localhost",
+            4455,
+            "",
+            False,
+            "record",
+            "",
+            False,
+            False,
+            5,
+            "combined",
+            False,
+            "gemini",
+            "large-v3",
+            "",
+            obs_x_post_auto=True,
+            obs_x_api_key="api-key",
+            obs_x_api_key_secret="api-key-secret",
+            obs_x_access_token="access-token",
+            obs_x_access_token_secret="access-token-secret",
+        )
+
+        assert status == "connected"
+        saved_settings = json.loads(settings_file.read_text(encoding="utf-8"))
+        assert saved_settings["obs_x_post_auto"] is True
+        assert all(
+            secret not in settings_file.read_text(encoding="utf-8")
+            for secret in (
+                "api-key",
+                "api-key-secret",
+                "access-token",
+                "access-token-secret",
+            )
+        )
+        assert not {
+            "obs_x_api_key",
+            "obs_x_api_key_secret",
+            "obs_x_access_token",
+            "obs_x_access_token_secret",
+        }.intersection(web_app.load_defaults())
+        assert web_app.load_x_credentials().as_dict() == {
+            "api_key": "api-key",
+            "api_key_secret": "api-key-secret",
+            "access_token": "access-token",
+            "access_token_secret": "access-token-secret",
+        }
+    finally:
+        web_app.stop_obs_watch()
+
+
+def test_x_credentials_are_masked_and_never_used_as_textbox_initial_values():
+    module = ast.parse(WEB_APP.read_text(encoding="utf-8"))
+    expected = {
+        "obs_x_api_key",
+        "obs_x_api_key_secret",
+        "obs_x_access_token",
+        "obs_x_access_token_secret",
+    }
+    found = set()
+
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Assign):
+            continue
+        names = {
+            target.id
+            for target in node.targets
+            if isinstance(target, ast.Name) and target.id in expected
+        }
+        if not names:
+            continue
+        assert isinstance(node.value, ast.Call), ast.dump(node.value)
+        keywords = {keyword.arg: keyword.value for keyword in node.value.keywords}
+        assert isinstance(keywords["value"], ast.Constant)
+        assert keywords["value"].value == ""
+        assert isinstance(keywords["type"], ast.Constant)
+        assert keywords["type"].value == "password"
+        found.update(names)
+
+    assert found == expected

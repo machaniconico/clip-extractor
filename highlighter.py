@@ -1,6 +1,7 @@
 """Highlight detection using Claude, cloud APIs, or opt-in local inference."""
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -26,7 +27,6 @@ SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパートで
 }
 
 選定基準：
-- 各クリップは30〜90秒程度
 - 面白い・感動的・印象的・情報価値が高いシーンを優先
 - クリップ同士が重複しないように
 - 会話の途中で切れないよう、自然な区切りを意識
@@ -37,7 +37,6 @@ GEMINI_SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパ�
 ショート動画として切り抜くべき見どころシーンを特定してください。
 
 選定基準：
-- 各クリップは30〜90秒程度
 - 面白い・感動的・印象的・情報価値が高いシーンを優先
 - クリップ同士が重複しないように
 - 会話の途中で切れないよう、自然な区切りを意識
@@ -146,7 +145,7 @@ def validate_local_llm_base_url(value: str) -> str:
 
 def _build_user_prompt(transcript, num_clips, min_duration, max_duration, custom_prompt):
     user_prompt = f"""以下の配信トランスクリプトから、最も魅力的な {num_clips} 個のシーンを選んでください。
-各クリップは {min_duration}〜{max_duration} 秒程度にしてください。
+各クリップは必ず {min_duration}〜{max_duration} 秒にしてください。
 
 """
     if custom_prompt:
@@ -394,8 +393,14 @@ def detect_highlights(
     ai_provider: str = "claude",
     api_key: str = "",
     ai_model: str = "",
+    video_duration: float | None = None,
 ) -> list[dict]:
     """Detect highlight moments in the transcript using the selected AI provider."""
+    min_duration, max_duration, video_duration = _validate_duration_bounds(
+        min_duration,
+        max_duration,
+        video_duration,
+    )
     user_prompt = _build_user_prompt(transcript, num_clips, min_duration, max_duration, custom_prompt)
 
     if ai_provider == "openai":
@@ -428,12 +433,21 @@ def detect_highlights(
             print(f"[Warn] skipping highlight missing start/end keys: {h!r}")
             continue
         try:
-            h["start_sec"] = _parse_timestamp(h["start"])
-            h["end_sec"] = _parse_timestamp(h["end"])
-            h["duration"] = h["end_sec"] - h["start_sec"]
+            start_sec, end_sec = normalize_highlight_range(
+                _parse_timestamp(h["start"]),
+                _parse_timestamp(h["end"]),
+                min_duration=min_duration,
+                max_duration=max_duration,
+                video_duration=video_duration,
+            )
         except (ValueError, TypeError, AttributeError) as e:
             print(f"[Warn] skipping highlight with bad timestamp ({e}): {h!r}")
             continue
+        h["start_sec"] = start_sec
+        h["end_sec"] = end_sec
+        h["duration"] = end_sec - start_sec
+        h["start"] = _format_timestamp(start_sec)
+        h["end"] = _format_timestamp(end_sec)
         h.setdefault("title", "")
         h.setdefault("reason", "")
         valid_highlights.append(h)
@@ -448,6 +462,85 @@ def detect_highlights(
         print(f"  {i}. [{h['start']} -> {h['end']}] {h['title']} ({h['duration']:.0f}s)")
 
     return valid_highlights
+
+
+def _validate_duration_bounds(min_duration, max_duration, video_duration=None):
+    """Return finite clip bounds and reject impossible source durations."""
+    min_value = float(min_duration)
+    max_value = float(max_duration)
+    if not math.isfinite(min_value) or min_value <= 0:
+        raise ValueError("Minimum clip duration must be a positive finite number")
+    if not math.isfinite(max_value) or max_value < min_value:
+        raise ValueError("Maximum clip duration must be at least the minimum")
+
+    source_value = None
+    if video_duration is not None:
+        source_value = float(video_duration)
+        if not math.isfinite(source_value) or source_value <= 0:
+            raise ValueError("Video duration must be a positive finite number")
+        if source_value + 1e-9 < min_value:
+            raise ValueError(
+                f"Video duration ({source_value:.3f}s) is shorter than the "
+                f"minimum clip duration ({min_value:.3f}s)"
+            )
+    return min_value, max_value, source_value
+
+
+def normalize_highlight_range(
+    start_sec,
+    end_sec,
+    *,
+    min_duration,
+    max_duration,
+    video_duration=None,
+) -> tuple[float, float]:
+    """Clamp one AI-selected range to the configured duration and source bounds."""
+    min_value, max_value, source_value = _validate_duration_bounds(
+        min_duration,
+        max_duration,
+        video_duration,
+    )
+    start = float(start_sec)
+    end = float(end_sec)
+    if not math.isfinite(start) or not math.isfinite(end):
+        raise ValueError("Highlight timestamps must be finite numbers")
+    if end <= start:
+        raise ValueError("Highlight end must be after its start")
+
+    start = max(0.0, start)
+    if source_value is not None:
+        start = min(start, source_value)
+        end = min(max(0.0, end), source_value)
+        if end <= start:
+            raise ValueError("Highlight is outside the source video")
+
+    current_duration = end - start
+    target_duration = min(max(current_duration, min_value), max_value)
+    center = (start + end) / 2.0
+    normalized_start = center - target_duration / 2.0
+    normalized_end = normalized_start + target_duration
+
+    if normalized_start < 0.0:
+        normalized_start = 0.0
+        normalized_end = target_duration
+    if source_value is not None and normalized_end > source_value:
+        normalized_end = source_value
+        normalized_start = source_value - target_duration
+
+    normalized_start = max(0.0, normalized_start)
+    normalized_end = normalized_start + target_duration
+    if source_value is not None:
+        normalized_end = min(source_value, normalized_end)
+        normalized_start = normalized_end - target_duration
+    return float(normalized_start), float(normalized_end)
+
+
+def _format_timestamp(seconds: float) -> str:
+    total_ms = max(0, int(round(float(seconds) * 1000)))
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{milliseconds:03d}"
 
 
 def _parse_timestamp(ts: str | int | float) -> float:

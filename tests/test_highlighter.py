@@ -9,6 +9,13 @@ import highlighter
 from highlighter import _extract_json_object, _parse_timestamp
 
 
+def test_duration_instruction_is_dynamic_only():
+    assert "30〜90秒" not in highlighter.SYSTEM_PROMPT
+    assert "30〜90秒" not in highlighter.GEMINI_SYSTEM_PROMPT
+    prompt = highlighter._build_user_prompt("transcript", 3, 60, 90, "")
+    assert "必ず 60〜90 秒" in prompt
+
+
 # ----- _extract_json_object -----
 
 def test_extract_json_plain():
@@ -133,12 +140,62 @@ def test_detect_highlights_accepts_numeric_timestamp_fields(monkeypatch):
         ),
     )
 
-    result = highlighter.detect_highlights("transcript")
+    result = highlighter.detect_highlights("transcript", min_duration=1)
 
     assert len(result) == 1
     assert result[0]["start_sec"] == 12.0
     assert result[0]["end_sec"] == 20.0
     assert result[0]["duration"] == 8.0
+
+
+def test_detect_highlights_expands_short_candidate_to_minimum(monkeypatch):
+    monkeypatch.setattr(
+        highlighter,
+        "_call_claude",
+        lambda prompt: (
+            '{"highlights": ['
+            '{"start": "0:01:00", "end": "0:01:45", '
+            '"title": "Short", "reason": "repro"}'
+            "]}"
+        ),
+    )
+
+    result = highlighter.detect_highlights(
+        "transcript",
+        min_duration=60,
+        max_duration=90,
+        video_duration=200,
+    )
+
+    assert result[0]["duration"] == 60.0
+    assert result[0]["start_sec"] <= 60.0
+    assert result[0]["end_sec"] >= 105.0
+    assert result[0]["start"] == "00:00:52.500"
+    assert result[0]["end"] == "00:01:52.500"
+
+
+def test_normalize_highlight_range_shifts_inside_video_tail():
+    start, end = highlighter.normalize_highlight_range(
+        180,
+        195,
+        min_duration=60,
+        max_duration=90,
+        video_duration=200,
+    )
+
+    assert (start, end) == (140.0, 200.0)
+
+
+def test_detect_highlights_rejects_source_shorter_than_minimum():
+    import pytest
+
+    with pytest.raises(ValueError, match="shorter than the minimum"):
+        highlighter.detect_highlights(
+            "transcript",
+            min_duration=60,
+            max_duration=90,
+            video_duration=59.0,
+        )
 
 
 def test_detect_highlights_skips_bad_timestamp_types_without_crashing(monkeypatch):
@@ -154,7 +211,7 @@ def test_detect_highlights_skips_bad_timestamp_types_without_crashing(monkeypatc
         ),
     )
 
-    result = highlighter.detect_highlights("transcript")
+    result = highlighter.detect_highlights("transcript", min_duration=1)
 
     assert len(result) == 1
     assert result[0]["title"] == "Valid"

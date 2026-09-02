@@ -3,7 +3,6 @@
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -69,6 +68,23 @@ def test_apply_edits_to_session_clamps_and_corrects_ranges(tmp_path):
     edited = session["highlights"][0]
     assert 0.0 <= edited["start_sec"] < edited["end_sec"] <= 20.0
     assert edited["duration"] == pytest.approx(edited["end_sec"] - edited["start_sec"])
+
+
+def test_apply_edits_to_session_enforces_saved_minimum_duration(tmp_path):
+    session = _session(tmp_path)
+    session["video_info"]["duration"] = 120.0
+    session["clip_duration_bounds"] = {"min": 60.0, "max": 90.0}
+
+    web_app.apply_edits_to_session(session, 0, 10.0, 55.0, "Short edit")
+    edited = session["highlights"][0]
+    assert edited["duration"] == pytest.approx(60.0)
+    assert edited["end_sec"] - edited["start_sec"] == pytest.approx(60.0)
+
+    web_app.apply_edits_to_session(session, 0, 100.0, 120.0, "Tail edit")
+    edited = session["highlights"][0]
+    assert edited["start_sec"] == pytest.approx(60.0)
+    assert edited["end_sec"] == pytest.approx(120.0)
+    assert edited["duration"] == pytest.approx(60.0)
 
 
 def test_review_edit_session_only_round_trip_preserves_edits(tmp_path):
@@ -271,6 +287,8 @@ def test_render_phase_uses_edited_highlights(monkeypatch, tmp_path):
         "#FFFFFF",
         False,
         False,
+        20,
+        "top",
         progress=_progress,
     )
 
@@ -285,81 +303,6 @@ def test_render_phase_uses_edited_highlights(monkeypatch, tmp_path):
     assert [Path(path).name for path in premiere_job["clip_paths"]] == ["clip.mp4"]
     assert all(Path(path).is_absolute() for path in premiere_job["clip_paths"])
     assert Path(premiere_job["xml_paths"][0]).is_file()
-
-
-def test_render_phase_uses_mixed_paths_for_downstream_outputs(monkeypatch, tmp_path):
-    session = _session(tmp_path)
-    captured = {}
-
-    def fake_extract(video_path, highlights, output_dir, **kwargs):
-        output_dir.mkdir(parents=True, exist_ok=True)
-        clean = output_dir / "clip.mp4"
-        clean.write_bytes(b"clean")
-        return [clean]
-
-    def fake_validate(options):
-        captured["validated"] = options
-
-    def fake_deliver(
-        output_dir,
-        media_groups,
-        highlights,
-        *,
-        options,
-        effects_manifest_dirs=None,
-        transcript_segments=None,
-    ):
-        clean = Path(media_groups["clips"][0])
-        mixed = clean.with_name("clip_mixed.mp4")
-        mixed.write_bytes(b"mixed")
-        captured["delivered"] = options
-        captured["effects_manifest_dirs"] = effects_manifest_dirs
-        captured["transcript_segments"] = transcript_segments
-        return SimpleNamespace(
-            enabled=True,
-            media_groups={"clips": (mixed,), "shorts": ()},
-            deliverables=(mixed,),
-        )
-
-    monkeypatch.setattr(web_app, "extract_clips", fake_extract)
-    monkeypatch.setattr(web_app, "validate_audio_selection", fake_validate)
-    monkeypatch.setattr(web_app, "deliver_audio_groups", fake_deliver)
-
-    result = web_app.render_phase(
-        session,
-        "combined",
-        False,
-        "crop",
-        "center",
-        True,
-        False,
-        False,
-        False,
-        "Noto Sans JP",
-        96,
-        "#FFFFFF",
-        False,
-        False,
-        audio_delivery_mode="mixed",
-        bgm_asset_id="bgm-brand-new-wisdom",
-        se_asset_id="se-interface-confirmation",
-        bgm_gain_db=-20,
-        se_gain_db=-6,
-        se_cue_seconds=1.5,
-        progress=_progress,
-    )
-
-    assert captured["validated"].delivery_mode.value == "mixed"
-    assert captured["delivered"].bgm_asset_id == "bgm-brand-new-wisdom"
-    assert captured["transcript_segments"] == session["segments"]
-    assert captured["effects_manifest_dirs"] == {"clips": tmp_path / "clips"}
-    assert [Path(path).name for path in result[5]["clip_paths"]] == [
-        "clip_mixed.mp4"
-    ]
-    assert [Path(path).name for path in session["_obs_render_outcome"]["clip_paths"]] == [
-        "clip_mixed.mp4"
-    ]
-    assert "mode=mixed" in result[0]
 
 
 def test_render_phase_generates_only_shorts_when_only_shorts_enabled(
@@ -401,6 +344,8 @@ def test_render_phase_generates_only_shorts_when_only_shorts_enabled(
         "#FFFFFF",
         False,
         False,
+        20,
+        "top",
         progress=_progress,
     )
 
@@ -453,6 +398,8 @@ def test_render_phase_generates_normal_and_short_clips_together(monkeypatch, tmp
         "#FFFFFF",
         False,
         False,
+        20,
+        "top",
         progress=_progress,
     )
 
@@ -501,6 +448,8 @@ def test_render_phase_skips_twitch_timestamps_and_youtube_append(monkeypatch, tm
         "#FFFFFF",
         False,
         False,
+        20,
+        "top",
         progress=_progress,
     )
 
@@ -530,6 +479,8 @@ def test_chapters_only_render_clears_stale_premiere_job(tmp_path):
         "#FFFFFF",
         False,
         False,
+        20,
+        "top",
         progress=_progress,
     )
 
@@ -555,6 +506,8 @@ def test_new_detect_without_auto_render_clears_previous_premiere_state():
         "#FFFFFF",
         False,
         False,
+        20,
+        "top",
         progress=_progress,
     )
 

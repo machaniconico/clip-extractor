@@ -1840,6 +1840,81 @@ def test_start_obs_stream_watch_wires_youtube_archive_callbacks(monkeypatch):
     web_app.stop_obs_watch()
 
 
+def test_start_obs_x_post_uses_dynamic_youtube_and_configured_simulcast_links(
+    monkeypatch,
+):
+    import obs_integration
+
+    captured = {}
+    opened = []
+    opened_event = threading.Event()
+
+    class FakeWatcher:
+        status = "connected"
+        stream_status_checked = True
+        stream_active = False
+
+        def start(self):
+            pass
+
+        def stop(self):
+            self.status = "stopped"
+
+    def fake_create_watcher(_method, _config, _callback, **kwargs):
+        captured.update(kwargs)
+        return FakeWatcher()
+
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "check_auth_status",
+        lambda: {"configured": True, "authenticated": True},
+    )
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "get_youtube_service",
+        lambda: object(),
+    )
+    monkeypatch.setattr(
+        web_app.youtube_api,
+        "find_active_broadcast",
+        lambda _service, **_kwargs: {
+            "video_id": "live-video-id",
+            "title": "同時配信テスト",
+        },
+    )
+
+    def fake_open(text):
+        opened.append(text)
+        opened_event.set()
+        return "https://x.com/intent/post"
+
+    monkeypatch.setattr(web_app, "open_x_post_composer", fake_open)
+    monkeypatch.setattr(obs_integration, "create_watcher", fake_create_watcher)
+
+    status = web_app.start_obs_watch(
+        "websocket", "localhost", 4455, "pw", False, "stream", "", False,
+        False, 5, "combined", False, "gemini", "large-v3", "",
+        obs_x_post_on_stream_start=True,
+        obs_x_post_template="配信開始！\n{links}\n{title}",
+        obs_x_post_destinations=(
+            "Twitch|https://twitch.tv/example\n"
+            "Kick|https://kick.com/example"
+        ),
+    )
+
+    assert status == "connected"
+    assert captured["on_stream_started"] is not None
+    captured["on_stream_started"]()
+    assert opened_event.wait(timeout=5), "X composer was not opened"
+    assert opened == [
+        "配信開始！\n"
+        "YouTube: https://www.youtube.com/watch?v=live-video-id\n"
+        "Twitch: https://twitch.tv/example\n"
+        "Kick: https://kick.com/example\n同時配信テスト"
+    ]
+    web_app.stop_obs_watch()
+
+
 @pytest.mark.parametrize("source_mode", ["record", "stream"])
 def test_start_obs_websocket_watch_requires_youtube_auth(
     monkeypatch,

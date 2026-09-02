@@ -223,30 +223,11 @@ def test_render_phase_signature_matches_render_inputs():
     assert args[0] == "session"
     assert render_inputs[0] == "session_state"
     assert args[1:] == render_inputs[1:]
-    assert args[-23:] == [
+    assert args[-4:] == [
         "generate_thumbnails",
         "karaoke",
         "shorts_blur_strength",
         "shorts_title_position",
-        "audio_delivery_mode",
-        "bgm_asset_id",
-        "se_asset_id",
-        "bgm_gain_db",
-        "se_gain_db",
-        "se_cue_seconds",
-        "se_usage_percent",
-        "bgm_user_folder",
-        "se_user_folder",
-        "vfx_user_folder",
-        "vfx_asset_id",
-        "effect_preset",
-        "vfx_automatic",
-        "vfx_cue_seconds",
-        "vfx_duration_seconds",
-        "vfx_anchor",
-        "vfx_scale_percent",
-        "vfx_opacity_percent",
-        "vfx_target",
     ]
     assert "shorts_blur_strength" in args
     assert "shorts_title_position" in args
@@ -256,147 +237,13 @@ def test_save_defaults_signature_matches_save_button_inputs():
     module = _module()
     args = _function_args(module, "save_defaults")
     assert args == _click_input_names(module, "save_defaults_btn")
-    assert args[-22:] == [
+    assert args[-3:] == [
         "obs_launch_on_startup",
         "obs_executable_path",
         "obs_auto_connect_on_startup",
-        "audio_delivery_mode",
-        "bgm_asset_id",
-        "se_asset_id",
-        "bgm_gain_db",
-        "se_gain_db",
-        "se_cue_seconds",
-        "bgm_user_folder",
-        "se_user_folder",
-        "vfx_user_folder",
-        "vfx_asset_id",
-        "effect_preset",
-        "vfx_automatic",
-        "vfx_cue_seconds",
-        "vfx_duration_seconds",
-        "vfx_anchor",
-        "vfx_scale_percent",
-        "vfx_opacity_percent",
-        "vfx_target",
-        "se_usage_percent",
     ]
     assert "shorts_blur_strength" in args
     assert "shorts_title_position" in args
-
-
-def test_audio_delivery_controls_are_persisted_and_rendered():
-    module = _module()
-    source = WEB_APP.read_text(encoding="utf-8")
-    expected = [
-        "audio_delivery_mode",
-        "bgm_asset_id",
-        "se_asset_id",
-        "bgm_gain_db",
-        "se_gain_db",
-        "se_cue_seconds",
-        "se_usage_percent",
-        "bgm_user_folder",
-        "se_user_folder",
-        "vfx_user_folder",
-        "vfx_asset_id",
-        "effect_preset",
-        "vfx_automatic",
-        "vfx_cue_seconds",
-        "vfx_duration_seconds",
-        "vfx_anchor",
-        "vfx_scale_percent",
-        "vfx_opacity_percent",
-        "vfx_target",
-    ]
-
-    assert "fn=install_audio_pack_ui" in source
-    assert "fn=refresh_media_library_ui" in source
-    assert 'label="BGM・SEの出力方法"' in source
-    assert 'label="VFXと簡易エフェクトの選択・配置を自動にする"' in source
-    assert "fn=vfx_manual_control_updates" in source
-    for event_name in ("render_phase", "maybe_render_phase"):
-        event_inputs = _event_input_names(module, event_name, "then")
-        assert event_inputs[-19:] == expected
-    save_expected = [
-        item for item in expected if item != "se_usage_percent"
-    ] + ["se_usage_percent"]
-    for button in ("save_defaults_btn", "input_save_defaults_btn"):
-        assert _click_input_names(module, button)[-19:] == save_expected
-
-
-def test_obs_tab_exposes_media_controls_and_wires_them_to_save_and_start():
-    module = _module()
-    source = WEB_APP.read_text(encoding="utf-8")
-    obs_tab = source.index('with gr.Tab("OBS連携 / OBS")')
-    settings_tab = source.index('with gr.Tab("Settings / 設定")')
-    media_section = source.index('"OBS用 BGM・SE・VFX素材と出力"', obs_tab)
-    assert obs_tab < media_section < settings_tab
-    for control in (
-        "obs_bgm_user_folder =",
-        "obs_se_user_folder =",
-        "obs_vfx_user_folder =",
-        "obs_bgm_asset_id =",
-        "obs_se_asset_id =",
-        "obs_audio_delivery_mode =",
-        "obs_vfx_automatic =",
-        "obs_effect_preset =",
-        "obs_vfx_target =",
-    ):
-        assert control in source[media_section:settings_tab]
-    for button in ("obs_save_processing_btn", "obs_start_btn"):
-        inputs = _click_input_names(module, button)
-        assert inputs[-19:] == [
-            "obs_audio_delivery_mode",
-            "obs_bgm_asset_id",
-            "obs_se_asset_id",
-            "obs_bgm_gain_db",
-            "obs_se_gain_db",
-            "obs_se_cue_seconds",
-            "obs_se_usage_percent",
-            "obs_bgm_user_folder",
-            "obs_se_user_folder",
-            "obs_vfx_user_folder",
-            "obs_vfx_asset_id",
-            "obs_effect_preset",
-            "obs_vfx_automatic",
-            "obs_vfx_cue_seconds",
-            "obs_vfx_duration_seconds",
-            "obs_vfx_anchor",
-            "obs_vfx_scale_percent",
-            "obs_vfx_opacity_percent",
-            "obs_vfx_target",
-        ]
-def test_material_source_guide_uses_official_links_without_automatic_downloads():
-    module = _module()
-    source = WEB_APP.read_text(encoding="utf-8")
-    guide = _string_constant(module, "MATERIAL_SOURCE_GUIDE_MD")
-
-    official_urls = (
-        "https://dova-s.jp/help/articles/license-usage/",
-        "https://soundeffect-lab.info/agreement/",
-        "https://otologic.jp/free/license.html",
-        "https://pixabay.com/service/license-summary/",
-        "https://mixkit.co/license/",
-    )
-    for url in official_urls:
-        assert guide.count(url) == 1
-
-    assert "案内リンクから素材を自動取得・スクレイピングしません" in guide
-    assert "明示DL式スターターパック" in guide
-    assert "各素材の配布ページ・作者条件・最新規約が優先" in guide
-    assert "OtoLogic" in guide and "クレジットが必要" in guide
-    assert "Content ID" in guide
-    assert 'with gr.Accordion("フリー素材サイトの案内（外部サイト）"' in source
-    assert "gr.Markdown(MATERIAL_SOURCE_GUIDE_MD" in source
-
-
-def test_short_video_starter_pack_ui_surfaces_required_credit():
-    source = WEB_APP.read_text(encoding="utf-8")
-
-    assert "日本語ショート向け素材をダウンロード（約13.4 MB）" in source
-    assert "BGM {bgm_count}曲・SE {se_count}点" in source
-    assert "OtoLogic素材はクレジット必須" in source
-    assert "要クレジット" in source
 
 
 def test_shorts_visual_controls_are_available_for_input_and_obs():
@@ -860,13 +707,10 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_audio_alpha", "obs_karaoke",
         "obs_auto_start_without_prompt_confirmation",
         "obs_shorts_blur_strength", "obs_shorts_title_position",
-        "obs_audio_delivery_mode", "obs_bgm_asset_id", "obs_se_asset_id",
-        "obs_bgm_gain_db", "obs_se_gain_db", "obs_se_cue_seconds",
-        "obs_se_usage_percent",
-        "obs_bgm_user_folder", "obs_se_user_folder", "obs_vfx_user_folder",
-        "obs_vfx_asset_id", "obs_effect_preset", "obs_vfx_automatic",
-        "obs_vfx_cue_seconds", "obs_vfx_duration_seconds", "obs_vfx_anchor",
-        "obs_vfx_scale_percent", "obs_vfx_opacity_percent", "obs_vfx_target",
+        "obs_x_post_on_stream_start", "obs_x_post_template",
+        "obs_x_post_destinations", "obs_x_post_auto", "obs_x_api_key",
+        "obs_x_api_key_secret", "obs_x_access_token",
+        "obs_x_access_token_secret",
     ]
     assert _click_input_names(module, "obs_start_btn") == [
         "obs_trigger_radio", "obs_host", "obs_port", "obs_password",
@@ -879,14 +723,31 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_generate_thumbnails", "obs_audio_fusion", "obs_audio_alpha",
         "obs_karaoke", "obs_auto_start_without_prompt_confirmation",
         "obs_shorts_blur_strength", "obs_shorts_title_position",
-        "obs_audio_delivery_mode", "obs_bgm_asset_id", "obs_se_asset_id",
-        "obs_bgm_gain_db", "obs_se_gain_db", "obs_se_cue_seconds",
-        "obs_se_usage_percent",
-        "obs_bgm_user_folder", "obs_se_user_folder", "obs_vfx_user_folder",
-        "obs_vfx_asset_id", "obs_effect_preset", "obs_vfx_automatic",
-        "obs_vfx_cue_seconds", "obs_vfx_duration_seconds", "obs_vfx_anchor",
-        "obs_vfx_scale_percent", "obs_vfx_opacity_percent", "obs_vfx_target",
+        "obs_x_post_on_stream_start", "obs_x_post_template",
+        "obs_x_post_destinations", "obs_x_post_auto", "obs_x_api_key",
+        "obs_x_api_key_secret", "obs_x_access_token",
+        "obs_x_access_token_secret",
     ]
+
+
+def test_obs_x_post_controls_are_saved_and_explain_dynamic_links():
+    source = WEB_APP.read_text(encoding="utf-8")
+
+    assert 'label="配信開始時にXへ告知する"' in source
+    assert 'label="同時配信先URL（1行1件）"' in source
+    assert 'label="X投稿文テンプレート"' in source
+    assert 'label="X APIで完全自動投稿する"' in source
+    assert 'label="API Key"' in source
+    assert 'label="API Key Secret"' in source
+    assert 'label="Access Token"' in source
+    assert 'label="Access Token Secret"' in source
+    assert "obs_x_post_on_stream_start" in source
+    assert "obs_x_post_auto" in source
+    assert "obs_x_post_destinations" in source
+    assert "obs_x_post_template" in source
+    assert "{links}=配信先一覧" in source
+    assert "認証情報が未設定または" in source
+    assert "API投稿に失敗した場合は手動投稿画面" in source
 
 
 def test_obs_help_explains_recording_primary_setup_and_archive_fallback():

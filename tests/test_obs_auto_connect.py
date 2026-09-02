@@ -121,6 +121,10 @@ def test_auto_connect_waits_then_starts_with_saved_defaults(monkeypatch, tmp_pat
         "ai_provider": "gemini",
         "whisper_model": "large-v3",
         "output_base_dir": "C:/clips",
+        "x_post_on_stream_start": False,
+        "x_post_auto": False,
+        "x_post_template": web_app.DEFAULT_X_POST_TEMPLATE,
+        "x_post_destinations": "",
     }]
 
 

@@ -34,7 +34,7 @@ OBS_WEBSOCKET_OUTPUT_STOPPED = "OBS_WEBSOCKET_OUTPUT_STOPPED"
 #: Type alias for the shared completion callback.
 OnRecordingFinished = Callable[[str], None]
 OnRecordingStopped = Callable[[str], None]
-OnStreamStarted = Callable[[], None]
+OnStreamStarted = Callable[..., None]
 OnStreamFinished = Callable[[], None]
 
 
@@ -141,6 +141,7 @@ class ObsWebsocketWatcher(_WorkerMixin):
         self._status = "stopped"
         self._stream_state_lock = threading.Lock()
         self._stream_active = False
+        self._stream_active_from_probe = False
         self._stream_status_checked = False
 
     @property
@@ -221,6 +222,7 @@ class ObsWebsocketWatcher(_WorkerMixin):
         self._join_workers()
         with self._stream_state_lock:
             self._stream_active = False
+            self._stream_active_from_probe = False
         self._status = "stopped"
 
     # --- obsws-python event callbacks -------------------------------------
@@ -258,18 +260,51 @@ class ObsWebsocketWatcher(_WorkerMixin):
             ):
                 return
             if state == OBS_WEBSOCKET_OUTPUT_STARTED:
+                is_probe = bool(
+                    _get(
+                        data,
+                        "_stream_status_probe",
+                        "_streamStatusProbe",
+                    )
+                )
                 with self._stream_state_lock:
                     if self._stream_active:
-                        return
-                    self._stream_active = True
+                        if is_probe or not self._stream_active_from_probe:
+                            return
+                    else:
+                        self._stream_active = True
+                    self._stream_active_from_probe = is_probe
                 logger.info("OBS stream started")
                 if self._stream_started_callback is not None:
-                    self._dispatch_stream_callback(self._stream_started_callback)
+                    accepts_context = bool(
+                        getattr(
+                            self._stream_started_callback,
+                            "_accepts_obs_stream_start_context",
+                            False,
+                        )
+                    )
+                    if is_probe and accepts_context:
+                        self._dispatch_stream_callback(
+                            self._stream_started_callback,
+                            stream_start_context={
+                                "source": "probe",
+                                "output_duration_ms": _get(
+                                    data,
+                                    "output_duration",
+                                    "outputDuration",
+                                ),
+                            },
+                        )
+                    else:
+                        self._dispatch_stream_callback(
+                            self._stream_started_callback
+                        )
                 return
             if state != OBS_WEBSOCKET_OUTPUT_STOPPED:
                 return
             with self._stream_state_lock:
                 self._stream_active = False
+                self._stream_active_from_probe = False
             logger.info("OBS stream stopped")
             if self._stream_finished_callback is not None:
                 self._dispatch_stream_callback(self._stream_finished_callback)
@@ -301,9 +336,18 @@ class ObsWebsocketWatcher(_WorkerMixin):
             with self._stream_state_lock:
                 self._stream_status_checked = True
             if bool(getattr(response, "output_active", False)):
-                self.on_stream_state_changed(
-                    {"outputState": OBS_WEBSOCKET_OUTPUT_STARTED}
+                event = {
+                    "outputState": OBS_WEBSOCKET_OUTPUT_STARTED,
+                    "_streamStatusProbe": True,
+                }
+                output_duration = _get(
+                    response,
+                    "output_duration",
+                    "outputDuration",
                 )
+                if output_duration is not None:
+                    event["outputDuration"] = output_duration
+                self.on_stream_state_changed(event)
         except Exception as exc:
             logger.warning("OBS stream status probe failed: %s", exc)
         finally:
@@ -314,12 +358,17 @@ class ObsWebsocketWatcher(_WorkerMixin):
                 except Exception:
                     pass
 
-    def _dispatch_stream_callback(self, callback: Callable, *args) -> None:
+    def _dispatch_stream_callback(
+        self,
+        callback: Callable,
+        *args,
+        **kwargs,
+    ) -> None:
         """Invoke lightweight callbacks inline to preserve OBS event order."""
         if self._stopped:
             return
         try:
-            callback(*args)
+            callback(*args, **kwargs)
         except Exception:
             logger.exception("OBS stream lifecycle callback failed")
 
