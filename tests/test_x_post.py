@@ -2,6 +2,8 @@ import sys
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import x_post
@@ -62,3 +64,112 @@ def test_open_x_post_composer_uses_new_intent_url_without_publishing():
 
     assert returned == opened[0][0]
     assert opened[0][1:] == (2, True)
+
+
+def test_post_x_post_uses_oauth1_user_context_and_returns_status_url():
+    created_with = []
+    posted = []
+
+    class FakeResponse:
+        status_code = 201
+
+        @staticmethod
+        def json():
+            return {"data": {"id": "1234567890123456789", "text": "配信開始！"}}
+
+    class FakeSession:
+        def post(self, url, *, json, timeout):
+            posted.append((url, json, timeout))
+            return FakeResponse()
+
+        def close(self):
+            pass
+
+    def fake_session_factory(**kwargs):
+        created_with.append(kwargs)
+        return FakeSession()
+
+    credentials = x_post.XCredentials(
+        api_key="api-key",
+        api_key_secret="api-key-secret",
+        access_token="access-token",
+        access_token_secret="access-token-secret",
+    )
+
+    result = x_post.post_x_post(
+        "配信開始！",
+        credentials,
+        session_factory=fake_session_factory,
+    )
+
+    assert created_with == [{
+        "client_key": "api-key",
+        "client_secret": "api-key-secret",
+        "resource_owner_key": "access-token",
+        "resource_owner_secret": "access-token-secret",
+    }]
+    assert posted == [(
+        x_post.X_API_POST_URL,
+        {"text": "配信開始！"},
+        x_post.X_API_TIMEOUT,
+    )]
+    assert result.post_id == "1234567890123456789"
+    assert result.status_url == (
+        "https://x.com/i/web/status/1234567890123456789"
+    )
+
+
+@pytest.mark.parametrize("status_code", [400, 401, 403, 429, 500])
+def test_post_x_post_http_errors_never_expose_response_or_credentials(status_code):
+    secret = "must-not-leak"
+
+    class FakeResponse:
+        def __init__(self):
+            self.status_code = status_code
+            self.text = f"server echoed {secret}"
+
+        def json(self):
+            return {"detail": self.text}
+
+    class FakeSession:
+        def post(self, *_args, **_kwargs):
+            return FakeResponse()
+
+        def close(self):
+            pass
+
+    credentials = x_post.XCredentials(secret, secret, secret, secret)
+
+    with pytest.raises(x_post.XPostError) as raised:
+        x_post.post_x_post(
+            "配信開始！",
+            credentials,
+            session_factory=lambda **_kwargs: FakeSession(),
+        )
+
+    message = str(raised.value)
+    assert f"HTTP {status_code}" in message
+    assert secret not in message
+
+
+def test_post_x_post_network_error_is_sanitized():
+    secret = "network-secret"
+
+    class FakeSession:
+        def post(self, *_args, **_kwargs):
+            raise RuntimeError(secret)
+
+        def close(self):
+            pass
+
+    credentials = x_post.XCredentials(secret, secret, secret, secret)
+
+    with pytest.raises(x_post.XPostError) as raised:
+        x_post.post_x_post(
+            "配信開始！",
+            credentials,
+            session_factory=lambda **_kwargs: FakeSession(),
+        )
+
+    assert str(raised.value) == "X APIへの接続に失敗しました"
+    assert secret not in str(raised.value)

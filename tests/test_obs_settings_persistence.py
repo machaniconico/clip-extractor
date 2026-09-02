@@ -369,3 +369,102 @@ def test_obs_password_is_never_rendered_as_a_textbox_initial_value():
     assert 'elem_classes="obs-password-save"' in source
     assert "保存済みPasswordを削除" not in source
     assert "obs_clear_password_btn" not in source
+
+
+def test_start_obs_watch_persists_x_credentials_outside_settings_json(
+    monkeypatch,
+    tmp_path,
+):
+    settings_file = tmp_path / "default_settings.json"
+    password_file = tmp_path / ".obs_password"
+    credentials_file = tmp_path / ".x_credentials.json"
+    monkeypatch.setattr(web_app, "SETTINGS_FILE", settings_file)
+    monkeypatch.setattr(web_app, "OBS_PASSWORD_FILE", password_file)
+    monkeypatch.setattr(web_app, "X_CREDENTIALS_FILE", credentials_file)
+    monkeypatch.setattr(
+        obs_integration,
+        "create_watcher",
+        lambda *_args, **_kwargs: _FakeWatcher(),
+    )
+
+    try:
+        status = web_app.start_obs_watch(
+            "websocket",
+            "localhost",
+            4455,
+            "",
+            False,
+            "record",
+            "",
+            False,
+            False,
+            5,
+            "combined",
+            False,
+            "gemini",
+            "large-v3",
+            "",
+            obs_x_post_auto=True,
+            obs_x_api_key="api-key",
+            obs_x_api_key_secret="api-key-secret",
+            obs_x_access_token="access-token",
+            obs_x_access_token_secret="access-token-secret",
+        )
+
+        assert status == "connected"
+        saved_settings = json.loads(settings_file.read_text(encoding="utf-8"))
+        assert saved_settings["obs_x_post_auto"] is True
+        assert all(
+            secret not in settings_file.read_text(encoding="utf-8")
+            for secret in (
+                "api-key",
+                "api-key-secret",
+                "access-token",
+                "access-token-secret",
+            )
+        )
+        assert not {
+            "obs_x_api_key",
+            "obs_x_api_key_secret",
+            "obs_x_access_token",
+            "obs_x_access_token_secret",
+        }.intersection(web_app.load_defaults())
+        assert web_app.load_x_credentials().as_dict() == {
+            "api_key": "api-key",
+            "api_key_secret": "api-key-secret",
+            "access_token": "access-token",
+            "access_token_secret": "access-token-secret",
+        }
+    finally:
+        web_app.stop_obs_watch()
+
+
+def test_x_credentials_are_masked_and_never_used_as_textbox_initial_values():
+    module = ast.parse(WEB_APP.read_text(encoding="utf-8"))
+    expected = {
+        "obs_x_api_key",
+        "obs_x_api_key_secret",
+        "obs_x_access_token",
+        "obs_x_access_token_secret",
+    }
+    found = set()
+
+    for node in ast.walk(module):
+        if not isinstance(node, ast.Assign):
+            continue
+        names = {
+            target.id
+            for target in node.targets
+            if isinstance(target, ast.Name) and target.id in expected
+        }
+        if not names:
+            continue
+        assert isinstance(node.value, ast.Call), ast.dump(node.value)
+        keywords = {keyword.arg: keyword.value for keyword in node.value.keywords}
+        assert isinstance(keywords["value"], ast.Constant)
+        assert keywords["value"].value == ""
+        assert isinstance(keywords["type"], ast.Constant)
+        assert keywords["type"].value == "password"
+        found.update(names)
+
+    assert found == expected

@@ -10,10 +10,12 @@ import subprocess
 import traceback
 import inspect
 import threading
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Callable
 
@@ -27,8 +29,11 @@ os.environ["MPLBACKEND"] = "Agg"
 import gradio as gr
 from x_post import (
     DEFAULT_X_POST_TEMPLATE,
+    XCredentials,
+    XPostError,
     open_x_post_composer,
     parse_destination_links,
+    post_x_post,
     render_x_post_text,
 )
 
@@ -174,7 +179,35 @@ from config import FontConfig
 SETTINGS_FILE = Path(__file__).parent / "default_settings.json"
 GEMINI_KEY_FILE = Path(__file__).parent / ".gemini_key"
 OBS_PASSWORD_FILE = Path(__file__).parent / ".obs_password"
+X_CREDENTIALS_FILE = Path(__file__).parent / ".x_credentials.json"
+_settings_file_lock = threading.RLock()
 WEB_SERVER_HOST = "127.0.0.1"
+X_SECRET_SETTING_KEYS = frozenset(
+    {
+        "obs_x_api_key",
+        "obs_x_api_key_secret",
+        "obs_x_access_token",
+        "obs_x_access_token_secret",
+        "x_api_key",
+        "x_api_key_secret",
+        "x_access_token",
+        "x_access_token_secret",
+        "x_credentials",
+    }
+)
+
+
+def _serialize_settings_update(func):
+    """Keep every settings load-update-save transaction mutually exclusive."""
+
+    @wraps(func)
+    def _locked(*args, **kwargs):
+        with _settings_file_lock:
+            return func(*args, **kwargs)
+
+    return _locked
+
+
 REMOVED_MEDIA_SETTING_KEYS = frozenset(
     {
         "audio_delivery_mode",
@@ -208,6 +241,7 @@ OBS_CONNECTION_DEFAULTS = {
     "obs_watch_folder": "",
     "obs_auto_process": True,
     "obs_x_post_on_stream_start": False,
+    "obs_x_post_auto": False,
     "obs_x_post_template": DEFAULT_X_POST_TEMPLATE,
     "obs_x_post_destinations": "",
 }
@@ -462,6 +496,81 @@ def _save_obs_password(password: str) -> None:
         OBS_PASSWORD_FILE.unlink()
 
 
+def load_x_credentials() -> XCredentials:
+    """Load saved X secrets without putting them in normal app settings."""
+    if not X_CREDENTIALS_FILE.exists():
+        return XCredentials()
+    try:
+        data = json.loads(X_CREDENTIALS_FILE.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return XCredentials()
+    if not isinstance(data, dict):
+        return XCredentials()
+
+    def _value(key: str) -> str:
+        value = data.get(key, "")
+        return value.strip() if isinstance(value, str) else ""
+
+    return XCredentials(
+        api_key=_value("api_key"),
+        api_key_secret=_value("api_key_secret"),
+        access_token=_value("access_token"),
+        access_token_secret=_value("access_token_secret"),
+    )
+
+
+def _x_credentials_ui_copy(credentials: XCredentials) -> tuple[str, str]:
+    """Describe X credential state without sending secret values to Gradio."""
+    if credentials.is_complete():
+        return (
+            "保存済み。変更時のみ4項目すべて入力",
+            "4項目は保存済みです。空欄のままOBS連携を開始すると再利用します。",
+        )
+    if credentials.any_set():
+        return (
+            "一部のみ保存済み。4項目すべて入力",
+            "保存済み認証情報が不足しています。4項目すべてを入力してください。",
+        )
+    return (
+        "X Developer Consoleで発行した値を入力",
+        "4項目を入力してOBS連携を開始すると、このPC内だけに保存します。",
+    )
+
+
+def _save_x_credentials(credentials: XCredentials) -> None:
+    """Persist X secrets in the gitignored local sidecar file."""
+    if not isinstance(credentials, XCredentials):
+        raise TypeError("X認証情報の形式が不正です")
+    if credentials.any_set():
+        if not credentials.is_complete():
+            raise ValueError("X認証情報は4項目すべて入力してください")
+        temp_fd, temp_name = tempfile.mkstemp(
+            prefix=f"{X_CREDENTIALS_FILE.name}.",
+            suffix=".tmp",
+            dir=str(X_CREDENTIALS_FILE.parent),
+        )
+        try:
+            with os.fdopen(temp_fd, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write(
+                    json.dumps(credentials.as_dict(), ensure_ascii=False)
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, X_CREDENTIALS_FILE)
+        except Exception:
+            try:
+                os.close(temp_fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(temp_name)
+            except OSError:
+                pass
+            raise
+    elif X_CREDENTIALS_FILE.exists():
+        X_CREDENTIALS_FILE.unlink()
+
+
 def load_defaults() -> dict:
     """Load saved default settings."""
     defaults = {
@@ -494,6 +603,8 @@ def load_defaults() -> dict:
             pass
     for key in REMOVED_MEDIA_SETTING_KEYS:
         defaults.pop(key, None)
+    for key in X_SECRET_SETTING_KEYS:
+        defaults.pop(key, None)
     if defaults.get("ai_provider") not in _available_ai_providers():
         defaults["ai_provider"] = "gemini"
         defaults["ai_model"] = GEMINI_DEFAULT_MODEL
@@ -513,6 +624,7 @@ def load_defaults() -> dict:
     return defaults
 
 
+@_serialize_settings_update
 def _save_obs_connection_defaults(
     method: str,
     host: str,
@@ -524,12 +636,16 @@ def _save_obs_connection_defaults(
     auto_process: bool,
     processing_settings: dict | None = None,
     x_post_on_stream_start: bool = False,
+    x_post_auto: bool = False,
     x_post_template: str = DEFAULT_X_POST_TEMPLATE,
     x_post_destinations: str = "",
+    x_credentials: XCredentials | None = None,
 ) -> None:
-    """Persist OBS controls while keeping the password out of tracked JSON."""
+    """Persist OBS controls while keeping all secrets out of tracked JSON."""
     data = load_defaults()
     data.pop("obs_password", None)
+    for key in X_SECRET_SETTING_KEYS:
+        data.pop(key, None)
     data.update(
         {
             "obs_trigger_method": method,
@@ -539,6 +655,7 @@ def _save_obs_connection_defaults(
             "obs_watch_folder": watch_folder,
             "obs_auto_process": bool(auto_process),
             "obs_x_post_on_stream_start": bool(x_post_on_stream_start),
+            "obs_x_post_auto": bool(x_post_auto),
             "obs_x_post_template": str(x_post_template or DEFAULT_X_POST_TEMPLATE),
             "obs_x_post_destinations": str(x_post_destinations or ""),
         }
@@ -553,8 +670,11 @@ def _save_obs_connection_defaults(
         encoding="utf-8",
     )
     _save_obs_password(password if save_password else "")
+    if x_credentials is not None:
+        _save_x_credentials(x_credentials)
 
 
+@_serialize_settings_update
 def save_defaults(ai_provider, ai_model,
                   enable_clips, enable_chapters, clip_prompt, chapter_prompt,
                   auto_append_youtube,
@@ -616,6 +736,7 @@ def save_defaults(ai_provider, ai_model,
     return "Settings saved as default!"
 
 
+@_serialize_settings_update
 def save_obs_processing_defaults(
     enable_clips,
     clip_prompt,
@@ -1761,6 +1882,55 @@ _obs_auto_connect_lock = threading.Lock()
 # Generation token: bumped on every start/stop so a callback created for a
 # superseded watcher refuses to run the pipeline with stale settings.
 _obs_generation = 0
+# X announcement state intentionally outlives one watcher callback instance.
+# Restarting OBS integration while a stream is active must not make that same
+# stream eligible for a second API write.
+_obs_x_post_lock = threading.RLock()
+_obs_x_runtime_lock = threading.RLock()
+_obs_x_runtime_settings = {"enabled": False, "auto": False}
+_OBS_X_STREAM_START_TOLERANCE_SECONDS = 30.0
+_obs_x_stream_state = {
+    "active": False,
+    "epoch": 0,
+    "owner": None,
+    "owner_from_probe": False,
+    "action_claimed": False,
+    "started_at": None,
+}
+
+
+def _obs_start_times_within_tolerance(first: object, second: object) -> bool:
+    """Return whether two numeric/datetime OBS start times identify one stream."""
+
+    def _timestamp(value: object) -> float:
+        if isinstance(value, datetime):
+            return value.timestamp()
+        return float(value)
+
+    if first is None or second is None:
+        return False
+    try:
+        return (
+            abs(_timestamp(first) - _timestamp(second))
+            <= _OBS_X_STREAM_START_TOLERANCE_SECONDS
+        )
+    except (OverflowError, TypeError, ValueError):
+        return False
+
+
+def _obs_probe_start_matches_observed(
+    stream_state: dict,
+    observed_started_at: object,
+) -> bool:
+    """Match an actual STARTED event to a preceding duration-based probe."""
+    return bool(stream_state.get("owner_from_probe")) and (
+        _obs_start_times_within_tolerance(
+            stream_state.get("started_at"),
+            observed_started_at,
+        )
+    )
+
+
 # Auto-pipeline worker threads, tracked so stop can join finished ones and the
 # lifecycle is observable (the watcher's own _spawn_worker does not see these).
 _obs_pipeline_threads: list[threading.Thread] = []
@@ -2555,31 +2725,262 @@ def _append_obs_chapters_to_archive(
             )
 
 
+def _apply_obs_x_post_runtime_settings(enabled: bool, auto: bool) -> None:
+    """Apply X opt-in switches to a running watcher without persistence."""
+    with _obs_x_runtime_lock:
+        _obs_x_runtime_settings["enabled"] = bool(enabled)
+        _obs_x_runtime_settings["auto"] = bool(auto)
+
+
+def _set_obs_x_post_runtime_settings(enabled: bool, auto: bool) -> None:
+    """Apply and persist X opt-in switches without restarting the watcher."""
+    # Serialize with startup's reload-and-save section so an opt-out can never
+    # be followed by a stale from-defaults write that restores the old opt-in.
+    with _obs_start_lock:
+        _apply_obs_x_post_runtime_settings(enabled, auto)
+        with _settings_file_lock:
+            data = load_defaults()
+            data["obs_x_post_on_stream_start"] = bool(enabled)
+            data["obs_x_post_auto"] = bool(auto)
+            SETTINGS_FILE.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+
+def _reset_obs_x_post_stream_guard() -> None:
+    """Mark the prior X stream lifecycle complete while invalidating workers."""
+    with _obs_x_post_lock:
+        _obs_x_stream_state["active"] = False
+        _obs_x_stream_state["epoch"] += 1
+        _obs_x_stream_state["owner"] = None
+        _obs_x_stream_state["owner_from_probe"] = False
+        _obs_x_stream_state["action_claimed"] = False
+        _obs_x_stream_state["started_at"] = None
+
+
 def _obs_make_x_post_callbacks(
     settings: dict,
     generation: int | None = None,
+    *,
+    credentials: XCredentials | None = None,
+    use_runtime_settings: bool = False,
 ) -> tuple[Callable[..., None], Callable[[], None]]:
-    """Build stream callbacks that open a fresh, prefilled X composer.
+    """Build stream callbacks that publish or open a prefilled X composer.
 
-    The browser action is independent from OBS clip generation. YouTube is
-    queried only when its existing authentication is already available; a
-    missing YouTube URL never prevents configured simulcast links from being
-    posted.
+    Automatic API publishing is attempted only after explicit opt-in and with
+    a complete credential set. Any API failure falls back to the browser so an
+    announcement opportunity is not lost. YouTube lookup is independent from
+    OBS clip generation, and a missing URL never blocks configured simulcast
+    links.
     """
-    state_lock = threading.Lock()
-    stream_active = False
+    x_credentials = (
+        credentials if isinstance(credentials, XCredentials) else XCredentials()
+    )
+    owner_token = object()
+    owned_epoch: int | None = None
 
     def _is_current() -> bool:
         return generation is None or generation == _obs_generation
 
-    def _on_stream_started(proactive: bool = False) -> None:
-        nonlocal stream_active
-        if not _is_current():
-            return
-        with state_lock:
-            if stream_active:
+    def _settings_flags() -> tuple[bool, bool]:
+        if use_runtime_settings:
+            return (
+                bool(_obs_x_runtime_settings["enabled"]),
+                bool(_obs_x_runtime_settings["auto"]),
+            )
+        return (
+            bool(settings.get("obs_x_post_on_stream_start", True)),
+            bool(settings.get("obs_x_post_auto", False)),
+        )
+
+    def _perform_action(
+        post_text: str,
+        stream_epoch: int,
+        youtube_url: str,
+    ) -> None:
+        """Claim and perform one action while generation/opt-out stay stable."""
+
+        def _action_locked() -> None:
+            if (
+                not _obs_x_stream_state["active"]
+                or _obs_x_stream_state["epoch"] != stream_epoch
+                or _obs_x_stream_state["owner"] is not owner_token
+                or _obs_x_stream_state["action_claimed"]
+            ):
                 return
-            stream_active = True
+
+            enabled, auto_enabled = _settings_flags()
+            _obs_x_stream_state["action_claimed"] = True
+            if not enabled:
+                return
+            if not post_text.strip():
+                _obs_append_status("X投稿文が空のため、投稿画面を開きませんでした")
+                return
+
+            if auto_enabled:
+                if x_credentials.is_complete():
+                    try:
+                        result = post_x_post(post_text, x_credentials)
+                    except XPostError as exc:
+                        _obs_append_status(
+                            f"X自動投稿に失敗しました: {exc}。"
+                            "手動投稿画面へ切り替えます"
+                        )
+                    except Exception:
+                        # Do not log provider/test-double exception text: it
+                        # may contain a credential or signed request detail.
+                        logger.warning("X API post failed with an unexpected error")
+                        _obs_append_status(
+                            "X自動投稿に失敗しました: 予期しないエラー。"
+                            "手動投稿画面へ切り替えます"
+                        )
+                    else:
+                        _obs_append_status(
+                            f"Xへ自動投稿しました: {result.status_url}"
+                        )
+                        return
+                else:
+                    _obs_append_status(
+                        "X自動投稿の認証情報未設定のため手動投稿に切り替えます"
+                    )
+            try:
+                open_x_post_composer(post_text)
+                target_count = len(
+                    parse_destination_links(
+                        settings.get("obs_x_post_destinations", "")
+                    )
+                ) + (1 if youtube_url else 0)
+                _obs_append_status(
+                    "X投稿作成画面を開きました。内容を確認して「ポスト」を押してください"
+                    f"（配信先リンク {target_count}件）"
+                )
+            except Exception as exc:
+                logger.warning("X post composer open failed: %s", exc)
+                _obs_append_status(f"X投稿作成画面を開けませんでした: {exc}")
+
+        # All production generation changes use _obs_watcher_lock. Holding it
+        # through the external write closes the old-generation/new-generation
+        # race; the stream lock also serializes competing callbacks.
+        with _obs_watcher_lock:
+            if not _is_current():
+                return
+            with _obs_x_post_lock:
+                if use_runtime_settings:
+                    with _obs_x_runtime_lock:
+                        _action_locked()
+                else:
+                    _action_locked()
+
+    def _on_stream_started(
+        proactive: bool = False,
+        *,
+        stream_start_context: dict | None = None,
+    ) -> None:
+        nonlocal owned_epoch
+        # A compatibility fallback may call this without a successful
+        # GetStreamStatus response. Automatic writes require either an actual
+        # STARTED event or a probe that confirmed output_active=true.
+        if proactive:
+            return
+        is_probe = bool(
+            isinstance(stream_start_context, dict)
+            and stream_start_context.get("source") == "probe"
+        )
+        estimated_started_at = None
+        if is_probe:
+            try:
+                duration_ms = float(
+                    stream_start_context.get("output_duration_ms")
+                )
+                if duration_ms >= 0:
+                    estimated_started_at = time.time() - (duration_ms / 1000.0)
+            except (TypeError, ValueError):
+                pass
+        actual_started_at = time.time() if not is_probe else None
+        missing_duration_status = (
+            "OBSから配信時間を取得できないため、"
+            "継続中の同一配信としてX再投稿を抑止しました"
+        )
+        with _obs_watcher_lock:
+            if not _is_current():
+                return
+            with _obs_x_post_lock:
+                stream_is_active = bool(_obs_x_stream_state["active"])
+                begin_new_stream = not stream_is_active
+                same_owner = _obs_x_stream_state["owner"] is owner_token
+                if stream_is_active and not is_probe:
+                    guarded_started_at = _obs_x_stream_state["started_at"]
+                    matches_probe = _obs_probe_start_matches_observed(
+                        _obs_x_stream_state,
+                        actual_started_at,
+                    )
+                    matches_existing_observed_start = bool(
+                        not _obs_x_stream_state["owner_from_probe"]
+                        and _obs_start_times_within_tolerance(
+                            guarded_started_at,
+                            actual_started_at,
+                        )
+                    )
+                    if matches_probe or matches_existing_observed_start:
+                        owned_epoch = int(_obs_x_stream_state["epoch"])
+                        _obs_x_stream_state["owner"] = owner_token
+                        _obs_x_stream_state["owner_from_probe"] = False
+                        if same_owner or _obs_x_stream_state["action_claimed"]:
+                            return
+                        begin_new_stream = False
+                    else:
+                        begin_new_stream = True
+                elif stream_is_active and same_owner:
+                    return
+                elif stream_is_active:
+                    guarded_started_at = _obs_x_stream_state["started_at"]
+                    identity_available = (
+                        estimated_started_at is not None
+                        and guarded_started_at is not None
+                    )
+                    begin_new_stream = bool(
+                        identity_available
+                        and abs(estimated_started_at - guarded_started_at)
+                        > _OBS_X_STREAM_START_TOLERANCE_SECONDS
+                    )
+                    if not begin_new_stream:
+                        # The restarted watcher owns the same lifecycle so a
+                        # future FINISHED event can clear the shared guard.
+                        owned_epoch = int(_obs_x_stream_state["epoch"])
+                        _obs_x_stream_state["owner"] = owner_token
+                        _obs_x_stream_state["owner_from_probe"] = True
+                        if not identity_available:
+                            _obs_x_stream_state["action_claimed"] = True
+                            _obs_append_status(missing_duration_status)
+                            return
+                        if _obs_x_stream_state["action_claimed"]:
+                            return
+
+                if begin_new_stream:
+                    _obs_x_stream_state["active"] = True
+                    _obs_x_stream_state["epoch"] += 1
+                    _obs_x_stream_state["owner"] = owner_token
+                    _obs_x_stream_state["owner_from_probe"] = is_probe
+                    _obs_x_stream_state["action_claimed"] = False
+                    _obs_x_stream_state["started_at"] = (
+                        estimated_started_at if is_probe else actual_started_at
+                    )
+                    owned_epoch = int(_obs_x_stream_state["epoch"])
+                    if is_probe and estimated_started_at is None:
+                        _obs_x_stream_state["action_claimed"] = True
+                        _obs_append_status(missing_duration_status)
+                        return
+                stream_epoch = int(_obs_x_stream_state["epoch"])
+
+                if use_runtime_settings:
+                    with _obs_x_runtime_lock:
+                        enabled, _auto_enabled = _settings_flags()
+                else:
+                    enabled, _auto_enabled = _settings_flags()
+                if not enabled:
+                    _obs_x_stream_state["action_claimed"] = True
+                    return
 
         def _worker_body() -> None:
             youtube_url = ""
@@ -2634,23 +3035,7 @@ def _obs_make_x_post_callbacks(
                 title=title,
                 destinations=settings.get("obs_x_post_destinations", ""),
             )
-            if not post_text.strip():
-                _obs_append_status("X投稿文が空のため、投稿画面を開きませんでした")
-                return
-            try:
-                open_x_post_composer(post_text)
-                target_count = len(
-                    parse_destination_links(
-                        settings.get("obs_x_post_destinations", "")
-                    )
-                ) + (1 if youtube_url else 0)
-                _obs_append_status(
-                    "X投稿作成画面を開きました。内容を確認して「ポスト」を押してください"
-                    f"（配信先リンク {target_count}件）"
-                )
-            except Exception as exc:
-                logger.warning("X post composer open failed: %s", exc)
-                _obs_append_status(f"X投稿作成画面を開けませんでした: {exc}")
+            _perform_action(post_text, stream_epoch, youtube_url)
 
         def _worker() -> None:
             try:
@@ -2663,10 +3048,22 @@ def _obs_make_x_post_callbacks(
         worker.start()
 
     def _on_stream_finished() -> None:
-        nonlocal stream_active
-        with state_lock:
-            stream_active = False
+        nonlocal owned_epoch
+        with _obs_watcher_lock:
+            if not _is_current():
+                return
+            with _obs_x_post_lock:
+                if (
+                    owned_epoch is None
+                    or not _obs_x_stream_state["active"]
+                    or _obs_x_stream_state["epoch"] != owned_epoch
+                    or _obs_x_stream_state["owner"] is not owner_token
+                ):
+                    return
+                _reset_obs_x_post_stream_guard()
+                owned_epoch = None
 
+    setattr(_on_stream_started, "_accepts_obs_stream_start_context", True)
     return _on_stream_started, _on_stream_finished
 
 
@@ -2679,13 +3076,32 @@ def _obs_compose_stream_started_callbacks(
     if len(active_callbacks) == 1:
         return active_callbacks[0]
 
-    def _composed(proactive: bool = False) -> None:
+    def _composed(
+        proactive: bool = False,
+        *,
+        stream_start_context: dict | None = None,
+    ) -> None:
         for callback in active_callbacks:
             try:
-                callback(proactive=proactive)
+                if getattr(
+                    callback,
+                    "_accepts_obs_stream_start_context",
+                    False,
+                ):
+                    callback(
+                        proactive=proactive,
+                        stream_start_context=stream_start_context,
+                    )
+                else:
+                    callback(proactive=proactive)
             except Exception:
                 logger.exception("OBS stream-start callback failed")
 
+    if any(
+        getattr(callback, "_accepts_obs_stream_start_context", False)
+        for callback in active_callbacks
+    ):
+        setattr(_composed, "_accepts_obs_stream_start_context", True)
     return _composed
 
 
@@ -2748,20 +3164,25 @@ def _obs_make_stream_pipeline_callbacks(
         return os.path.normcase(os.path.abspath(str(video_path)))
 
     def _new_stream_state(
-        started_at: datetime,
+        started_at: datetime | None,
         *,
         observed_start: bool,
         capture_complete: bool = False,
+        owner_from_probe: bool = False,
+        detected_at: datetime | None = None,
     ) -> dict:
         capture_done = threading.Event()
         if capture_complete:
             capture_done.set()
+        effective_detected_at = detected_at or started_at or datetime.now(timezone.utc)
         return {
             "broadcast": None,
             "baseline_ids": None,
             "resolved_archive": None,
             "started_at": started_at,
             "observed_start": observed_start,
+            "owner_from_probe": owner_from_probe,
+            "detected_at": effective_detected_at,
             "capture_done": capture_done,
             "recording_ready": threading.Event(),
             "recording_done": threading.Event(),
@@ -2933,15 +3354,57 @@ def _obs_make_stream_pipeline_callbacks(
 
         _spawn(_recording_worker)
 
-    def _on_stream_started(proactive: bool = False) -> None:
+    def _on_stream_started(
+        proactive: bool = False,
+        *,
+        stream_start_context: dict | None = None,
+    ) -> None:
         if not auto_process or not _is_current():
             return
+        detected_started_at = datetime.now(timezone.utc)
+        is_probe = bool(
+            isinstance(stream_start_context, dict)
+            and stream_start_context.get("source") == "probe"
+        )
+        estimated_started_at = None
+        if is_probe:
+            try:
+                duration_ms = float(
+                    stream_start_context.get("output_duration_ms")
+                )
+                if duration_ms >= 0:
+                    estimated_started_at = detected_started_at - timedelta(
+                        milliseconds=duration_ms
+                    )
+            except (OverflowError, TypeError, ValueError):
+                pass
         with state_lock:
+            current_epoch = state["epoch"]
+            current_stream = state["streams"].get(current_epoch)
+            if (
+                not proactive
+                and not is_probe
+                and current_stream is not None
+                and not current_stream.get("finish_observed")
+                and current_epoch not in state["finishing_epochs"]
+                and current_epoch not in state["completed_epochs"]
+                and _obs_probe_start_matches_observed(
+                    current_stream,
+                    detected_started_at,
+                )
+            ):
+                current_stream["observed_start"] = True
+                current_stream["owner_from_probe"] = False
+                current_stream["started_at"] = detected_started_at
+                current_stream["detected_at"] = detected_started_at
+                return
             state["epoch"] += 1
             epoch = state["epoch"]
             stream_state = _new_stream_state(
-                datetime.now(timezone.utc),
-                observed_start=not proactive,
+                estimated_started_at if is_probe else detected_started_at,
+                observed_start=not proactive and not is_probe,
+                owner_from_probe=is_probe,
+                detected_at=detected_started_at,
             )
             state["streams"][epoch] = stream_state
             for old_epoch in list(state["streams"]):
@@ -2959,11 +3422,16 @@ def _obs_make_stream_pipeline_callbacks(
             try:
                 service = youtube_api.get_youtube_service()
                 try:
-                    capture_started_after = (
-                        stream_state["started_at"] - timedelta(seconds=30)
-                        if stream_state.get("observed_start")
-                        else None
-                    )
+                    with state_lock:
+                        effective_started_at = (
+                            stream_state.get("started_at")
+                            or stream_state["detected_at"]
+                        )
+                        capture_started_after = (
+                            effective_started_at - timedelta(seconds=30)
+                            if stream_state.get("observed_start")
+                            else None
+                        )
                     broadcast = youtube_api.find_active_broadcast(
                         service,
                         started_after=capture_started_after,
@@ -2974,7 +3442,7 @@ def _obs_make_stream_pipeline_callbacks(
                 try:
                     baseline_ids = youtube_api.list_completed_broadcast_ids(
                         service,
-                        completed_before=stream_state["started_at"],
+                        completed_before=effective_started_at,
                     )
                 except Exception as exc:
                     lookup_errors.append(f"終了済み配信一覧: {exc}")
@@ -3170,8 +3638,12 @@ def _obs_make_stream_pipeline_callbacks(
                         if stream_state["baseline_ids"] is not None
                         else None
                     )
+                    effective_started_at = (
+                        stream_state.get("started_at")
+                        or stream_state["detected_at"]
+                    )
                     started_after = (
-                        stream_state["started_at"] - timedelta(seconds=30)
+                        effective_started_at - timedelta(seconds=30)
                         if stream_state.get("observed_start")
                         else None
                     )
@@ -3198,7 +3670,7 @@ def _obs_make_stream_pipeline_callbacks(
                         _is_current,
                         excluded_ids,
                         started_after,
-                        stream_state["started_at"],
+                        effective_started_at,
                         not use_recording,
                     )
                     with state_lock:
@@ -3440,6 +3912,7 @@ def _obs_make_stream_pipeline_callbacks(
             return "安定したOBS録画がないため、検知済みの完成アーカイブを再試行します"
         return "検知済みの完成アーカイブから生成を再試行します"
 
+    setattr(_on_stream_started, "_accepts_obs_stream_start_context", True)
     setattr(_on_stream_finished, "_retry_detection_flow", _retry_detection_flow)
 
     return (
@@ -3616,9 +4089,16 @@ def _stop_obs_watch_impl() -> str:
     global _obs_watcher, _obs_generation, _obs_retry_handler
     with _obs_watcher_lock:
         watcher = _obs_watcher
+        stream_was_confirmed_inactive = bool(
+            watcher is not None
+            and getattr(watcher, "stream_status_checked", False)
+            and not getattr(watcher, "stream_active", False)
+        )
         _obs_watcher = None
         _obs_retry_handler = None
         _obs_generation += 1
+    if stream_was_confirmed_inactive:
+        _reset_obs_x_post_stream_guard()
     _obs_cancel_pending_confirmation()
     if watcher is None:
         msg = "OBS連携は停止中です"
@@ -3659,8 +4139,13 @@ def _start_obs_watch_impl(
     output_base_dir: str,
     obs_processing_settings: dict | None = None,
     x_post_on_stream_start: bool = False,
+    x_post_auto: bool = False,
     x_post_template: str = DEFAULT_X_POST_TEMPLATE,
     x_post_destinations: str = "",
+    x_api_key: str = "",
+    x_api_key_secret: str = "",
+    x_access_token: str = "",
+    x_access_token_secret: str = "",
 ) -> str:
     """Implementation shared by manual and automatic OBS connection starts."""
     global _obs_watcher, _obs_generation, _obs_retry_handler
@@ -3744,10 +4229,30 @@ def _start_obs_watch_impl(
     if output_base_dir is not None:
         settings["output_base_dir"] = output_base_dir
     settings["obs_x_post_on_stream_start"] = bool(x_post_on_stream_start)
+    settings["obs_x_post_auto"] = bool(x_post_auto)
     settings["obs_x_post_template"] = str(
         x_post_template or DEFAULT_X_POST_TEMPLATE
     )
     settings["obs_x_post_destinations"] = str(x_post_destinations or "")
+    entered_x_credentials = XCredentials(
+        api_key=str(x_api_key or ""),
+        api_key_secret=str(x_api_key_secret or ""),
+        access_token=str(x_access_token or ""),
+        access_token_secret=str(x_access_token_secret or ""),
+    )
+    if entered_x_credentials.any_set() and not entered_x_credentials.is_complete():
+        msg = "X認証情報は4項目すべて入力してください（保存済みの値は変更していません）"
+        _obs_append_status(msg)
+        return msg
+    effective_x_credentials = (
+        entered_x_credentials
+        if entered_x_credentials.is_complete()
+        else load_x_credentials()
+    )
+    _apply_obs_x_post_runtime_settings(
+        bool(x_post_on_stream_start),
+        bool(x_post_auto),
+    )
     profile_auto_append = obs_profile.get(
         "auto_append_youtube",
         auto_append_youtube,
@@ -3801,8 +4306,14 @@ def _start_obs_watch_impl(
             bool(auto_process),
             processing_settings=obs_profile,
             x_post_on_stream_start=bool(x_post_on_stream_start),
+            x_post_auto=bool(x_post_auto),
             x_post_template=settings["obs_x_post_template"],
             x_post_destinations=settings["obs_x_post_destinations"],
+            x_credentials=(
+                entered_x_credentials
+                if entered_x_credentials.is_complete()
+                else None
+            ),
         )
     except Exception as exc:
         msg = f"OBS連携設定の保存に失敗しました: {exc}"
@@ -3863,6 +4374,8 @@ def _start_obs_watch_impl(
         x_post_started, x_post_finished = _obs_make_x_post_callbacks(
             settings,
             gen,
+            credentials=effective_x_credentials,
+            use_runtime_settings=True,
         )
     elif bool(x_post_on_stream_start):
         _obs_append_status(
@@ -3919,6 +4432,13 @@ def _start_obs_watch_impl(
             if _obs_watcher is watcher and _obs_generation == gen:
                 _obs_retry_handler = retry_handler
     if (
+        bool(getattr(watcher, "stream_status_checked", False))
+        and not bool(getattr(watcher, "stream_active", False))
+    ):
+        with _obs_watcher_lock:
+            if _obs_watcher is watcher and _obs_generation == gen:
+                _reset_obs_x_post_stream_guard()
+    if (
         stream_started is not None
         and str(status).lower().startswith("connected")
         and not bool(getattr(watcher, "stream_status_checked", False))
@@ -3966,6 +4486,11 @@ def start_obs_watch(
     obs_x_post_on_stream_start=None,
     obs_x_post_template=None,
     obs_x_post_destinations=None,
+    obs_x_post_auto=None,
+    obs_x_api_key=None,
+    obs_x_api_key_secret=None,
+    obs_x_access_token=None,
+    obs_x_access_token_secret=None,
 ) -> str:
     """Manually (re)start OBS integration from the Gradio controls.
 
@@ -4054,6 +4579,15 @@ def start_obs_watch(
                 if obs_x_post_destinations is not None
                 else load_defaults().get("obs_x_post_destinations", "")
             ),
+            x_post_auto=bool(
+                obs_x_post_auto
+                if obs_x_post_auto is not None
+                else load_defaults().get("obs_x_post_auto", False)
+            ),
+            x_api_key=str(obs_x_api_key or ""),
+            x_api_key_secret=str(obs_x_api_key_secret or ""),
+            x_access_token=str(obs_x_access_token or ""),
+            x_access_token_secret=str(obs_x_access_token_secret or ""),
         )
 
 
@@ -4157,6 +4691,13 @@ def start_obs_watch_from_defaults(
             msg = "手動操作を優先し、起動時のOBS自動連携をキャンセルしました"
             _obs_append_status(msg)
             return msg
+        latest_x_settings = load_defaults()
+        settings["obs_x_post_on_stream_start"] = bool(
+            latest_x_settings.get("obs_x_post_on_stream_start", False)
+        )
+        settings["obs_x_post_auto"] = bool(
+            latest_x_settings.get("obs_x_post_auto", False)
+        )
         try:
             return _start_obs_watch_impl(
                 method=method,
@@ -4179,6 +4720,7 @@ def start_obs_watch_from_defaults(
                 x_post_on_stream_start=bool(
                     settings.get("obs_x_post_on_stream_start", False)
                 ),
+                x_post_auto=bool(settings.get("obs_x_post_auto", False)),
                 x_post_template=settings.get(
                     "obs_x_post_template",
                     DEFAULT_X_POST_TEMPLATE,
@@ -5583,10 +6125,12 @@ def create_ui():
                 with gr.Accordion("X 配信開始ポスト", open=False):
                     gr.Markdown(
                         "WebSocket方式で配信開始を検知したら、配信先リンク入りの"
-                        "X投稿作成画面を開きます。本文を確認してから手動でポストします。"
+                        "告知文を作成します。自動投稿をONにして認証情報4項目を"
+                        "設定するとX APIから投稿します。認証情報が未設定または"
+                        "API投稿に失敗した場合は手動投稿画面を開きます。"
                     )
                     obs_x_post_on_stream_start = gr.Checkbox(
-                        label="配信開始時にXの投稿作成画面を開く",
+                        label="配信開始時にXへ告知する",
                         value=bool(
                             defaults.get("obs_x_post_on_stream_start", False)
                         ),
@@ -5605,6 +6149,44 @@ def create_ui():
                             "他サイトはチャンネルURLを登録してください"
                         ),
                     )
+                    obs_x_post_auto = gr.Checkbox(
+                        label="X APIで完全自動投稿する",
+                        value=bool(defaults.get("obs_x_post_auto", False)),
+                        info=(
+                            "ユーザーが明示的にONにした場合だけ投稿します。"
+                            "API利用料とXのポリシーはユーザーのDeveloperアカウントに適用されます"
+                        ),
+                    )
+                    x_credentials_placeholder, x_credentials_info = (
+                        _x_credentials_ui_copy(load_x_credentials())
+                    )
+                    with gr.Row():
+                        obs_x_api_key = gr.Textbox(
+                            label="API Key",
+                            value="",
+                            type="password",
+                            placeholder=x_credentials_placeholder,
+                            info=x_credentials_info,
+                        )
+                        obs_x_api_key_secret = gr.Textbox(
+                            label="API Key Secret",
+                            value="",
+                            type="password",
+                            placeholder=x_credentials_placeholder,
+                        )
+                    with gr.Row():
+                        obs_x_access_token = gr.Textbox(
+                            label="Access Token",
+                            value="",
+                            type="password",
+                            placeholder=x_credentials_placeholder,
+                        )
+                        obs_x_access_token_secret = gr.Textbox(
+                            label="Access Token Secret",
+                            value="",
+                            type="password",
+                            placeholder=x_credentials_placeholder,
+                        )
                     obs_x_post_template = gr.Textbox(
                         label="X投稿文テンプレート",
                         value=defaults.get(
@@ -6431,8 +7013,25 @@ def create_ui():
                 obs_x_post_on_stream_start,
                 obs_x_post_template,
                 obs_x_post_destinations,
+                obs_x_post_auto,
+                obs_x_api_key,
+                obs_x_api_key_secret,
+                obs_x_access_token,
+                obs_x_access_token_secret,
             ],
             outputs=obs_status_box,
+        )
+        obs_x_post_on_stream_start.change(
+            fn=_set_obs_x_post_runtime_settings,
+            inputs=[obs_x_post_on_stream_start, obs_x_post_auto],
+            outputs=[],
+            queue=False,
+        )
+        obs_x_post_auto.change(
+            fn=_set_obs_x_post_runtime_settings,
+            inputs=[obs_x_post_on_stream_start, obs_x_post_auto],
+            outputs=[],
+            queue=False,
         )
         obs_stop_btn.click(
             fn=stop_obs_watch,

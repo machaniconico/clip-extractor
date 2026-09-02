@@ -351,6 +351,47 @@ def test_saved_api_key_is_not_embedded_in_browser_config(monkeypatch, tmp_path):
     assert sentinel not in client_config
 
 
+def test_saved_x_credentials_are_not_embedded_in_browser_config(
+    monkeypatch,
+    tmp_path,
+):
+    sentinels = {
+        "api_key": "sentinel-x-api-key",
+        "api_key_secret": "sentinel-x-api-key-secret",
+        "access_token": "sentinel-x-access-token",
+        "access_token_secret": "sentinel-x-access-token-secret",
+    }
+    credentials_file = tmp_path / ".x_credentials.json"
+    credentials_file.write_text(json.dumps(sentinels), encoding="utf-8")
+    monkeypatch.setattr(web_app, "X_CREDENTIALS_FILE", credentials_file)
+    monkeypatch.setattr(
+        web_app,
+        "SETTINGS_FILE",
+        tmp_path / "missing-default-settings.json",
+    )
+
+    config = web_app.create_ui().get_config_file()
+    serialized = json.dumps(config, ensure_ascii=False, default=str)
+
+    assert all(secret not in serialized for secret in sentinels.values())
+    credential_labels = {
+        "API Key",
+        "API Key Secret",
+        "Access Token",
+        "Access Token Secret",
+    }
+    credential_components = [
+        component.get("props", {})
+        for component in config.get("components", [])
+        if component.get("props", {}).get("label") in credential_labels
+    ]
+    assert {component["label"] for component in credential_components} == (
+        credential_labels
+    )
+    assert all(component.get("type") == "password" for component in credential_components)
+    assert all(component.get("value", "") == "" for component in credential_components)
+
+
 def test_obs_processing_normalises_shorts_visual_settings():
     settings = web_app._normalise_obs_processing_settings(
         {

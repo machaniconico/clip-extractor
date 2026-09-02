@@ -708,7 +708,9 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_auto_start_without_prompt_confirmation",
         "obs_shorts_blur_strength", "obs_shorts_title_position",
         "obs_x_post_on_stream_start", "obs_x_post_template",
-        "obs_x_post_destinations",
+        "obs_x_post_destinations", "obs_x_post_auto", "obs_x_api_key",
+        "obs_x_api_key_secret", "obs_x_access_token",
+        "obs_x_access_token_secret",
     ]
     assert _click_input_names(module, "obs_start_btn") == [
         "obs_trigger_radio", "obs_host", "obs_port", "obs_password",
@@ -722,21 +724,30 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_karaoke", "obs_auto_start_without_prompt_confirmation",
         "obs_shorts_blur_strength", "obs_shorts_title_position",
         "obs_x_post_on_stream_start", "obs_x_post_template",
-        "obs_x_post_destinations",
+        "obs_x_post_destinations", "obs_x_post_auto", "obs_x_api_key",
+        "obs_x_api_key_secret", "obs_x_access_token",
+        "obs_x_access_token_secret",
     ]
 
 
 def test_obs_x_post_controls_are_saved_and_explain_dynamic_links():
     source = WEB_APP.read_text(encoding="utf-8")
 
-    assert 'label="配信開始時にXの投稿作成画面を開く"' in source
+    assert 'label="配信開始時にXへ告知する"' in source
     assert 'label="同時配信先URL（1行1件）"' in source
     assert 'label="X投稿文テンプレート"' in source
+    assert 'label="X APIで完全自動投稿する"' in source
+    assert 'label="API Key"' in source
+    assert 'label="API Key Secret"' in source
+    assert 'label="Access Token"' in source
+    assert 'label="Access Token Secret"' in source
     assert "obs_x_post_on_stream_start" in source
+    assert "obs_x_post_auto" in source
     assert "obs_x_post_destinations" in source
     assert "obs_x_post_template" in source
     assert "{links}=配信先一覧" in source
-    assert "本文を確認してから手動でポストします" in source
+    assert "認証情報が未設定または" in source
+    assert "API投稿に失敗した場合は手動投稿画面" in source
 
 
 def test_obs_help_explains_recording_primary_setup_and_archive_fallback():

@@ -1,7 +1,10 @@
-"""Helpers for opening a prefilled X post composer.
+"""Helpers for publishing or manually composing an X stream announcement.
 
-This module deliberately stops at the compose screen.  It does not store X
-credentials and it never publishes a post on the user's behalf.
+Automatic publishing is used only when the user explicitly opts in and
+provides all four OAuth 1.0a user-context credentials.  Otherwise callers keep
+the existing behavior of opening a prefilled composer for manual review.
+Credential persistence belongs to the UI layer; this module only uses values
+provided for one request and never logs them.
 """
 
 from __future__ import annotations
@@ -12,7 +15,62 @@ from urllib.parse import quote, urlencode, urlparse
 
 
 X_POST_INTENT_URL = "https://x.com/intent/post"
+X_API_POST_URL = "https://api.x.com/2/tweets"
+X_API_TIMEOUT = (5, 15)
 DEFAULT_X_POST_TEMPLATE = "配信開始しました！\n{links}"
+
+
+class XPostError(RuntimeError):
+    """A user-safe X publishing error that never includes API response data."""
+
+
+@dataclass(frozen=True, repr=False)
+class XCredentials:
+    """OAuth 1.0a user-context credentials for one X account."""
+
+    api_key: str = ""
+    api_key_secret: str = ""
+    access_token: str = ""
+    access_token_secret: str = ""
+
+    def is_complete(self) -> bool:
+        return all(
+            value.strip()
+            for value in (
+                self.api_key,
+                self.api_key_secret,
+                self.access_token,
+                self.access_token_secret,
+            )
+        )
+
+    def any_set(self) -> bool:
+        return any(
+            value.strip()
+            for value in (
+                self.api_key,
+                self.api_key_secret,
+                self.access_token,
+                self.access_token_secret,
+            )
+        )
+
+    def as_dict(self) -> dict[str, str]:
+        """Return the storage representation; callers must treat it as secret."""
+        return {
+            "api_key": self.api_key.strip(),
+            "api_key_secret": self.api_key_secret.strip(),
+            "access_token": self.access_token.strip(),
+            "access_token_secret": self.access_token_secret.strip(),
+        }
+
+
+@dataclass(frozen=True)
+class XPostResult:
+    """Identifiers returned after X accepts a new post."""
+
+    post_id: str
+    status_url: str
 
 
 @dataclass(frozen=True)
@@ -21,6 +79,90 @@ class DestinationLink:
 
     label: str
     url: str
+
+
+def _http_error_message(status_code: int) -> str:
+    if status_code == 401:
+        return "X APIの認証情報が拒否されました (HTTP 401)"
+    if status_code == 403:
+        return "X APIの投稿権限がありません (HTTP 403)"
+    if status_code == 429:
+        return "X APIの利用上限に達しました (HTTP 429)"
+    if 400 <= status_code < 500:
+        return f"X APIが投稿を受け付けませんでした (HTTP {status_code})"
+    if status_code >= 500:
+        return f"X APIで一時的な障害が発生しました (HTTP {status_code})"
+    return f"X API投稿に失敗しました (HTTP {status_code})"
+
+
+def post_x_post(
+    text: str,
+    credentials: XCredentials,
+    *,
+    session_factory=None,
+) -> XPostResult:
+    """Publish one post through X API v2 using OAuth 1.0a user context.
+
+    The response body and underlying exception text are deliberately omitted
+    from raised errors because providers and test doubles may echo request
+    details.  Callers can safely show :class:`XPostError` messages in a status
+    field without exposing credentials.
+    """
+    body = str(text or "")
+    if not body.strip():
+        raise XPostError("X投稿文が空です")
+    if not isinstance(credentials, XCredentials) or not credentials.is_complete():
+        raise XPostError("X API認証情報が不足しています")
+
+    if session_factory is None:
+        try:
+            from requests_oauthlib import OAuth1Session
+        except Exception:
+            raise XPostError("X API認証ライブラリを読み込めませんでした") from None
+        session_factory = OAuth1Session
+
+    session = None
+    try:
+        session = session_factory(
+            client_key=credentials.api_key.strip(),
+            client_secret=credentials.api_key_secret.strip(),
+            resource_owner_key=credentials.access_token.strip(),
+            resource_owner_secret=credentials.access_token_secret.strip(),
+        )
+        response = session.post(
+            X_API_POST_URL,
+            json={"text": body},
+            timeout=X_API_TIMEOUT,
+        )
+    except Exception:
+        raise XPostError("X APIへの接続に失敗しました") from None
+    finally:
+        close = getattr(session, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    try:
+        status_code = int(response.status_code)
+    except (AttributeError, TypeError, ValueError):
+        raise XPostError("X APIから不正な応答を受信しました") from None
+    if status_code != 201:
+        raise XPostError(_http_error_message(status_code))
+
+    try:
+        payload = response.json()
+        post_id = str(payload["data"]["id"]).strip()
+    except (AttributeError, KeyError, TypeError, ValueError):
+        raise XPostError("X APIの成功応答に投稿IDがありません") from None
+    if not post_id.isdigit():
+        raise XPostError("X APIの成功応答に投稿IDがありません")
+
+    return XPostResult(
+        post_id=post_id,
+        status_url=f"https://x.com/i/web/status/{post_id}",
+    )
 
 
 def _infer_label(url: str) -> str:
