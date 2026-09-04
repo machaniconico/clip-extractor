@@ -207,6 +207,28 @@ def read_requirements(path: Path, _seen_files: set[Path] | None = None) -> list[
     return requirements
 
 
+def pinned_requirements(path: Path) -> dict[str, tuple[str, str]]:
+    """Return canonical names mapped to their declared name and exact version."""
+
+    pinned: dict[str, tuple[str, str]] = {}
+    for requirement in read_requirements(path):
+        exact_versions = [
+            specifier.version
+            for specifier in requirement.specifier
+            if specifier.operator == "==" and "*" not in specifier.version
+        ]
+        if len(requirement.specifier) != 1 or len(exact_versions) != 1:
+            raise RuntimeError(
+                f"requirement is not exactly pinned in {path}: {requirement}"
+            )
+        name = canonicalize_name(requirement.name)
+        value = (requirement.name, exact_versions[0])
+        if name in pinned and pinned[name] != value:
+            raise RuntimeError(f"conflicting pins in {path}: {requirement.name}")
+        pinned[name] = value
+    return pinned
+
+
 def _marker_applies(requirement: Requirement, extras: Iterable[str] = ()) -> bool:
     if requirement.marker is None:
         return True
