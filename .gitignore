@@ -1,7 +1,10 @@
 # Secrets
 .gemini_key
+.gemini_key.*.tmp
 .obs_password
+.obs_password.*.tmp
 .x_credentials.json*
+.x_credentials.json.*.tmp
 credentials.json
 token.json
 token.pickle

@@ -1,5 +1,6 @@
 """Startup regression tests for optional automatic OBS integration."""
 
+import base64
 import json
 import sys
 import threading
@@ -12,6 +13,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 pytest.importorskip("gradio")
 
 import web_app
+import secret_store
+import obs_integration
 
 
 @pytest.fixture(autouse=True)
@@ -126,6 +129,42 @@ def test_auto_connect_waits_then_starts_with_saved_defaults(monkeypatch, tmp_pat
         "x_post_template": web_app.DEFAULT_X_POST_TEMPLATE,
         "x_post_destinations": "",
     }]
+
+
+def test_auto_connect_decrypt_failure_preserves_saved_password(
+    monkeypatch,
+    tmp_path,
+):
+    password_file = _isolate_settings(
+        monkeypatch,
+        tmp_path,
+        obs_trigger_method="folder",
+    )
+    envelope = "CLIPSEC1:" + base64.b64encode(b"moved-profile").decode("ascii")
+    password_file.write_text(envelope, encoding="utf-8")
+    original_payload = password_file.read_bytes()
+    monkeypatch.setattr(secret_store, "is_encryption_available", lambda: True)
+    monkeypatch.setattr(
+        secret_store,
+        "_unprotect_data",
+        lambda _payload: (_ for _ in ()).throw(OSError("private DPAPI detail")),
+    )
+    monkeypatch.setattr(
+        obs_integration,
+        "create_watcher",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unreadable password must stop before watcher creation"
+        ),
+    )
+
+    result = web_app.start_obs_watch_from_defaults()
+
+    assert result == web_app.SECRET_UNAVAILABLE_UI_MESSAGE
+    assert "private DPAPI detail" not in result
+    assert password_file.read_bytes() == original_payload
+    assert "obs_processing" in json.loads(
+        web_app.SETTINGS_FILE.read_text(encoding="utf-8")
+    )
 
 
 def test_auto_connect_timeout_is_nonfatal(monkeypatch, tmp_path):

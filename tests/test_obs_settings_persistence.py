@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 pytest.importorskip("gradio")
 
 import obs_integration
+import secret_store
 import web_app
 
 WEB_APP = Path(__file__).parent.parent / "web_app.py"
@@ -274,6 +275,7 @@ def test_unsaved_blank_password_does_not_reuse_saved_secret(
 def test_unsaved_password_delete_failure_aborts_before_watcher_creation(
     monkeypatch,
     tmp_path,
+    caplog,
 ):
     settings_file = tmp_path / "default_settings.json"
     password_file = tmp_path / ".obs_password"
@@ -294,26 +296,29 @@ def test_unsaved_password_delete_failure_aborts_before_watcher_creation(
     monkeypatch.setattr(web_app, "_save_obs_password", fail_to_delete)
     monkeypatch.setattr(obs_integration, "create_watcher", fake_create_watcher)
 
-    status = web_app.start_obs_watch(
-        "websocket",
-        "localhost",
-        4455,
-        "one-time-secret",
-        False,
-        "record",
-        "",
-        False,
-        False,
-        5,
-        "combined",
-        False,
-        "gemini",
-        "large-v3",
-        "",
-    )
+    with caplog.at_level("ERROR", logger=web_app.logger.name):
+        status = web_app.start_obs_watch(
+            "websocket",
+            "localhost",
+            4455,
+            "one-time-secret",
+            False,
+            "record",
+            "",
+            False,
+            False,
+            5,
+            "combined",
+            False,
+            "gemini",
+            "large-v3",
+            "",
+        )
 
     assert "保存に失敗" in status
-    assert "access denied" in status
+    assert "access denied" not in status
+    assert "OBS connection settings or secrets" in caplog.text
+    assert "access denied" in caplog.text
     assert create_called is False
     assert password_file.read_text(encoding="utf-8") == "old-secret"
 
@@ -331,6 +336,23 @@ def test_obs_password_ui_copy_makes_saved_state_and_save_timing_clear():
     assert "未保存" in empty_info
     assert "OBS連携 開始" in empty_info
     assert "チェックだけでは保存されません" in empty_info
+
+
+def test_unavailable_saved_secret_uses_fixed_safe_ui_message(monkeypatch):
+    warnings = []
+    monkeypatch.setattr(web_app.gr, "Warning", warnings.append)
+
+    def unavailable_loader():
+        raise secret_store.SecretUnavailableError(
+            "unsafe exception detail C:/private/.obs_password"
+        )
+
+    fallback = object()
+
+    assert web_app._read_secret_for_ui(unavailable_loader, fallback) is fallback
+    assert warnings == [web_app.SECRET_UNAVAILABLE_UI_MESSAGE]
+    assert "unsafe exception detail" not in warnings[0]
+    assert ".obs_password" not in warnings[0]
 
 
 def test_obs_password_is_never_rendered_as_a_textbox_initial_value():

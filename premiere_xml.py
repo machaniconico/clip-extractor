@@ -2,7 +2,6 @@
 
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from xml.dom import minidom
 
 from clipper import format_time_range
 
@@ -429,13 +428,17 @@ def _add_format(parent: ET.Element, width: int, height: int, fps: float) -> None
 
 def _write_xml(root: ET.Element, output_path: Path) -> None:
     """Write XML with proper formatting and DOCTYPE."""
-    rough = ET.tostring(root, encoding="unicode")
-    dom = minidom.parseString(rough)
+    ET.indent(root, space="  ")
+    xml_body = ET.tostring(root, encoding="unicode")
+    lines = []
+    for line in xml_body.split("\n"):
+        stripped = line.rstrip()
+        if stripped.endswith(" />") and ">" not in stripped[:-3]:
+            line = line[: len(stripped) - 3] + line[len(stripped) - 2 :]
+        lines.append(line)
+    xml_body = "\n".join(lines) + "\n"
 
     # Add DOCTYPE
     doctype = '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>\n'
-    xml_body = dom.toprettyxml(indent="  ", encoding=None)
-    # Remove the default XML declaration from minidom
-    xml_body = "\n".join(xml_body.split("\n")[1:])
 
     output_path.write_text(doctype + xml_body, encoding="utf-8")

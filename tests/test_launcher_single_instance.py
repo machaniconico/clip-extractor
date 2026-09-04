@@ -1,27 +1,29 @@
 """Regression tests for restarting an already-running Clip Extractor UI."""
 
 from types import SimpleNamespace
-import urllib.request
 from pathlib import Path
 
+import httpx
 import pytest
 
 import launcher
 
 
 class _FakeHttpResponse:
-    def __init__(self, body):
-        self.status = 200
-        self._body = body
+    def __init__(self, body, *, status_code=200):
+        self.status_code = status_code
+        self.body = body
+        self.closed = False
 
     def __enter__(self):
         return self
 
     def __exit__(self, *_args):
-        return False
+        self.closed = True
 
-    def read(self, _limit):
-        return self._body
+    def iter_bytes(self, *, chunk_size):
+        assert chunk_size <= 512 * 1024
+        yield self.body
 
 
 @pytest.mark.parametrize(
@@ -32,13 +34,93 @@ class _FakeHttpResponse:
     ],
 )
 def test_page_probe_only_accepts_clip_extractor(monkeypatch, body, expected):
-    monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
-        lambda *_args, **_kwargs: _FakeHttpResponse(body),
-    )
+    response = _FakeHttpResponse(body)
+    calls = []
+
+    def fake_stream(method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        return response
+
+    monkeypatch.setattr(httpx, "stream", fake_stream)
 
     assert launcher._is_clip_extractor_page_available() is expected
+    assert calls == [(
+        "GET",
+        launcher.SERVER_URL,
+        {
+            "timeout": 0.75,
+            "follow_redirects": True,
+            "trust_env": False,
+        },
+    )]
+    assert response.closed is True
+
+
+def test_page_probe_stops_streaming_after_512_kib(monkeypatch):
+    limit = 512 * 1024
+
+    class OversizedResponse(_FakeHttpResponse):
+        @property
+        def content(self):
+            raise AssertionError("the probe must not buffer response.content")
+
+        def iter_bytes(self, *, chunk_size):
+            assert chunk_size <= limit
+            yield b"A" * (limit - len(b"Clip Extractor")) + b"Clip Extractor"
+            raise AssertionError("the probe read beyond its 512 KiB limit")
+
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        lambda *_args, **_kwargs: OversizedResponse(b""),
+    )
+
+    assert launcher._is_clip_extractor_page_available() is True
+
+
+def test_page_probe_stops_a_slow_infinite_stream_at_deadline(monkeypatch):
+    chunks_read = []
+
+    class SlowResponse(_FakeHttpResponse):
+        def iter_bytes(self, *, chunk_size):
+            assert chunk_size <= 512 * 1024
+            for index in range(10):
+                chunks_read.append(index)
+                yield b"x"
+
+    response = SlowResponse(b"")
+    ticks = iter((0.0, 0.1, 0.2, 0.4, 0.6))
+    monkeypatch.setitem(
+        launcher.__dict__,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks)),
+    )
+    monkeypatch.setattr(
+        httpx,
+        "stream",
+        lambda *_args, **_kwargs: response,
+    )
+
+    assert launcher._is_clip_extractor_page_available(timeout=0.5) is False
+    assert chunks_read == [0, 1]
+    assert response.closed is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.InvalidURL("bad local URL"),
+        ImportError("optional transport is unavailable"),
+        RuntimeError("transport setup failed"),
+    ],
+)
+def test_page_probe_never_raises(monkeypatch, error):
+    def fail_probe(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(httpx, "stream", fail_probe)
+
+    assert launcher._is_clip_extractor_page_available() is False
 
 
 def test_existing_instance_is_killed_before_restart(monkeypatch, capsys):
