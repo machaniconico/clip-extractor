@@ -1,6 +1,7 @@
 """OBS stream-start behavior for automatic X announcements."""
 
 import ast
+import base64
 import json
 import os
 import queue
@@ -16,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import web_app
+import secret_store
 import x_post
 from x_post import XCredentials, XPostError, XPostResult
 
@@ -1436,7 +1438,7 @@ def test_x_credentials_sidecar_is_atomically_created_owner_only(
         XCredentials("key", "key-secret", "token", "token-secret")
     )
 
-    assert json.loads(credentials_file.read_text(encoding="utf-8")) == {
+    assert json.loads(secret_store.read_secret_text(credentials_file)) == {
         "api_key": "key",
         "api_key_secret": "key-secret",
         "access_token": "token",
@@ -1448,6 +1450,98 @@ def test_x_credentials_sidecar_is_atomically_created_owner_only(
     if os.name == "posix":
         assert credentials_file.stat().st_mode & 0o777 == 0o600
     assert list(tmp_path.glob("*.tmp")) == []
+
+
+@pytest.mark.parametrize("encrypted", [False, True])
+def test_load_x_credentials_supports_encrypted_and_legacy_sidecars(
+    monkeypatch,
+    tmp_path,
+    encrypted,
+):
+    credentials_file = tmp_path / ".x_credentials.json"
+    expected = {
+        "api_key": "saved-key",
+        "api_key_secret": "saved-key-secret",
+        "access_token": "saved-token",
+        "access_token_secret": "saved-token-secret",
+    }
+    payload = json.dumps(expected)
+    monkeypatch.setattr(web_app, "X_CREDENTIALS_FILE", credentials_file)
+
+    if encrypted:
+        def protect(data: bytes) -> bytes:
+            return bytes(value ^ 0x5A for value in data)
+
+        monkeypatch.setattr(
+            secret_store,
+            "is_encryption_available",
+            lambda: True,
+        )
+        monkeypatch.setattr(secret_store, "_protect_data", protect)
+        monkeypatch.setattr(secret_store, "_unprotect_data", protect)
+        secret_store.write_secret_text(credentials_file, payload)
+    else:
+        monkeypatch.setattr(
+            secret_store,
+            "is_encryption_available",
+            lambda: False,
+        )
+        credentials_file.write_text(payload, encoding="utf-8")
+
+    assert web_app.load_x_credentials().as_dict() == expected
+
+
+def test_unreadable_x_credentials_are_preserved_when_obs_settings_are_saved(
+    monkeypatch,
+    tmp_path,
+):
+    import obs_integration
+
+    credentials_file = tmp_path / ".x_credentials.json"
+    envelope = "CLIPSEC1:" + base64.b64encode(b"moved-profile").decode("ascii")
+    credentials_file.write_text(envelope, encoding="utf-8")
+    original_payload = credentials_file.read_bytes()
+    monkeypatch.setattr(web_app, "SETTINGS_FILE", tmp_path / "settings.json")
+    monkeypatch.setattr(web_app, "OBS_PASSWORD_FILE", tmp_path / ".obs_password")
+    monkeypatch.setattr(web_app, "X_CREDENTIALS_FILE", credentials_file)
+    monkeypatch.setattr(secret_store, "is_encryption_available", lambda: True)
+    monkeypatch.setattr(
+        secret_store,
+        "_unprotect_data",
+        lambda _payload: (_ for _ in ()).throw(OSError("private DPAPI detail")),
+    )
+    monkeypatch.setattr(
+        obs_integration,
+        "create_watcher",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unreadable credentials must stop before watcher creation"
+        ),
+    )
+
+    status = web_app.start_obs_watch(
+        "websocket",
+        "localhost",
+        4455,
+        "",
+        False,
+        "record",
+        "",
+        False,
+        False,
+        5,
+        "combined",
+        False,
+        "gemini",
+        "large-v3",
+        "",
+    )
+
+    assert status == web_app.SECRET_UNAVAILABLE_UI_MESSAGE
+    assert "private DPAPI detail" not in status
+    assert credentials_file.read_bytes() == original_payload
+    assert json.loads(web_app.SETTINGS_FILE.read_text(encoding="utf-8"))[
+        "obs_host"
+    ] == "localhost"
 
 
 def test_compliance_doc_records_conflicting_limits_and_console_authority():

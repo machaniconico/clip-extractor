@@ -4,6 +4,7 @@
 import argparse
 import subprocess
 import sys
+import time
 import webbrowser
 import threading
 from pathlib import Path, PureWindowsPath
@@ -23,15 +24,39 @@ PROCESS_EXIT_TIMEOUT = 5.0
 
 def _is_clip_extractor_page_available(*, url=SERVER_URL, timeout=0.75):
     """Return whether ``url`` is an already-running Clip Extractor page."""
-    import urllib.error
-    import urllib.request
-
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
-            if getattr(response, "status", None) != 200:
+        import httpx
+        import urllib.parse
+
+        if urllib.parse.urlparse(url).scheme.lower() not in {"http", "https"}:
+            return False
+        body_limit = 512 * 1024
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        page = bytearray()
+        with httpx.stream(
+            "GET",
+            url,
+            timeout=timeout,
+            follow_redirects=True,
+            trust_env=False,
+        ) as response:
+            if response.status_code != 200:
                 return False
-            page = response.read(512 * 1024)
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            chunks = iter(response.iter_bytes(chunk_size=64 * 1024))
+            while len(page) < body_limit:
+                if time.monotonic() >= deadline:
+                    return False
+                try:
+                    chunk = next(chunks)
+                except StopIteration:
+                    break
+                if time.monotonic() >= deadline:
+                    return False
+                remaining = body_limit - len(page)
+                page.extend(chunk[:remaining])
+                if b"Clip Extractor" in page:
+                    return True
+    except Exception:
         return False
     return b"Clip Extractor" in page
 

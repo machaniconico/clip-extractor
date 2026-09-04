@@ -10,14 +10,13 @@ import subprocess
 import traceback
 import inspect
 import threading
-import tempfile
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypeVar
 
 # Gradio temporarily switches Matplotlib backends around every event.  On
 # Windows, Matplotlib's automatic choice can be QtAgg, which loads PyQt5's
@@ -27,6 +26,7 @@ from typing import Callable
 os.environ["MPLBACKEND"] = "Agg"
 
 import gradio as gr
+import secret_store
 from x_post import (
     DEFAULT_X_POST_TEMPLATE,
     XCredentials,
@@ -106,13 +106,17 @@ logger.info(f"Log file: {LOG_FILE}")
 def get_system_fonts():
     """Get list of installed font family names from the system."""
     try:
-        ps_cmd = (
-            'powershell -NoProfile -Command "'
+        ps_script = (
             "[System.Reflection.Assembly]::LoadWithPartialName('System.Drawing') | Out-Null; "
             "(New-Object System.Drawing.Text.InstalledFontCollection).Families | "
-            "ForEach-Object { $_.Name }\""
+            "ForEach-Object { $_.Name }"
         )
-        result = subprocess.run(ps_cmd, capture_output=True, text=True, shell=True, timeout=10)
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_script],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
         if result.returncode == 0 and result.stdout.strip():
             fonts = sorted(set(result.stdout.strip().splitlines()))
             return fonts
@@ -180,6 +184,10 @@ SETTINGS_FILE = Path(__file__).parent / "default_settings.json"
 GEMINI_KEY_FILE = Path(__file__).parent / ".gemini_key"
 OBS_PASSWORD_FILE = Path(__file__).parent / ".obs_password"
 X_CREDENTIALS_FILE = Path(__file__).parent / ".x_credentials.json"
+SECRET_UNAVAILABLE_UI_MESSAGE = (
+    "保存済みの値を読み取れませんでした。再入力してください。"
+)
+_SecretValue = TypeVar("_SecretValue")
 _settings_file_lock = threading.RLock()
 WEB_SERVER_HOST = "127.0.0.1"
 X_SECRET_SETTING_KEYS = frozenset(
@@ -206,6 +214,18 @@ def _serialize_settings_update(func):
             return func(*args, **kwargs)
 
     return _locked
+
+
+def _read_secret_for_ui(
+    loader: Callable[[], _SecretValue],
+    fallback: _SecretValue,
+) -> _SecretValue:
+    """Map an unavailable local secret to fixed, non-sensitive UI feedback."""
+    try:
+        return loader()
+    except secret_store.SecretUnavailableError:
+        gr.Warning(SECRET_UNAVAILABLE_UI_MESSAGE)
+        return fallback
 
 
 REMOVED_MEDIA_SETTING_KEYS = frozenset(
@@ -409,13 +429,9 @@ def load_gemini_api_key(env_var: str = "GEMINI_API_KEY") -> str:
     is kept as a fallback so CI / fresh installs without a saved file
     still work.
     """
-    if GEMINI_KEY_FILE.exists():
-        try:
-            saved = GEMINI_KEY_FILE.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            saved = ""
-        if saved:
-            return saved
+    saved = secret_store.read_secret_text(GEMINI_KEY_FILE).strip()
+    if saved:
+        return saved
     val = os.environ.get(env_var, "").strip()
     if val:
         return val
@@ -446,28 +462,24 @@ def save_gemini_api_key(key_text: str):
     text = (key_text or "").strip()
     try:
         if text:
-            GEMINI_KEY_FILE.write_text(text, encoding="utf-8")
+            secret_store.write_secret_text(GEMINI_KEY_FILE, text)
             gr.Info("API キーを .gemini_key に保存しました。次回起動時から自動で読み込まれます。")
             return gr.update(value="", placeholder="保存済み。変更時のみ新しいキーを入力")
         elif GEMINI_KEY_FILE.exists():
-            GEMINI_KEY_FILE.unlink()
+            secret_store.delete_secret(GEMINI_KEY_FILE)
             gr.Info("API キーをクリアしました (.gemini_key を削除)。")
             return gr.update(value="", placeholder="OpenAI / Gemini のAPIキーを入力")
         else:
             gr.Warning("保存する API キーが空です。textbox にキーを入力してから押してください。")
-    except Exception as exc:
-        gr.Warning(f"API キーの保存に失敗しました: {exc}")
+    except Exception:
+        logger.exception("Failed to save or delete the Gemini API key")
+        gr.Warning("API キーの保存に失敗しました。")
     return gr.update(value="")
 
 
 def load_obs_password() -> str:
     """Load the local OBS secret without placing it in tracked settings."""
-    if not OBS_PASSWORD_FILE.exists():
-        return ""
-    try:
-        return OBS_PASSWORD_FILE.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return ""
+    return secret_store.read_secret_text(OBS_PASSWORD_FILE)
 
 
 def _obs_password_ui_copy(has_saved_password: bool) -> tuple[str, str]:
@@ -490,19 +502,22 @@ def _obs_password_ui_copy(has_saved_password: bool) -> tuple[str, str]:
 def _save_obs_password(password: str) -> None:
     """Persist the OBS secret locally, or remove it when cleared."""
     value = password or ""
-    if value:
-        OBS_PASSWORD_FILE.write_text(value, encoding="utf-8")
-    elif OBS_PASSWORD_FILE.exists():
-        OBS_PASSWORD_FILE.unlink()
+    try:
+        if value:
+            secret_store.write_secret_text(OBS_PASSWORD_FILE, value)
+        else:
+            secret_store.delete_secret(OBS_PASSWORD_FILE)
+    except Exception:
+        operation = "save" if value else "delete"
+        logger.exception("Failed to %s the saved OBS password", operation)
+        raise
 
 
 def load_x_credentials() -> XCredentials:
     """Load saved X secrets without putting them in normal app settings."""
-    if not X_CREDENTIALS_FILE.exists():
-        return XCredentials()
     try:
-        data = json.loads(X_CREDENTIALS_FILE.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        data = json.loads(secret_store.read_secret_text(X_CREDENTIALS_FILE))
+    except json.JSONDecodeError:
         return XCredentials()
     if not isinstance(data, dict):
         return XCredentials()
@@ -541,34 +556,20 @@ def _save_x_credentials(credentials: XCredentials) -> None:
     """Persist X secrets in the gitignored local sidecar file."""
     if not isinstance(credentials, XCredentials):
         raise TypeError("X認証情報の形式が不正です")
-    if credentials.any_set():
-        if not credentials.is_complete():
-            raise ValueError("X認証情報は4項目すべて入力してください")
-        temp_fd, temp_name = tempfile.mkstemp(
-            prefix=f"{X_CREDENTIALS_FILE.name}.",
-            suffix=".tmp",
-            dir=str(X_CREDENTIALS_FILE.parent),
-        )
-        try:
-            with os.fdopen(temp_fd, "w", encoding="utf-8", newline="\n") as handle:
-                handle.write(
-                    json.dumps(credentials.as_dict(), ensure_ascii=False)
-                )
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_name, X_CREDENTIALS_FILE)
-        except Exception:
-            try:
-                os.close(temp_fd)
-            except OSError:
-                pass
-            try:
-                os.unlink(temp_name)
-            except OSError:
-                pass
-            raise
-    elif X_CREDENTIALS_FILE.exists():
-        X_CREDENTIALS_FILE.unlink()
+    try:
+        if credentials.any_set():
+            if not credentials.is_complete():
+                raise ValueError("X認証情報は4項目すべて入力してください")
+            secret_store.write_secret_text(
+                X_CREDENTIALS_FILE,
+                json.dumps(credentials.as_dict(), ensure_ascii=False),
+            )
+        else:
+            secret_store.delete_secret(X_CREDENTIALS_FILE)
+    except Exception:
+        operation = "save" if credentials.any_set() else "delete"
+        logger.exception("Failed to %s the saved X credentials", operation)
+        raise
 
 
 def load_defaults() -> dict:
@@ -669,7 +670,13 @@ def _save_obs_connection_defaults(
         json.dumps(data, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    _save_obs_password(password if save_password else "")
+    if save_password:
+        # A checked box plus a blank value means "reuse/preserve saved".
+        # Clearing is explicit: the user unchecks the save box.
+        if password:
+            _save_obs_password(password)
+    else:
+        _save_obs_password("")
     if x_credentials is not None:
         _save_x_credentials(x_credentials)
 
@@ -1452,6 +1459,13 @@ def detect_phase(
         )
         return session, status_md, gr.update(visible=True)
 
+    except secret_store.SecretUnavailableError:
+        logger.warning("Detection stopped because the saved API key is unavailable")
+        return (
+            {"logs": logs},
+            SECRET_UNAVAILABLE_UI_MESSAGE,
+            gr.update(visible=False),
+        )
     except subprocess.CalledProcessError as e:
         err_detail = f"Command failed: {e.cmd}\nReturn code: {e.returncode}"
         if e.stdout:
@@ -2458,6 +2472,13 @@ def _run_obs_detect_render(
             chapters_text=chapters_text,
             youtube_appended=youtube_appended,
         )
+    except secret_store.SecretUnavailableError:
+        logger.warning("OBS pipeline stopped because the saved API key is unavailable")
+        return ObsPipelineOutcome(
+            log=SECRET_UNAVAILABLE_UI_MESSAGE,
+            success=False,
+            error=SECRET_UNAVAILABLE_UI_MESSAGE,
+        )
     except Exception as e:
         tb = traceback.format_exc()
         logger.error(f"OBS auto pipeline error: {e}\n{tb}")
@@ -2857,7 +2878,10 @@ def _obs_make_x_post_callbacks(
                 )
             except Exception as exc:
                 logger.warning("X post composer open failed: %s", exc)
-                _obs_append_status(f"X投稿作成画面を開けませんでした: {exc}")
+                _obs_append_status(
+                    "X投稿作成画面を開けませんでした。"
+                    "ブラウザの設定を確認し、手動で投稿してください"
+                )
 
         # All production generation changes use _obs_watcher_lock. Holding it
         # through the external write closes the old-generation/new-generation
@@ -2990,8 +3014,16 @@ def _obs_make_x_post_callbacks(
                     try:
                         auth = youtube_api.check_auth_status()
                     except Exception as exc:
+                        logger.warning(
+                            "X post YouTube auth check failed: %s",
+                            exc,
+                            exc_info=True,
+                        )
                         auth = {"authenticated": False}
-                        _obs_append_status(f"X投稿用のYouTube確認をスキップ: {exc}")
+                        _obs_append_status(
+                            "X投稿用のYouTube確認をスキップしました。"
+                            "Settings のYouTube認証設定を確認してください"
+                        )
                     if auth.get("authenticated"):
                         service = youtube_api.get_youtube_service()
                         started_after = (
@@ -4244,11 +4276,16 @@ def _start_obs_watch_impl(
         msg = "X認証情報は4項目すべて入力してください（保存済みの値は変更していません）"
         _obs_append_status(msg)
         return msg
-    effective_x_credentials = (
-        entered_x_credentials
-        if entered_x_credentials.is_complete()
-        else load_x_credentials()
-    )
+    secret_unavailable = False
+    try:
+        effective_x_credentials = (
+            entered_x_credentials
+            if entered_x_credentials.is_complete()
+            else load_x_credentials()
+        )
+    except secret_store.SecretUnavailableError:
+        effective_x_credentials = XCredentials()
+        secret_unavailable = True
     _apply_obs_x_post_runtime_settings(
         bool(x_post_on_stream_start),
         bool(x_post_auto),
@@ -4281,16 +4318,21 @@ def _start_obs_watch_impl(
         )
 
     entered_password = password or ""
+    try:
+        effective_password = (
+            entered_password
+            if entered_password or not save_password
+            else load_obs_password()
+        )
+    except secret_store.SecretUnavailableError:
+        effective_password = ""
+        secret_unavailable = True
     config = {
         "host": host or "localhost",
         "port": int(port) if port not in (None, "") else 4455,
         # Only a checked save box may reuse the server-side secret. The secret
         # itself is never sent to the browser as a component initial value.
-        "password": (
-            entered_password
-            if entered_password or not save_password
-            else load_obs_password()
-        ),
+        "password": effective_password,
         "stop_event": source_mode,
         "watch_folder": watch_folder or "",
     }
@@ -4315,10 +4357,14 @@ def _start_obs_watch_impl(
                 else None
             ),
         )
-    except Exception as exc:
-        msg = f"OBS連携設定の保存に失敗しました: {exc}"
+    except Exception:
+        logger.exception("Failed to save OBS connection settings or secrets")
+        msg = "OBS連携設定の保存に失敗しました。"
         _obs_append_status(msg)
         return msg
+    if secret_unavailable:
+        _obs_append_status(SECRET_UNAVAILABLE_UI_MESSAGE)
+        return SECRET_UNAVAILABLE_UI_MESSAGE
     if youtube_linked_mode and auto_process:
         youtube_requirement = (
             "OBS録画の保険とタイムスタンプ反映"
@@ -4328,7 +4374,12 @@ def _start_obs_watch_impl(
         try:
             auth = youtube_api.check_auth_status()
         except Exception as exc:
-            msg = f"YouTube認証状態を確認できません: {exc}"
+            logger.exception("YouTube auth status check failed")
+            msg = (
+                "YouTube認証状態を確認できません。"
+                "Settings のYouTube認証設定を確認し、"
+                "もう一度お試しください"
+            )
             _obs_append_status(msg)
             return msg
         if not auth.get("configured"):
@@ -4704,7 +4755,7 @@ def start_obs_watch_from_defaults(
                 host=host,
                 port=port,
                 password="",
-                save_password=bool(load_obs_password()),
+                save_password=OBS_PASSWORD_FILE.exists(),
                 stop_event=settings.get("obs_stop_event", "record"),
                 watch_folder=settings.get("obs_watch_folder", ""),
                 auto_process=bool(settings.get("obs_auto_process", True)),
@@ -4730,6 +4781,11 @@ def start_obs_watch_from_defaults(
                     "",
                 ),
             )
+        except secret_store.SecretUnavailableError:
+            logger.warning("OBS startup stopped because a saved secret is unavailable")
+            msg = SECRET_UNAVAILABLE_UI_MESSAGE
+            _obs_append_status(msg)
+            return msg
         except Exception as exc:
             logger.exception("OBS startup auto-connect failed")
             msg = f"OBS自動連携の開始に失敗しました: {exc}"
@@ -5172,6 +5228,11 @@ def _legacy_one_shot_handler(
             chapters_text=chapters_text,
         ).as_gradio_outputs()
 
+    except secret_store.SecretUnavailableError:
+        logger.warning("Processing stopped because the saved API key is unavailable")
+        return ProcessResult(
+            log=SECRET_UNAVAILABLE_UI_MESSAGE,
+        ).as_gradio_outputs()
     except subprocess.CalledProcessError as e:
         err_detail = f"Command failed: {e.cmd}\nReturn code: {e.returncode}"
         if e.stdout:
@@ -6061,7 +6122,9 @@ def create_ui():
                         (
                             obs_password_placeholder,
                             obs_password_info,
-                        ) = _obs_password_ui_copy(bool(load_obs_password()))
+                        ) = _obs_password_ui_copy(
+                            bool(_read_secret_for_ui(load_obs_password, ""))
+                        )
                         with gr.Row(elem_classes="obs-password-heading"):
                             gr.HTML(
                                 "<span>WebSocket Password</span>",
@@ -6158,7 +6221,9 @@ def create_ui():
                         ),
                     )
                     x_credentials_placeholder, x_credentials_info = (
-                        _x_credentials_ui_copy(load_x_credentials())
+                        _x_credentials_ui_copy(
+                            _read_secret_for_ui(load_x_credentials, XCredentials())
+                        )
                     )
                     with gr.Row():
                         obs_x_api_key = gr.Textbox(
@@ -6464,7 +6529,9 @@ def create_ui():
                             allow_custom_value=True,
                             info=_ai_model_info(),
                         )
-                        has_saved_api_key = bool(load_gemini_api_key())
+                        has_saved_api_key = bool(
+                            _read_secret_for_ui(load_gemini_api_key, "")
+                        )
                         api_key = gr.Textbox(
                             label="APIキー",
                             value="",
