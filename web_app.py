@@ -2878,7 +2878,10 @@ def _obs_make_x_post_callbacks(
                 )
             except Exception as exc:
                 logger.warning("X post composer open failed: %s", exc)
-                _obs_append_status(f"X投稿作成画面を開けませんでした: {exc}")
+                _obs_append_status(
+                    "X投稿作成画面を開けませんでした。"
+                    "ブラウザの設定を確認し、手動で投稿してください"
+                )
 
         # All production generation changes use _obs_watcher_lock. Holding it
         # through the external write closes the old-generation/new-generation
@@ -3011,8 +3014,16 @@ def _obs_make_x_post_callbacks(
                     try:
                         auth = youtube_api.check_auth_status()
                     except Exception as exc:
+                        logger.warning(
+                            "X post YouTube auth check failed: %s",
+                            exc,
+                            exc_info=True,
+                        )
                         auth = {"authenticated": False}
-                        _obs_append_status(f"X投稿用のYouTube確認をスキップ: {exc}")
+                        _obs_append_status(
+                            "X投稿用のYouTube確認をスキップしました。"
+                            "Settings のYouTube認証設定を確認してください"
+                        )
                     if auth.get("authenticated"):
                         service = youtube_api.get_youtube_service()
                         started_after = (
@@ -4363,7 +4374,12 @@ def _start_obs_watch_impl(
         try:
             auth = youtube_api.check_auth_status()
         except Exception as exc:
-            msg = f"YouTube認証状態を確認できません: {exc}"
+            logger.exception("YouTube auth status check failed")
+            msg = (
+                "YouTube認証状態を確認できません。"
+                "Settings のYouTube認証設定を確認し、"
+                "もう一度お試しください"
+            )
             _obs_append_status(msg)
             return msg
         if not auth.get("configured"):
