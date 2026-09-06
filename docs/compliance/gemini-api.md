@@ -45,7 +45,7 @@ Clip Extractor adds transcription, highlight selection, video rendering, subtitl
 - A saved API key is resolved only on the server when an analysis request runs. It is never used as the initial value of the Gradio textbox or embedded in the browser configuration.
 - Both supported launch paths bind the web UI to `127.0.0.1`; other devices on the LAN cannot open the app or trigger requests through it.
 - Gemini requests have a 300-second HTTP timeout and are not automatically retried, limiting both indefinitely stalled workers and accidental duplicate paid requests.
-- `.gemini_key` remains plaintext at rest. It is gitignored, but encrypted credential storage is still a release decision below.
+- `.gemini_key` is written through `secret_store.py`: user-scoped DPAPI encryption on Windows (the only supported OS), with plaintext existing only on unsupported platforms. It is gitignored either way.
 
 ## Pricing snapshot
 
@@ -82,12 +82,12 @@ The distribution build should disable arbitrary model IDs and migrate unsupporte
 
 Before public sale or paid distribution:
 
-- Publish product terms and a privacy policy covering Google, YouTube, Drive, local files, logs, and retention. Drafted as `docs/TERMS.md` and `docs/PRIVACY.md`; the placeholders for distributor identity, contact, support scope, liability cap, and governing law are unresolved and human legal review is outstanding.
-- Decide the sales regions and implement the age/region/Paid-Service restrictions required by the Gemini terms.
-- Replace or formally accept the risk of plaintext `.gemini_key` storage; the current file is gitignored but not encrypted.
-- Build the distribution profile and verify that secrets, tokens, credentials, logs, outputs, and prior ZIPs are absent from the artifact.
-- Complete dependency/SBOM, OSS/font/media license, secret, SAST, and artifact vulnerability reviews for the exact release artifact.
+- [x] Publish product terms and a privacy policy covering Google, YouTube, Drive, local files, logs, and retention. `docs/TERMS.md` and `docs/PRIVACY.md` are complete for the decided model (individual distributor `machaniconico`, free of charge, GitHub Release only, Japan-resident users aged 18+, Windows 10/11 only, support via GitHub Issues, Japanese law, distributor's home-district court). Human legal review is still outstanding (below).
+- [x] Decide the sales regions and implement the age/region/Paid-Service restrictions required by the Gemini terms. Decided 2026-09-07: distribution is limited to Japan-resident users aged 18 or over, stated in `docs/TERMS.md` §1 and `docs/PRIVACY.md` §6 and in `README.md`. EEA/Switzerland/UK users are out of scope, so no Paid-Service gating is needed.
+- [x] Replace or formally accept the risk of plaintext `.gemini_key` storage. Replaced: `secret_store.py` encrypts it with user-scoped DPAPI on Windows, and support is declared Windows-only, so the plaintext fallback applies only to unsupported platforms.
+- [x] Build the distribution profile and verify that secrets, tokens, credentials, logs, outputs, and prior ZIPs are absent from the artifact. `.github/workflows/release.yml` builds the ZIP with `git archive` (gitignored files can never be included), rejects any entry matching the secret/log/output deny-list, and runs `tools/check_secrets.py --directory` on the extracted archive.
+- [x] Complete dependency/SBOM, OSS/font/media license, secret, SAST, and artifact vulnerability reviews for the exact release artifact. The release workflow generates the SBOM from the extracted archive, checks `THIRD_PARTY_NOTICES.md` against it, and runs `pip-audit` and `bandit` on the extracted archive before attaching assets to a draft release.
 - Re-check current API terms, prices, model lifecycle, rate limits, and data handling.
-- Obtain human legal review for consumer-protection, privacy, copyright, store, refund, and jurisdiction-specific obligations.
+- Obtain human legal review for consumer-protection, privacy, copyright, store, refund, and jurisdiction-specific obligations. Points to raise: the liability clause in `docs/TERMS.md` §8 (free software, cap of 0 yen, carve-out for intent/gross negligence, Consumer Contract Act override), and the venue clause in §12 (distributor's home-district court).
 
 `LEGAL-REVIEW: HUMAN-REVIEW`
