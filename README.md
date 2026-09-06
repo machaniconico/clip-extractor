@@ -106,6 +106,7 @@ SettingsのAIプロバイダーに `local` が追加されます。モデル欄�
 pip install -r requirements.txt
 ```
 
+配布物は [GitHub Release](https://github.com/machaniconico/clip-extractor/releases) から ZIP を取得してください。サポート対象OSは Windows 10 / 11 のみで、対象は日本国内に居住する18歳以上の方です（詳細は [利用規約](docs/TERMS.md)）。
 Windows では同梱の `setup.bat` でも環境構築できます。
 `Clip Extractor.bat` は起動のたびに yt-dlp を自動更新します。オフラインなど更新に失敗した場合は `setup.bat` を再実行してください。
 
