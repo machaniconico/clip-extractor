@@ -105,6 +105,7 @@ pip install -r requirements.txt
 ```
 
 Windows では同梱の `setup.bat` でも環境構築できます。
+`Clip Extractor.bat` は起動のたびに yt-dlp を自動更新します。オフラインなど更新に失敗した場合は `setup.bat` を再実行してください。
 
 > 開発時は仮想環境を推奨します。テストは `.venv` 前提で `.venv/bin/python -m pytest` で実行してください（後述）。
 

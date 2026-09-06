@@ -23,6 +23,11 @@ pause
 exit /b 1
 
 :found_python
+echo yt-dlp を最新版に更新しています...
+%PYTHON_CMD% -m pip install --upgrade --quiet --disable-pip-version-check "yt-dlp[default]" >nul 2>&1
+if errorlevel 1 (
+    echo [WARN] yt-dlp の更新に失敗しました。オフラインの場合は無視して構いません。
+)
 echo Clip Extractor を起動しています...
 echo ブラウザが自動で開きます。閉じるにはこのウィンドウを閉じてください。
 echo.

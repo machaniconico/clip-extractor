@@ -67,4 +67,4 @@ def test_requirements_install_ytdlp_default_dependencies():
         if line.strip() and not line.lstrip().startswith("#")
     }
 
-    assert "yt-dlp[default]>=2026.7.4" in lines
+    assert "yt-dlp[default]>=2026.8.19" in lines
