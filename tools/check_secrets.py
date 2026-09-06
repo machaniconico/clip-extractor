@@ -182,13 +182,19 @@ def _credential_findings(path: str, text: str) -> list[str]:
     return sorted(set(findings), key=str.casefold)
 
 
-def run_check(root: Path) -> list[str]:
+def run_check(root: Path, *, directory: bool = False) -> list[str]:
     findings: list[str] = []
-    files, error = tracked_files(root)
-    if error:
-        return [error]
+    if directory:
+        if not root.is_dir():
+            return [f"not a directory: {root}"]
+        files = sorted(path.relative_to(root).as_posix() for path in root.rglob("*")
+                       if path.is_file() or path.is_symlink())
+    else:
+        files, error = tracked_files(root)
+        if error:
+            return [error]
 
-    for sidecar in PROTECTED_SIDECARS:
+    for sidecar in (() if directory else PROTECTED_SIDECARS):
         for candidate in (sidecar, f"{sidecar}.probe.tmp"):
             if not _is_ignored(root, candidate):
                 findings.append(f"{candidate} is missing from .gitignore")
@@ -197,6 +203,9 @@ def run_check(root: Path) -> list[str]:
         if _is_protected_sidecar_name(Path(path).name):
             findings.append(f"protected secret sidecar is tracked: {path}")
         absolute_path = root / path
+        if directory and absolute_path.is_symlink():
+            findings.append(f"symlink is not allowed in distribution: {path}")
+            continue
         try:
             data = absolute_path.read_bytes()
         except OSError as exc:
@@ -238,9 +247,15 @@ def main(argv: list[str] | None = None) -> int:
         default=REPOSITORY_ROOT,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--directory", type=Path,
+        help="Scan all files in an extracted distribution without requiring Git.",
+    )
     args = parser.parse_args(argv)
+    if args.directory is not None:
+        args.root = args.directory
     root = args.root.resolve()
-    findings = run_check(root)
+    findings = run_check(root, directory=args.directory is not None)
     if findings:
         for finding in findings:
             print(f"check_secrets: {finding}", file=sys.stderr)

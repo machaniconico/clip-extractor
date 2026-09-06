@@ -12,3 +12,9 @@
 *.ttf   binary
 *.otf   binary
 *.ttc   binary
+
+# Internal automation and agent state are not part of the distribution.
+.github/ export-ignore
+.codex-omc/ export-ignore
+.omc/ export-ignore
+.claude/ export-ignore

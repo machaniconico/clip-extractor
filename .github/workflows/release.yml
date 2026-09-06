@@ -1,0 +1,118 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag name
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate existing tag and build archive
+        shell: bash
+        run: |
+          [[ "$TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { echo "Unsafe tag name"; exit 1; }
+          git check-ref-format "refs/tags/$TAG"
+          git show-ref --verify "refs/tags/$TAG"
+          git rev-parse --verify "refs/tags/$TAG^{commit}"
+          mkdir -p dist
+          git archive --format=zip --prefix="clip-extractor-${TAG}/" -o "dist/clip-extractor-${TAG}.zip" "refs/tags/$TAG"
+
+      - name: Inspect ZIP entries and verify CRLF
+        run: |
+          python - <<'PYTHON'
+          import fnmatch
+          import os
+          from pathlib import Path, PurePosixPath
+          import zipfile
+
+          tag = os.environ["TAG"]
+          prefix = f"clip-extractor-{tag}"
+          destination = Path(os.environ["RUNNER_TEMP"]) / "release-extracted"
+          forbidden = (
+              ".gemini_key", ".obs_password", ".x_credentials.json",
+              "credentials.json", "token.json", "token.pickle", "youtube_token.json",
+              "*.log", "output", "output_*", "*.zip", ".env", ".venv", "__pycache__",
+              ".github", ".codex-omc", ".omc", ".claude",
+          )
+          with zipfile.ZipFile(f"dist/{prefix}.zip") as archive:
+              for entry in archive.infolist():
+                  path = PurePosixPath(entry.filename)
+                  if path.is_absolute() or ".." in path.parts or "\\" in entry.filename:
+                      raise SystemExit(f"Unsafe ZIP entry: {entry.filename}")
+                  if not path.parts or path.parts[0] != prefix:
+                      raise SystemExit(f"Unexpected ZIP prefix: {entry.filename}")
+                  if any(fnmatch.fnmatchcase(part.casefold(), pattern)
+                         for part in path.parts[1:] for pattern in forbidden):
+                      raise SystemExit(f"Forbidden ZIP entry: {entry.filename}")
+                  if (entry.external_attr >> 16) & 0o170000 == 0o120000:
+                      raise SystemExit(f"Symlink ZIP entry: {entry.filename}")
+              archive.extractall(destination)
+          root = destination / prefix
+          for name in ("setup.bat", "Clip Extractor.bat"):
+              data = (root / name).read_bytes()
+              remainder = data.replace(b"\r\n", b"")
+              if b"\r\n" not in data or b"\n" in remainder or b"\r" in remainder:
+                  raise SystemExit(f"CRLF verification failed: {name}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as environment:
+              environment.write(f"RELEASE_DIR={root}\n")
+          print("ZIP entry inspection and CRLF verification passed.")
+          PYTHON
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies and pinned scanners
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r "$RELEASE_DIR/requirements.lock"
+          pip install "pip-audit==2.9.0" "bandit==1.8.6" "cyclonedx-bom==7.3.1"
+
+      - name: Check secrets in final distribution
+        run: python tools/check_secrets.py --directory "$RELEASE_DIR"
+
+      - name: Check third-party notices
+        run: python "$RELEASE_DIR/tools/generate_notices.py" --check
+
+      - name: Generate SBOM from release environment
+        run: python "$RELEASE_DIR/tools/generate_sbom.py" --output "dist/clip-extractor-${TAG}.sbom.cdx.json"
+
+      - name: Audit final distribution dependencies
+        run: pip-audit -r "$RELEASE_DIR/requirements.lock"
+
+      - name: Run SAST on final distribution
+        run: bandit -r "$RELEASE_DIR" -x "$RELEASE_DIR/tests" -ll
+
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: sha256sum "clip-extractor-${TAG}.zip" "clip-extractor-${TAG}.sbom.cdx.json" > SHA256SUMS.txt
+
+      - name: Create draft release with verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" --verify-tag --draft --title "Clip Extractor $TAG" --generate-notes \
+            "dist/clip-extractor-${TAG}.zip" \
+            "dist/clip-extractor-${TAG}.sbom.cdx.json" \
+            dist/SHA256SUMS.txt
