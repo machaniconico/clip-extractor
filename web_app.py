@@ -6191,6 +6191,8 @@ def create_ui():
                         "告知文を作成します。自動投稿をONにして認証情報4項目を"
                         "設定するとX APIから投稿します。認証情報が未設定または"
                         "API投稿に失敗した場合は手動投稿画面を開きます。"
+                        "料金・認証情報の保存場所・停止/失効の手順は "
+                        "`docs/TERMS.md` と `docs/PRIVACY.md` を参照してください。"
                     )
                     obs_x_post_on_stream_start = gr.Checkbox(
                         label="配信開始時にXへ告知する",
@@ -6542,6 +6544,11 @@ def create_ui():
                             ),
                             type="password",
                             info=_api_key_info(),
+                        )
+                        gr.Markdown(
+                            "Gemini の従量課金・無料枠のデータ利用・認証情報の保存場所・"
+                            "停止/失効の手順は `docs/TERMS.md` と "
+                            "`docs/PRIVACY.md` を参照してください。"
                         )
                         save_api_key_btn = gr.Button(
                             "💾 このキーを保存 (.gemini_key)",

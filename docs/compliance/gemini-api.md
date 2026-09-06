@@ -82,7 +82,7 @@ The distribution build should disable arbitrary model IDs and migrate unsupporte
 
 Before public sale or paid distribution:
 
-- Publish product terms and a privacy policy covering Google, YouTube, Drive, local files, logs, and retention.
+- Publish product terms and a privacy policy covering Google, YouTube, Drive, local files, logs, and retention. Drafted as `docs/TERMS.md` and `docs/PRIVACY.md`; the placeholders for distributor identity, contact, support scope, liability cap, and governing law are unresolved and human legal review is outstanding.
 - Decide the sales regions and implement the age/region/Paid-Service restrictions required by the Gemini terms.
 - Replace or formally accept the risk of plaintext `.gemini_key` storage; the current file is gitignored but not encrypted.
 - Build the distribution profile and verify that secrets, tokens, credentials, logs, outputs, and prior ZIPs are absent from the artifact.
