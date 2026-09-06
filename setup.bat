@@ -128,6 +128,13 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+echo [INFO] Updating yt-dlp to the latest version...
+py -m pip install --upgrade "yt-dlp[default]"
+if errorlevel 1 (
+    echo [WARN] yt-dlp update failed. Old yt-dlp may return HTTP 403 on YouTube. Re-run setup.bat later.
+) else (
+    echo [OK] yt-dlp is up to date
+)
 echo [OK] Python dependencies installed
 
 :: ==========================================

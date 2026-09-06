@@ -2,6 +2,8 @@
 
 YouTube / Twitch 配信アーカイブ（または手元の動画ファイル）から、AI でハイライトを検出して**切り抜き動画・縦型ショート・サムネ・概要欄タイムスタンプ**を自動生成するツールです。Premiere Pro 用の XML 書き出しと、ブラウザで使える Web UI の両方に対応します。Twitch入力では配信のダウンロードと切り抜きに対応し、タイムスタンプ生成は自動的にスキップします。
 
+利用にあたっての条件とデータの取り扱いは [利用規約](docs/TERMS.md) と [プライバシーとデータの取り扱い](docs/PRIVACY.md) を確認してください。外部AI・SNSのAPIは**利用者自身のキーで動作し（BYOK）、料金も利用者負担**です。
+
 ---
 
 ## 主な機能
@@ -105,6 +107,7 @@ pip install -r requirements.txt
 ```
 
 Windows では同梱の `setup.bat` でも環境構築できます。
+`Clip Extractor.bat` は起動のたびに yt-dlp を自動更新します。オフラインなど更新に失敗した場合は `setup.bat` を再実行してください。
 
 > 開発時は仮想環境を推奨します。テストは `.venv` 前提で `.venv/bin/python -m pytest` で実行してください（後述）。
 
@@ -248,6 +251,8 @@ python main.py ./archive.mp4 --shorts --karaoke --thumbnails --audio-fusion
 | `--drive-setup` / `--drive-status` / `--drive-revoke` | Google Drive OAuth の認証 / 状態確認 / 解除 |
 
 YouTube / Drive 連携のセットアップ手順は `CREDENTIALS_SETUP.txt` を参照してください（初心者向けの図解版は `SETUP_GUIDE.html`）。
+
+各連携で外部に送信されるデータ、PCに保存される認証情報、停止・失効の手順は [`docs/PRIVACY.md`](docs/PRIVACY.md) にまとめています。
 
 ### Twitch入力について
 

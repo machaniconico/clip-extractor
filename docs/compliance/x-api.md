@@ -65,10 +65,10 @@ Before public sale or paid distribution:
 - [x] Produce a machine-readable SBOM for the installed release dependency graph. CI generates CycloneDX 1.6 JSON and uploads it as the `sbom` workflow artifact.
 - Attach the SBOM to a released distributable. The repository does not build a distributable yet.
 - [x] Run secret, dependency, and SAST scans over the repository and verify that `.x_credentials.json`, logs, test fixtures, and real credentials are absent. `tools/check_secrets.py`, `tools/generate_notices.py --check`, `pip-audit`, and `bandit` run as hard-fail gates in the CI `scan` job.
-- Add `scan` to the required status checks for `main`. The job exists but branch protection is repository configuration, so a failing scan does not block a merge until it is marked required.
+- [x] Add `scan` to the required status checks for `main`. Branch protection on `main` now requires both `test` and `scan` (verified 2026-09-05), so a failing scan blocks the merge.
 - Scan the final packaged artifact before release. CI scans the source tree only; no distributable is built in this repository yet.
 - For dependency updates, regenerate `requirements.lock` and `THIRD_PARTY_NOTICES.md` together in the same PR; CI installs and audits the lock, while the notices check validates the installed locked graph.
-- Publish user-facing terms and privacy disclosures covering X API posting, credentials, costs, revocation, retention, and support.
+- Publish user-facing terms and privacy disclosures covering X API posting, credentials, costs, revocation, retention, and support. Drafted as `docs/TERMS.md` and `docs/PRIVACY.md` and linked from `README.md`; still requires the distributor identity, contact, support scope, liability cap, and governing law to be filled in, plus human legal review.
 - Obtain human legal review for the intended sales regions and distribution model.
 
 `LEGAL-REVIEW: HUMAN-REVIEW`
