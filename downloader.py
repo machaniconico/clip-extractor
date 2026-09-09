@@ -80,8 +80,9 @@ def download_video(url: str, output_dir: Path) -> Path:
             "fragment": lambda n: min(2 ** n, 30),
         },
         "continuedl": True,
-        # Force IPv4; googlevideo read timeouts over IPv6.
-        "source_address": "0.0.0.0",
+        # Force IPv4 (client-side source address, not a listening socket);
+        # googlevideo edges time out over IPv6.
+        "source_address": "0.0.0.0",  # nosec B104
         # Mitigate googlevideo read timeouts on highly fragmented HLS archives.
         "socket_timeout": 60,
         "http_chunk_size": 10485760,
