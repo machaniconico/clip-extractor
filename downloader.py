@@ -63,7 +63,9 @@ def download_video(url: str, output_dir: Path) -> Path:
     output_template = build_output_template(output_dir)
 
     ydl_opts = {
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        # Prefer avc1: one archive was 14.76 GiB in AV1 vs 6.64 GiB in avc1 1080p,
+        # with AV1 also increasing downstream ffmpeg decode load.
+        "format": "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "merge_output_format": "mp4",
         "outtmpl": output_template,
         # Keep yt-dlp's default Deno candidate and add the Node.js runtime

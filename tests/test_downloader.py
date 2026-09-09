@@ -55,6 +55,15 @@ def _download_video_with_fake_ytdlp(monkeypatch, tmp_path):
     return captured_options
 
 
+def test_download_video_prefers_avc1_video_before_generic_mp4(monkeypatch, tmp_path):
+    captured_options = _download_video_with_fake_ytdlp(monkeypatch, tmp_path)
+    preferred_format = "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/"
+    assert captured_options["format"].startswith(preferred_format)
+    assert captured_options["format"][len(preferred_format):] == (
+        "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best"
+    )
+
+
 def test_download_video_enables_node_javascript_runtime(monkeypatch, tmp_path):
     captured_options = _download_video_with_fake_ytdlp(monkeypatch, tmp_path)
     assert captured_options["js_runtimes"] == {
