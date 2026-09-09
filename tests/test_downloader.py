@@ -16,7 +16,7 @@ def test_supported_url_detection_includes_twitch_vods_and_channels():
     assert get_url_source("C:/videos/stream.mp4") is None
 
 
-def test_download_video_enables_node_javascript_runtime(monkeypatch, tmp_path):
+def _download_video_with_fake_ytdlp(monkeypatch, tmp_path):
     downloaded = tmp_path / "downloaded.mp4"
     downloaded.write_bytes(b"video")
     captured_options = {}
@@ -52,10 +52,24 @@ def test_download_video_enables_node_javascript_runtime(monkeypatch, tmp_path):
     )
 
     assert result == downloaded
+    return captured_options
+
+
+def test_download_video_enables_node_javascript_runtime(monkeypatch, tmp_path):
+    captured_options = _download_video_with_fake_ytdlp(monkeypatch, tmp_path)
     assert captured_options["js_runtimes"] == {
         "deno": {"path": None},
         "node": {"path": None},
     }
+
+
+def test_download_video_configures_hls_download_resilience(monkeypatch, tmp_path):
+    captured_options = _download_video_with_fake_ytdlp(monkeypatch, tmp_path)
+    assert captured_options["source_address"] == "0.0.0.0"
+    assert "force_ipv4" not in captured_options
+    assert captured_options["socket_timeout"] == 60
+    assert captured_options["fragment_retries"] == 30
+    assert captured_options["concurrent_fragment_downloads"] == 4
 
 
 def test_requirements_install_ytdlp_default_dependencies():
