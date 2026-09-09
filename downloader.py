@@ -73,16 +73,20 @@ def download_video(url: str, output_dir: Path) -> Path:
             "node": {"path": None},
         },
         "retries": 10,
-        "fragment_retries": 10,
+        "fragment_retries": 30,
         "file_access_retries": 5,
         "retry_sleep_functions": {
             "http": lambda n: min(2 ** n, 30),
             "fragment": lambda n: min(2 ** n, 30),
         },
         "continuedl": True,
-        "socket_timeout": 30,
+        # Force IPv4 (client-side source address, not a listening socket);
+        # googlevideo edges time out over IPv6.
+        "source_address": "0.0.0.0",  # nosec B104
+        # Mitigate googlevideo read timeouts on highly fragmented HLS archives.
+        "socket_timeout": 60,
         "http_chunk_size": 10485760,
-        "concurrent_fragment_downloads": 1,
+        "concurrent_fragment_downloads": 4,
     }
 
     print(f"Downloading: {url}")
