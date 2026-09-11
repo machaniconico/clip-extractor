@@ -73,7 +73,10 @@ def test_x_youtube_auth_error_is_masked_in_ui_and_logged(monkeypatch, caplog):
 def test_obs_start_youtube_auth_error_is_masked_in_ui_and_logged(
     monkeypatch,
     caplog,
+    tmp_path,
 ):
+    # OBS start persists connection settings before checking YouTube auth.
+    monkeypatch.setattr(web_app, "SETTINGS_FILE", tmp_path / "settings.json")
     secret = "refresh-response-with-token"
     monkeypatch.setattr(
         web_app.youtube_api,

@@ -10,6 +10,7 @@ import subprocess
 import traceback
 import inspect
 import threading
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -600,8 +601,12 @@ def load_defaults() -> dict:
         try:
             saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
             defaults.update(saved)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning(
+                "設定ファイルの読込に失敗したため既定値を使用します: %s (%s)",
+                SETTINGS_FILE,
+                exc,
+            )
     for key in REMOVED_MEDIA_SETTING_KEYS:
         defaults.pop(key, None)
     for key in X_SECRET_SETTING_KEYS:
@@ -625,6 +630,89 @@ def load_defaults() -> dict:
     return defaults
 
 
+def _obs_settings_summary(data: dict) -> str:
+    """Summarise non-secret OBS settings for save/startup diagnostics."""
+    processing = _obs_processing_settings_from_defaults(data)
+    values = {
+        key: data.get(key, OBS_CONNECTION_DEFAULTS[key])
+        for key in ("obs_trigger_method", "obs_stop_event", "obs_auto_process")
+    }
+    values.update({
+        f"obs_processing.{key}": processing[key]
+        for key in ("num_clips", "min_duration", "max_duration", "generate_shorts")
+    })
+    return ", ".join(f"{key}={value!r}" for key, value in values.items())
+
+
+def _write_settings_file(data: dict, *, reason: str) -> None:
+    """Atomically replace settings; callers serialize load/update/save cycles."""
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=SETTINGS_FILE.parent,
+            prefix=f".{SETTINGS_FILE.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(json.dumps(data, ensure_ascii=False, indent=2))
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        # Close first so replacement also works on Windows.
+        os.replace(temporary_path, SETTINGS_FILE)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    logger.info("settings saved (%s): %s", reason, SETTINGS_FILE)
+    logger.info("settings summary: %s", _obs_settings_summary(data))
+
+
+def _obs_settings_updates_for_ui(defaults: dict) -> tuple:
+    """Update the 26 OBS controls, in obs_settings_outputs order, without secrets."""
+    processing = _obs_processing_settings_from_defaults(defaults)
+    values = (
+        defaults["obs_trigger_method"],
+        defaults["obs_host"],
+        defaults["obs_port"],
+        defaults["obs_stop_event"],
+        defaults["obs_watch_folder"],
+        bool(defaults["obs_auto_process"]),
+        processing["enable_clips"],
+        processing["clip_prompt"],
+        processing["enable_chapters"],
+        processing["chapter_prompt"],
+        processing["auto_append_youtube"],
+        processing["num_clips"],
+        processing["min_duration"],
+        processing["max_duration"],
+        processing["output_mode"],
+        processing["generate_shorts"],
+        processing["shorts_mode"],
+        processing["shorts_crop"],
+        processing["shorts_title"],
+        processing["generate_thumbnails"],
+        processing["audio_fusion"],
+        processing["audio_alpha"],
+        processing["karaoke"],
+        not bool(processing["confirm_before_auto_process"]),
+    )
+    return (
+        *(gr.update(value=value) for value in values),
+        gr.update(
+            value=processing["shorts_blur_strength"],
+            visible=processing["shorts_mode"] == "blur",
+        ),
+        gr.update(value=processing["shorts_title_position"]),
+    )
+
+
+def load_obs_defaults_for_ui() -> tuple:
+    """Read current settings on every page load, without exposing secret fields."""
+    return _obs_settings_updates_for_ui(load_defaults())
+
+
 @_serialize_settings_update
 def _save_obs_connection_defaults(
     method: str,
@@ -641,6 +729,8 @@ def _save_obs_connection_defaults(
     x_post_template: str = DEFAULT_X_POST_TEMPLATE,
     x_post_destinations: str = "",
     x_credentials: XCredentials | None = None,
+    *,
+    reason: str = "obs_connection",
 ) -> None:
     """Persist OBS controls while keeping all secrets out of tracked JSON."""
     data = load_defaults()
@@ -666,10 +756,7 @@ def _save_obs_connection_defaults(
             processing_settings,
             defaults=data,
         )
-    SETTINGS_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _write_settings_file(data, reason=reason)
     if save_password:
         # A checked box plus a blank value means "reuse/preserve saved".
         # Clearing is explicit: the user unchecks the save box.
@@ -739,7 +826,7 @@ def save_defaults(ai_provider, ai_model,
     data.update(saved_obs)
     if isinstance(saved_obs_processing, dict):
         data["obs_processing"] = dict(saved_obs_processing)
-    SETTINGS_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_settings_file(data, reason="defaults")
     return "Settings saved as default!"
 
 
@@ -765,11 +852,16 @@ def save_obs_processing_defaults(
     auto_start_without_prompt_confirmation=False,
     shorts_blur_strength=20,
     shorts_title_position="top",
+    trigger_method=None,
+    host=None,
+    port=None,
+    stop_event=None,
+    watch_folder=None,
+    auto_process=None,
 ):
-    """Persist the dedicated OBS processing profile without changing Input."""
+    """Persist OBS connection/generation controls and return the saved UI state."""
     data = load_defaults()
-    data.pop("obs_password", None)
-    data["obs_processing"] = _build_obs_processing_settings(
+    processing = _build_obs_processing_settings(
         enable_clips,
         clip_prompt,
         enable_chapters,
@@ -791,11 +883,54 @@ def save_obs_processing_defaults(
         shorts_blur_strength=shorts_blur_strength,
         shorts_title_position=shorts_title_position,
     )
-    SETTINGS_FILE.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    # Older direct callers only supply the processing controls. The UI always
+    # supplies all six connection controls, including explicit False/empty values.
+    connection = {
+        key: data[key] if value is None else value
+        for key, value in (
+            ("obs_trigger_method", trigger_method),
+            ("obs_host", host),
+            ("obs_port", port),
+            ("obs_stop_event", stop_event),
+            ("obs_watch_folder", watch_folder),
+            ("obs_auto_process", auto_process),
+        )
+    }
+    _save_obs_connection_defaults(
+        connection["obs_trigger_method"],
+        connection["obs_host"] or "localhost",
+        int(connection["obs_port"]) if connection["obs_port"] != "" else 4455,
+        # Blank + save=True preserves the saved password without reading it.
+        password="",
+        save_password=True,
+        stop_event=connection["obs_stop_event"],
+        watch_folder=connection["obs_watch_folder"],
+        auto_process=connection["obs_auto_process"],
+        processing_settings=processing,
+        x_post_on_stream_start=data["obs_x_post_on_stream_start"],
+        x_post_auto=data["obs_x_post_auto"],
+        x_post_template=data["obs_x_post_template"],
+        x_post_destinations=data["obs_x_post_destinations"],
+        reason="obs_settings",
     )
-    return "OBS用の生成設定を保存しました"
+    reloaded = load_defaults()
+    saved_processing = _obs_processing_settings_from_defaults(reloaded)
+    message = (
+        "OBS設定を保存しました（接続・生成）。"
+        f"検知方式: {reloaded['obs_trigger_method']} / "
+        f"取得元: {reloaded['obs_stop_event']} / "
+        f"自動処理: {'ON' if reloaded['obs_auto_process'] else 'OFF'}\n"
+        f"クリップ数: {saved_processing['num_clips']} / "
+        f"最小・最大長: {saved_processing['min_duration']}〜"
+        f"{saved_processing['max_duration']}秒 / "
+        f"ショート生成: {'ON' if saved_processing['generate_shorts'] else 'OFF'}"
+    )
+    if _obs_watcher is not None:
+        message += (
+            "\n取得元/検知方式の変更は次回の OBS連携開始(または次回起動)から有効。"
+            "今すぐ反映するには『OBS連携 開始』を押してください"
+        )
+    return (message, *_obs_settings_updates_for_ui(reloaded))
 
 
 def resolve_output_base(user_text: str) -> Path:
@@ -2763,10 +2898,7 @@ def _set_obs_x_post_runtime_settings(enabled: bool, auto: bool) -> None:
             data = load_defaults()
             data["obs_x_post_on_stream_start"] = bool(enabled)
             data["obs_x_post_auto"] = bool(auto)
-            SETTINGS_FILE.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            _write_settings_file(data, reason="obs_x_post_runtime")
 
 
 def _reset_obs_x_post_stream_guard() -> None:
@@ -5635,6 +5767,7 @@ def _startup_auth_status_for_ui() -> str:
 def create_ui():
     """Create the Gradio web interface."""
     defaults = load_defaults()
+    logger.info("settings loaded: %s", _obs_settings_summary(defaults))
     obs_processing_defaults = _obs_processing_settings_from_defaults(defaults)
 
     with gr.Blocks(
@@ -6273,7 +6406,9 @@ def create_ui():
                 ):
                     gr.Markdown(
                         "Inputタブのアーカイブ用設定とは別に保存されます。"
-                        "OBS連携開始時に保存され、次回の起動時自動連携でも使われます。"
+                        "「OBS設定を保存（接続・生成）」で上部の接続設定と生成設定を"
+                        "一緒に保存できます。OBS連携開始時にも保存され、"
+                        "次回の起動時自動連携でも使われます。"
                         "切り抜き・ショート・タイムスタンプは個別にON/OFFできます。"
                         "3つのうち少なくとも1つはONにしてください。"
                     )
@@ -6425,17 +6560,52 @@ def create_ui():
                                 info="ショート動画の字幕を単語ごとにハイライトします",
                             )
 
+                    gr.Markdown(
+                        "検知方式・取得元・自動処理・Host・Port・録画出力フォルダと、"
+                        "この生成設定をまとめて保存します。"
+                        "PasswordとX認証情報の保存は「OBS連携 開始」で行います。"
+                    )
                     with gr.Row():
                         obs_save_processing_btn = gr.Button(
-                            "OBS用の生成設定を保存",
+                            "OBS設定を保存（接続・生成）",
                             variant="secondary",
                         )
                         obs_save_processing_msg = gr.Textbox(
                             label="",
                             interactive=False,
                             show_label=False,
-                            lines=1,
+                            lines=3,
                         )
+                    # Shared by the save response and every page-load refresh.
+                    # Password/X secrets must never be included in these outputs.
+                    obs_settings_outputs = [
+                        obs_trigger_radio,
+                        obs_host,
+                        obs_port,
+                        obs_stop_event_radio,
+                        obs_watch_folder,
+                        obs_auto_process,
+                        obs_enable_clips,
+                        obs_clip_prompt,
+                        obs_enable_chapters,
+                        obs_chapter_prompt,
+                        obs_auto_append_youtube,
+                        obs_num_clips,
+                        obs_min_duration,
+                        obs_max_duration,
+                        obs_output_mode,
+                        obs_generate_shorts,
+                        obs_shorts_mode,
+                        obs_shorts_crop,
+                        obs_shorts_title,
+                        obs_generate_thumbnails,
+                        obs_audio_fusion,
+                        obs_audio_alpha,
+                        obs_karaoke,
+                        obs_auto_start_without_prompt_confirmation,
+                        obs_shorts_blur_strength,
+                        obs_shorts_title_position,
+                    ]
                     obs_save_processing_btn.click(
                         fn=save_obs_processing_defaults,
                         inputs=[
@@ -6459,8 +6629,14 @@ def create_ui():
                             obs_auto_start_without_prompt_confirmation,
                             obs_shorts_blur_strength,
                             obs_shorts_title_position,
+                            obs_trigger_radio,
+                            obs_host,
+                            obs_port,
+                            obs_stop_event_radio,
+                            obs_watch_folder,
+                            obs_auto_process,
                         ],
-                        outputs=obs_save_processing_msg,
+                        outputs=[obs_save_processing_msg, *obs_settings_outputs],
                     )
 
                 with gr.Group(visible=False) as obs_confirmation_group:
@@ -7237,6 +7413,11 @@ Premiere Pro → File → Import → `project.xml` で手動読み込みでき�
             """)
 
         app.load(fn=_startup_auth_status_for_ui, inputs=None, outputs=[yt_auth_status_box])
+        app.load(
+            fn=load_obs_defaults_for_ui,
+            inputs=None,
+            outputs=obs_settings_outputs,
+        )
 
     return app
 

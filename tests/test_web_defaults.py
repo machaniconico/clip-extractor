@@ -165,7 +165,7 @@ def test_obs_processing_profile_is_separate_from_archive_defaults(
         shorts_title_position="overlay",
     )
 
-    assert "OBS" in result
+    assert "OBS" in result[0]
     separated = web_app.load_defaults()
     assert separated["num_clips"] == 3
     assert separated["min_duration"] == 20
