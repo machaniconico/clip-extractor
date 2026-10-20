@@ -16,7 +16,7 @@ WORKFLOW = ROOT / ".github/workflows/release.yml"
     '"setup.bat", "Clip Extractor.bat"', 'data.replace(b"\\r\\n", b"")',
     "CRLF verification failed", "tools/check_secrets.py --directory",
     "tools/generate_sbom.py", 'bandit -r "$RELEASE_DIR" -x "$RELEASE_DIR/tests" -ll',
-    'pip-audit -r "$RELEASE_DIR/requirements.lock"', "--draft",
+    'tools/run_pip_audit.py" "$RELEASE_DIR/requirements.lock"', "--draft",
     "--verify-tag", "SHA256SUMS.txt", "cyclonedx-bom==7.3.1",
     "pip-audit==2.9.0", "bandit==1.8.6",
 ])

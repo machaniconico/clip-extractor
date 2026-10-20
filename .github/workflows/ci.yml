@@ -68,7 +68,7 @@ jobs:
           path: sbom.cdx.json
 
       - name: Audit dependencies
-        run: pip-audit -r requirements.lock
+        run: python tools/run_pip_audit.py requirements.lock
 
       - name: Run SAST
         run: bandit -r . -x ./tests,./.venv -ll
