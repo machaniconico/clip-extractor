@@ -99,7 +99,7 @@ jobs:
         run: python "$RELEASE_DIR/tools/generate_sbom.py" --output "dist/clip-extractor-${TAG}.sbom.cdx.json"
 
       - name: Audit final distribution dependencies
-        run: pip-audit -r "$RELEASE_DIR/requirements.lock"
+        run: python "$RELEASE_DIR/tools/run_pip_audit.py" "$RELEASE_DIR/requirements.lock"
 
       - name: Run SAST on final distribution
         run: bandit -r "$RELEASE_DIR" -x "$RELEASE_DIR/tests" -ll
