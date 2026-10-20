@@ -463,7 +463,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 
-## certifi 2026.7.22
+## certifi 2026.10.19
 
 - License: MPL-2.0
 - Project URL: https://github.com/certifi/python-certifi
@@ -6147,7 +6147,7 @@ worldwide. This software is distributed without any warranty.
 
 See <http://creativecommons.org/publicdomain/zero/1.0/>.
 
-## oauthlib 3.3.1
+## oauthlib 4.0.0
 
 - License: BSD-3-Clause
 - Project URL: https://github.com/oauthlib/oauthlib
@@ -13325,7 +13325,7 @@ This software is made available under the terms of *either* of the licenses
 found in LICENSE.APACHE or LICENSE.BSD. Contributions to uritemplate are
 made under the terms of *both* these licenses.
 
-## urllib3 2.7.0
+## urllib3 2.8.0
 
 - License: MIT
 - Project URL: https://github.com/urllib3/urllib3/blob/main/CHANGES.rst
