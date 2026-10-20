@@ -348,3 +348,54 @@ def test_auto_connect_uses_latest_saved_announcement_settings(monkeypatch, tmp_p
     assert calls[0]["x_post_template"] == "NEW {title}"
     assert calls[0]["x_post_destinations"] == "Twitch: https://twitch.tv/new"
     assert calls[0]["x_post_mode"] == "separate"
+
+
+@pytest.mark.parametrize("raw", ["false", "FALSE", "0", "off", "no", ""])
+def test_auto_connect_string_false_does_not_enable_x_posting(
+    monkeypatch, tmp_path, raw
+):
+    password_file = _isolate_settings(
+        monkeypatch,
+        tmp_path,
+        obs_auto_process=raw,
+        obs_x_post_on_stream_start=raw,
+        obs_x_post_auto=raw,
+        generate_shorts=raw,
+        auto_append_youtube=raw,
+    )
+    password_file.write_text("secret-pw", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        web_app, "_wait_for_obs_websocket", lambda *_a, **_k: True
+    )
+    monkeypatch.setattr(
+        web_app, "_start_obs_watch_impl", lambda **kw: calls.append(kw) or "ok"
+    )
+
+    assert web_app.start_obs_watch_from_defaults() == "ok"
+
+    assert calls[0]["x_post_auto"] is False
+    assert calls[0]["x_post_on_stream_start"] is False
+    assert calls[0]["auto_process"] is False
+    assert calls[0]["generate_shorts"] is False
+    assert calls[0]["auto_append_youtube"] is False
+
+
+def test_auto_connect_list_destinations_are_normalised(monkeypatch, tmp_path):
+    password_file = _isolate_settings(
+        monkeypatch,
+        tmp_path,
+        obs_x_post_destinations=["https://twitch.tv/a", "", 5, " https://kick.com/b "],
+    )
+    password_file.write_text("secret-pw", encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        web_app, "_wait_for_obs_websocket", lambda *_a, **_k: True
+    )
+    monkeypatch.setattr(
+        web_app, "_start_obs_watch_impl", lambda **kw: calls.append(kw) or "ok"
+    )
+
+    web_app.start_obs_watch_from_defaults()
+
+    assert calls[0]["x_post_destinations"] == "https://twitch.tv/a\nhttps://kick.com/b"
