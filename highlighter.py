@@ -2,24 +2,32 @@
 
 import json
 import math
+import logging
 import os
+import random
 import re
 import subprocess
+import threading
+import time
 from urllib.parse import urlsplit
 
 import httpx
 
+logger = logging.getLogger("clip-extractor")
 
 SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパートです。
 配信アーカイブのトランスクリプト（タイムスタンプ付き）を分析し、
 ショート動画として切り抜くべき見どころシーンを特定してください。
 
+トランスクリプトは1行1発話で、各行は「[H:MM:SS] 発話内容」の形式です。
+行頭の時刻はその発話の開始時刻（秒未満切り捨て）です。
+
 以下のJSON形式で回答してください。他のテキストは含めないでください：
 {
   "highlights": [
     {
-      "start": "HH:MM:SS.mmm",
-      "end": "HH:MM:SS.mmm",
+      "start": "HH:MM:SS",
+      "end": "HH:MM:SS",
       "title": "クリップのタイトル（短く、キャッチーに）",
       "reason": "このシーンを選んだ理由"
     }
@@ -36,6 +44,9 @@ GEMINI_SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパ�
 配信アーカイブのトランスクリプト（タイムスタンプ付き）を分析し、
 ショート動画として切り抜くべき見どころシーンを特定してください。
 
+トランスクリプトは1行1発話で、各行は「[H:MM:SS] 発話内容」の形式です。
+行頭の時刻はその発話の開始時刻（秒未満切り捨て）です。
+
 選定基準：
 - 面白い・感動的・印象的・情報価値が高いシーンを優先
 - クリップ同士が重複しないように
@@ -45,6 +56,8 @@ GEMINI_SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパ�
 
 GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
 GEMINI_REQUEST_TIMEOUT_MS = 300_000
+GEMINI_REQUEST_ATTEMPTS = 4
+GEMINI_RETRY_STATUS_CODES = (500, 502, 503, 504)
 GEMINI_MODEL_CHOICES = (
     GEMINI_DEFAULT_MODEL,
     "gemini-3.6-flash",
@@ -54,6 +67,154 @@ GEMINI_MODEL_CHOICES = (
     "gemini-2.5-flash-lite",
     "gemini-2.5-pro",
 )
+
+
+class GeminiTemporaryError(RuntimeError):
+    """A temporary Gemini outage persisted after the bounded SDK retries."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        super().__init__(
+            f"Gemini側で一時的なエラー（HTTP {status_code}）が発生し、"
+            f"初回を含め{GEMINI_REQUEST_ATTEMPTS}回試しましたが復旧しませんでした。"
+            "数分待ってから再実行してください。"
+        )
+
+
+class GeminiQuotaError(GeminiTemporaryError):
+    """Gemini free-tier/quota exhaustion (HTTP 429) that retrying cannot fix now."""
+
+    def __init__(self, per_minute: bool, retry_delay: float | None = None):
+        self.status_code = 429
+        self.per_minute = per_minute
+        self.retry_delay = retry_delay
+        RuntimeError.__init__(
+            self,
+            "Gemini の利用枠（無料枠の上限）に達したため、ハイライト検出に失敗しました。"
+            + (
+                "1分あたりのトークン数の上限です。"
+                "数分待ってから再実行してください。"
+                if per_minute
+                else "1日あたりなどの上限に達した可能性があります。"
+                "翌日以降に再実行するか、"
+            )
+            + (
+                "長時間の配信では1回の入力が大きく、再実行しても同じ上限に達することがあります。"
+                if per_minute
+                else ""
+            )
+            + "有料枠への切り替えや、別のAIプロバイダー（Claude / ChatGPT）の利用を検討してください。"
+        )
+
+
+# Free tier: 250,000 input tokens per model per minute; keep a 10% margin.
+GEMINI_INPUT_TOKENS_PER_MINUTE = 250_000
+GEMINI_INPUT_TOKEN_BUDGET = int(GEMINI_INPUT_TOKENS_PER_MINUTE * 0.9)
+# Measured: 179,325 tokens / 210,860 chars = 0.85 (old timestamp format) and
+# 79,993 / 100,979 = 0.79 (compact format). Use the larger, conservative ratio.
+GEMINI_TOKENS_PER_CHAR = 0.85
+GEMINI_TOKEN_WINDOW_SECONDS = 60.0
+GEMINI_TOKEN_MAX_WAIT_SECONDS = 65.0
+
+_gemini_token_lock = threading.Lock()
+_gemini_token_log: dict[str, list[list[float]]] = {}
+_gemini_clock = time.monotonic
+
+
+def _gemini_reserve_tokens(model: str, estimate: int) -> list[float]:
+    """Wait until ``estimate`` input tokens fit in the per-minute budget.
+
+    Records the attempt (it counts server-side even when it fails) and returns
+    its ``[timestamp, tokens]`` entry so the real count can replace the estimate.
+    """
+    while True:
+        with _gemini_token_lock:
+            now = _gemini_clock()
+            entries = [
+                e for e in _gemini_token_log.get(model, [])
+                if now - e[0] < GEMINI_TOKEN_WINDOW_SECONDS
+            ]
+            _gemini_token_log[model] = entries
+            used = sum(e[1] for e in entries)
+            oversized = estimate > GEMINI_INPUT_TOKEN_BUDGET
+            if (not entries) if oversized else (
+                used + estimate <= GEMINI_INPUT_TOKEN_BUDGET
+            ):
+                if oversized:
+                    logger.warning(
+                        "[Gemini] 今回の推定入力トークン(%d)が1分あたりの上限目安(%d)を"
+                        "超えるため、直近の送信が無くなるのを待ってから送信します。"
+                        "無料枠の上限に達する可能性があります",
+                        estimate, GEMINI_INPUT_TOKEN_BUDGET,
+                    )
+                entry = [now, float(estimate)]
+                entries.append(entry)
+                return entry
+            remaining = used
+            wait = GEMINI_TOKEN_MAX_WAIT_SECONDS
+            if oversized:
+                # An oversized request needs an empty window: wait for the
+                # newest reservation to expire.
+                wait = min(
+                    wait,
+                    max(e[0] for e in entries) + GEMINI_TOKEN_WINDOW_SECONDS - now,
+                )
+            else:
+                for e in entries:
+                    remaining -= e[1]
+                    if remaining + estimate <= GEMINI_INPUT_TOKEN_BUDGET:
+                        wait = min(wait, e[0] + GEMINI_TOKEN_WINDOW_SECONDS - now)
+                        break
+            wait = max(wait, 0.0) + 0.5
+        logger.info(
+            "[Gemini] 入力トークン上限回避のため %.1fs 待機 (直近60秒: %d tokens, 今回推定: %d)",
+            wait, used, estimate,
+        )
+        time.sleep(wait)
+
+
+GEMINI_QUOTA_MAX_WAIT_SECONDS = 120.0
+GEMINI_QUOTA_EXTRA_ATTEMPTS = 2
+
+
+def _parse_retry_seconds(pattern: str, text: str, flags) -> float | None:
+    """Return a finite non-negative seconds value matched by ``pattern`` or None."""
+    m = re.search(pattern, text, flags)
+    if not m:
+        return None
+    try:
+        value = float(m.group(1))
+    except ValueError:
+        return None
+    return value if math.isfinite(value) and value >= 0 else None
+
+
+def _gemini_quota_info(exc) -> tuple[bool, float | None, str, str]:
+    """Return (is_per_minute, retry_delay_seconds, quotaId, quotaValue) of a 429."""
+    quota_id = ""
+    quota_value = ""
+    delay = None
+    details = getattr(exc, "details", None)
+    error = details.get("error") if isinstance(details, dict) else None
+    items = error.get("details") if isinstance(error, dict) else None
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        for violation in item.get("violations") or []:
+            if isinstance(violation, dict) and not quota_id:
+                quota_id = str(violation.get("quotaId", ""))
+                quota_value = str(violation.get("quotaValue", ""))
+        raw_delay = item.get("retryDelay")
+        if delay is None and isinstance(raw_delay, str):
+            delay = _parse_retry_seconds(r"^\s*(\d+(?:\.\d+)?)s\s*$", raw_delay, 0)
+    if delay is None:
+        delay = _parse_retry_seconds(
+            r"retry in (\d+(?:\.\d+)?)s",
+            str(getattr(exc, "message", "") or ""),
+            re.IGNORECASE,
+        )
+    return "PerMinute" in quota_id, delay, quota_id, quota_value
+
 
 HIGHLIGHTS_JSON_SCHEMA = {
     "type": "object",
@@ -65,11 +226,11 @@ HIGHLIGHTS_JSON_SCHEMA = {
                 "properties": {
                     "start": {
                         "type": "string",
-                        "description": "クリップ開始時刻（HH:MM:SS.mmm）",
+                        "description": "クリップ開始時刻（HH:MM:SS）",
                     },
                     "end": {
                         "type": "string",
-                        "description": "クリップ終了時刻（HH:MM:SS.mmm）",
+                        "description": "クリップ終了時刻（HH:MM:SS）",
                     },
                     "title": {
                         "type": "string",
@@ -296,7 +457,7 @@ def _call_gemini(user_prompt, api_key, model=GEMINI_DEFAULT_MODEL):
     """
     try:
         from google import genai
-        from google.genai import types
+        from google.genai import errors, types
     except ImportError:
         raise RuntimeError(
             "google-genai パッケージが必要です: pip install google-genai"
@@ -307,19 +468,111 @@ def _call_gemini(user_prompt, api_key, model=GEMINI_DEFAULT_MODEL):
         api_key=api_key,
         http_options=types.HttpOptions(
             timeout=GEMINI_REQUEST_TIMEOUT_MS,
+            # Retry only transient server failures. Quota/auth/schema errors
+            # need user action, and must not trigger repeated paid requests.
+            # Keep retries in the SDK so attempts cannot multiply across layers.
+            # Retries are done in the loop below so every attempt is logged;
+            # the SDK must not resend the (large) prompt behind our back.
             retry_options=types.HttpRetryOptions(attempts=1),
         ),
     )
+    server_attempt = 0
+    quota_retries = 0
+    attempt = 0
     try:
-        response = client.models.generate_content(
-            model=model,
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=GEMINI_SYSTEM_PROMPT,
-                response_mime_type="application/json",
-                response_json_schema=HIGHLIGHTS_JSON_SCHEMA,
-            ),
-        )
+        while True:
+            attempt += 1
+            server_attempt += 1
+            token_entry = _gemini_reserve_tokens(
+                model,
+                math.ceil(
+                    (len(user_prompt) + len(GEMINI_SYSTEM_PROMPT))
+                    * GEMINI_TOKENS_PER_CHAR
+                ),
+            )
+            logger.info(
+                "[Gemini] request: model=%s attempt=%d (5xx %d/%d, quota-retry %d/%d) "
+                "prompt_chars=%d",
+                model, attempt, server_attempt, GEMINI_REQUEST_ATTEMPTS,
+                quota_retries, GEMINI_QUOTA_EXTRA_ATTEMPTS, len(user_prompt),
+            )
+            started = time.monotonic()
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=user_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=GEMINI_SYSTEM_PROMPT,
+                        response_mime_type="application/json",
+                        response_json_schema=HIGHLIGHTS_JSON_SCHEMA,
+                    ),
+                )
+            except errors.APIError as exc:
+                elapsed = time.monotonic() - started
+                status = str(getattr(exc, "status", "") or "")
+                if exc.code in GEMINI_RETRY_STATUS_CODES:
+                    if server_attempt >= GEMINI_REQUEST_ATTEMPTS:
+                        logger.warning(
+                            "[Gemini] failed after %.1fs: http=%s status=%s -> give up",
+                            elapsed, exc.code, status,
+                        )
+                        raise GeminiTemporaryError(exc.code) from exc
+                    wait = min(
+                        30.0, 5.0 * 2.0 ** (server_attempt - 1)
+                    ) + random.uniform(0.0, 1.0)  # nosec B311 - backoff jitter
+                    logger.warning(
+                        "[Gemini] failed after %.1fs: http=%s status=%s -> "
+                        "sleep %.1fs and retry",
+                        elapsed, exc.code, status, wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                if exc.code != 429:
+                    logger.warning(
+                        "[Gemini] failed after %.1fs: http=%s status=%s -> give up",
+                        elapsed, exc.code, status,
+                    )
+                    raise
+                per_minute, delay, quota_id, quota_value = _gemini_quota_info(exc)
+                retry = (
+                    per_minute
+                    and delay is not None
+                    and delay <= GEMINI_QUOTA_MAX_WAIT_SECONDS
+                    and quota_retries < GEMINI_QUOTA_EXTRA_ATTEMPTS
+                )
+                logger.warning(
+                    "[Gemini] failed after %.1fs: http=429 status=%s quotaId=%s "
+                    "quotaValue=%s retryDelay=%s -> %s",
+                    elapsed, status, quota_id, quota_value, delay,
+                    f"sleep {delay + 2.0:.1f}s and retry" if retry else "give up",
+                )
+                if not retry:
+                    raise GeminiQuotaError(per_minute, delay) from exc
+                quota_retries += 1
+                server_attempt = 0
+                print(
+                    f"Gemini 1分あたりの上限に達しました。{delay + 2:.0f}秒待って再試行します"
+                    f"（{quota_retries}/{GEMINI_QUOTA_EXTRA_ATTEMPTS}）"
+                )
+                time.sleep(delay + 2.0)
+                continue
+            usage = getattr(response, "usage_metadata", None)
+            candidates = getattr(response, "candidates", None) or []
+            finish_reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+            real_tokens = getattr(usage, "prompt_token_count", None)
+            if isinstance(real_tokens, int):
+                with _gemini_token_lock:
+                    token_entry[1] = float(real_tokens)
+            logger.info(
+                "[Gemini] success in %.1fs: prompt_tokens=%s candidates_tokens=%s "
+                "total_tokens=%s finish_reason=%s",
+                time.monotonic() - started,
+                getattr(usage, "prompt_token_count", None),
+                getattr(usage, "candidates_token_count", None),
+                getattr(usage, "total_token_count", None),
+                finish_reason,
+            )
+            break
     finally:
         client.close()
     return response.text
