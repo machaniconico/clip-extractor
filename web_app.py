@@ -32,10 +32,15 @@ from x_post import (
     DEFAULT_X_POST_TEMPLATE,
     XCredentials,
     XPostError,
+    XPostTooLongError,
+    X_MAX_WEIGHTED_LENGTH,
+    build_x_post_texts,
+    normalize_x_post_mode,
     open_x_post_composer,
     parse_destination_links,
     post_x_post,
     render_x_post_text,
+    x_weighted_length,
 )
 
 
@@ -266,6 +271,7 @@ OBS_CONNECTION_DEFAULTS = {
     "obs_x_post_auto": False,
     "obs_x_post_template": DEFAULT_X_POST_TEMPLATE,
     "obs_x_post_destinations": "",
+    "obs_x_post_mode": "combined",
 }
 
 
@@ -550,7 +556,7 @@ def _x_credentials_ui_copy(credentials: XCredentials) -> tuple[str, str]:
         )
     return (
         "X Developer Consoleで発行した値を入力",
-        "4項目を入力してOBS連携を開始すると、このPC内だけに保存します。",
+        "4項目を入力して「X告知設定を保存」を押すと、このPC内だけに保存します。",
     )
 
 
@@ -624,6 +630,9 @@ def load_defaults() -> dict:
     )
     defaults["shorts_title_position"] = _normalise_shorts_title_position(
         defaults.get("shorts_title_position", "top")
+    )
+    defaults["obs_x_post_mode"] = normalize_x_post_mode(
+        defaults.get("obs_x_post_mode", "combined")
     )
     # Secrets are loaded only inside start_obs_watch(). Returning one here can
     # expose it in Gradio's component configuration when the app is LAN-bound.
@@ -732,12 +741,18 @@ def _save_obs_connection_defaults(
     x_credentials: XCredentials | None = None,
     *,
     reason: str = "obs_connection",
+    x_post_mode: str | None = None,
 ) -> None:
     """Persist OBS controls while keeping all secrets out of tracked JSON."""
     data = load_defaults()
     data.pop("obs_password", None)
     for key in X_SECRET_SETTING_KEYS:
         data.pop(key, None)
+    obs_x_post_mode = (
+        normalize_x_post_mode(data.get("obs_x_post_mode", "combined"))
+        if x_post_mode is None
+        else normalize_x_post_mode(x_post_mode)
+    )
     data.update(
         {
             "obs_trigger_method": method,
@@ -750,6 +765,7 @@ def _save_obs_connection_defaults(
             "obs_x_post_auto": bool(x_post_auto),
             "obs_x_post_template": str(x_post_template or DEFAULT_X_POST_TEMPLATE),
             "obs_x_post_destinations": str(x_post_destinations or ""),
+            "obs_x_post_mode": obs_x_post_mode,
         }
     )
     if processing_settings is not None:
@@ -913,6 +929,7 @@ def save_obs_processing_defaults(
         x_post_template=data["obs_x_post_template"],
         x_post_destinations=data["obs_x_post_destinations"],
         reason="obs_settings",
+        x_post_mode=data.get("obs_x_post_mode"),
     )
     reloaded = load_defaults()
     saved_processing = _obs_processing_settings_from_defaults(reloaded)
@@ -2166,6 +2183,7 @@ _obs_generation = 0
 _obs_x_post_lock = threading.RLock()
 _obs_x_runtime_lock = threading.RLock()
 _obs_x_runtime_settings = {"enabled": False, "auto": False}
+_obs_x_runtime_revision = 0
 _OBS_X_STREAM_START_TOLERANCE_SECONDS = 30.0
 _obs_x_stream_state = {
     "active": False,
@@ -3013,7 +3031,12 @@ def _append_obs_chapters_to_archive(
 
 def _apply_obs_x_post_runtime_settings(enabled: bool, auto: bool) -> None:
     """Apply X opt-in switches to a running watcher without persistence."""
+    global _obs_x_runtime_revision
     with _obs_x_runtime_lock:
+        if (bool(enabled), bool(auto)) != (
+            _obs_x_runtime_settings["enabled"], _obs_x_runtime_settings["auto"]
+        ):
+            _obs_x_runtime_revision += 1
         _obs_x_runtime_settings["enabled"] = bool(enabled)
         _obs_x_runtime_settings["auto"] = bool(auto)
 
@@ -3029,6 +3052,174 @@ def _set_obs_x_post_runtime_settings(enabled: bool, auto: bool) -> None:
             data["obs_x_post_on_stream_start"] = bool(enabled)
             data["obs_x_post_auto"] = bool(auto)
             _write_settings_file(data, reason="obs_x_post_runtime")
+
+
+def load_x_post_defaults_for_ui() -> tuple[str, str, str]:
+    """Refresh saved announcement fields on reload without reading credentials."""
+    defaults = load_defaults()
+    return (
+        defaults["obs_x_post_template"],
+        defaults["obs_x_post_destinations"],
+        defaults["obs_x_post_mode"],
+    )
+
+
+def preview_x_post_text(x_post_template, x_post_destinations, x_post_mode="combined") -> str:
+    """Render the current template/destinations without any side effects.
+
+    Pure UI helper: no network, no browser open, no secret read, no settings
+    write, no publishing. YouTube's fetched URL/title is resolved at stream
+    start, so this preview shows configured URLs only and is not a live
+    lookup result. In separate mode each destination is previewed as a
+    numbered block.
+    """
+    if normalize_x_post_mode(x_post_mode) == "separate":
+        try:
+            texts = build_x_post_texts(
+                str(x_post_template or ""),
+                destinations=str(x_post_destinations or ""),
+                mode="separate",
+            )
+        except XPostTooLongError as exc:
+            return str(exc)
+        if not texts:
+            return (
+                "プレビューできる内容がありません。"
+                "同時配信先URLが設定されていないため、別々の投稿を作成できません。"
+                "YouTubeの取得URL・タイトルは配信開始時に追加されるため、"
+                "プレビューには含まれません。"
+            )
+        return "\n\n".join(
+            f"{index + 1}/{len(texts)}（{x_weighted_length(text)}/{X_MAX_WEIGHTED_LENGTH}）"
+            f"\n{text}"
+            for index, text in enumerate(texts)
+        )
+    try:
+        rendered = render_x_post_text(
+            str(x_post_template or ""),
+            destinations=str(x_post_destinations or ""),
+        )
+    except XPostTooLongError as exc:
+        return str(exc)
+    if not rendered.strip():
+        return (
+            "プレビューできる内容がありません。"
+            "テンプレートまたは同時配信先URLを入力してください。"
+        )
+    return (
+        f"{rendered}\n\n文字数: {x_weighted_length(rendered)}/{X_MAX_WEIGHTED_LENGTH}"
+    )
+
+
+X_POST_SETTINGS_SAVE_ERROR_MESSAGE = "X告知設定の保存に失敗しました。"
+
+
+def save_x_post_settings(
+    x_post_template,
+    x_post_destinations,
+    x_api_key,
+    x_api_key_secret,
+    x_access_token,
+    x_access_token_secret,
+    x_post_mode=None,
+) -> str:
+    """Persist X announcement settings; return a simple status string.
+
+    Only the template/destination/mode keys are updated; other persisted values are
+    preserved. Blank credential fields preserve saved secrets without reading
+    them. Opt-in switches remain owned by their immediate change handlers, so
+    a queued save cannot restore an opt-in after the user turns it off.
+    A ``None`` mode preserves the saved mode; an explicit mode is normalized.
+    """
+    entered = [
+        str(value or "").strip()
+        for value in (
+            x_api_key,
+            x_api_key_secret,
+            x_access_token,
+            x_access_token_secret,
+        )
+    ]
+    if any(entered) and not all(entered):
+        return (
+            "X認証情報は4項目すべて入力してください"
+            "（保存済みの値は変更していません）"
+        )
+    new_credentials = (
+        XCredentials(
+            api_key=entered[0],
+            api_key_secret=entered[1],
+            access_token=entered[2],
+            access_token_secret=entered[3],
+        )
+        if all(entered)
+        else None
+    )
+    try:
+        with _obs_start_lock:
+            with _settings_file_lock:
+                data = load_defaults()
+                data["obs_x_post_template"] = str(
+                    x_post_template or DEFAULT_X_POST_TEMPLATE
+                )
+                data["obs_x_post_destinations"] = str(x_post_destinations or "")
+                if x_post_mode is not None:
+                    data["obs_x_post_mode"] = normalize_x_post_mode(x_post_mode)
+                _write_settings_file(data, reason="obs_x_post_settings")
+            if new_credentials is not None:
+                _save_x_credentials(new_credentials)
+    except Exception:
+        logger.warning("Failed to save X announcement settings")
+        return X_POST_SETTINGS_SAVE_ERROR_MESSAGE
+    return (
+        "X告知設定を保存しました。"
+        "ON/OFFは切り替え時に自動保存されます。"
+        "テンプレート・配信先URL・まとめ方・認証情報の変更は次回の「OBS連携 開始」"
+        "から有効になるため、起動中の連携は停止→開始し直してください。"
+    )
+
+
+def save_x_post_settings_for_ui(
+    x_post_template,
+    x_post_destinations,
+    x_api_key,
+    x_api_key_secret,
+    x_access_token,
+    x_access_token_secret,
+    x_post_mode=None,
+) -> tuple:
+    """Gradio wrapper: status plus credential-field updates.
+
+    Clears the four credential inputs only after a successful save; preserves
+    user input on validation or save errors.
+    """
+    message = save_x_post_settings(
+        x_post_template,
+        x_post_destinations,
+        x_api_key,
+        x_api_key_secret,
+        x_access_token,
+        x_access_token_secret,
+        x_post_mode,
+    )
+    if message.startswith("X告知設定を保存しました"):
+        if all(str(value or "").strip() for value in (
+            x_api_key, x_api_key_secret, x_access_token, x_access_token_secret
+        )):
+            placeholder, info = _x_credentials_ui_copy(
+                XCredentials(
+                    x_api_key, x_api_key_secret, x_access_token, x_access_token_secret
+                )
+            )
+            cleared = (
+                gr.update(value="", placeholder=placeholder, info=info),
+                *(gr.update(value="", placeholder=placeholder) for _ in range(3)),
+            )
+        else:
+            cleared = (gr.update(value=""),) * 4
+        return (message, *cleared)
+    preserved = (gr.update(),) * 4
+    return (message, *preserved)
 
 
 def _reset_obs_x_post_stream_guard() -> None:
@@ -3077,86 +3268,156 @@ def _obs_make_x_post_callbacks(
             bool(settings.get("obs_x_post_auto", False)),
         )
 
-    def _perform_action(
-        post_text: str,
+    def _perform_batch(
+        post_texts: tuple[str, ...],
         stream_epoch: int,
         youtube_url: str,
+        snapshot_destinations: str,
     ) -> None:
-        """Claim and perform one action while generation/opt-out stay stable."""
+        """Claim and publish one batch while generation/opt-out stay stable.
 
-        def _action_locked() -> None:
+        ``post_texts`` is built once per stream start from a snapshot of the
+        mode/template/destinations, so a mid-batch settings edit can never
+        shift indices or switch modes halfway through. The existing
+        ``action_claimed`` flag is claimed once for the whole batch (including
+        a no-target separate batch); later iterations additionally require the
+        same epoch/owner plus the local claimed state. Resets always advance
+        the epoch, owners are unique per watcher instance, and watcher
+        replacements change the generation, so no extra batch token is needed.
+        Locks protect each action reservation, not external I/O, so lifecycle
+        changes and opt-out can cancel the remainder of an in-flight batch.
+        """
+        total = len(post_texts)
+        numbered = total > 1
+
+        def _tag(index: int) -> str:
+            return f"（{index + 1}/{total}）" if numbered else ""
+
+        def _open_composer(index: int, post_text: str) -> None:
+            try:
+                open_x_post_composer(post_text)
+                if numbered:
+                    _obs_append_status(
+                        f"X投稿作成画面を開きました{_tag(index)}。"
+                        "内容を確認して「ポスト」を押してください"
+                        "（配信先リンク 1件）"
+                    )
+                else:
+                    target_count = len(
+                        parse_destination_links(snapshot_destinations)
+                    ) + (1 if youtube_url else 0)
+                    _obs_append_status(
+                        "X投稿作成画面を開きました。内容を確認して「ポスト」を押してください"
+                        f"（配信先リンク {target_count}件）"
+                    )
+            except Exception as exc:
+                logger.warning("X post composer open failed: %s", exc)
+                _obs_append_status(
+                    f"X投稿作成画面を開けませんでした{_tag(index)}。"
+                    "ブラウザの設定を確認し、手動で投稿してください"
+                )
+
+        latched: tuple[bool, bool] | None = None
+        latched_revision: int | None = None
+        claimed_here = False
+        api_halted = False
+
+        def _reserve_locked() -> bool:
+            nonlocal latched, latched_revision, claimed_here
             if (
                 not _obs_x_stream_state["active"]
                 or _obs_x_stream_state["epoch"] != stream_epoch
                 or _obs_x_stream_state["owner"] is not owner_token
-                or _obs_x_stream_state["action_claimed"]
             ):
-                return
+                return False
 
-            enabled, auto_enabled = _settings_flags()
-            _obs_x_stream_state["action_claimed"] = True
-            if not enabled:
+            flags = _settings_flags()
+            if not claimed_here:
+                if _obs_x_stream_state["action_claimed"]:
+                    return False
+                latched = flags
+                latched_revision = _obs_x_runtime_revision
+                _obs_x_stream_state["action_claimed"] = True
+                claimed_here = True
+            elif not _obs_x_stream_state["action_claimed"]:
+                return False
+            elif flags != latched or (
+                use_runtime_settings and _obs_x_runtime_revision != latched_revision
+            ):
+                _obs_append_status(
+                    "X投稿設定の変更を検知したため、残りの投稿を中止しました"
+                )
+                return False
+            return flags[0]
+
+        def _reserve_action() -> bool:
+            # Reserving one action is its start boundary. Never hold these
+            # locks during network/browser I/O: OFF, FINISHED and stop must
+            # update state while the current request is still in flight.
+            # A reserved action may finish; the next action checks again.
+            with _obs_watcher_lock:
+                if not _is_current():
+                    return False
+                with _obs_x_post_lock:
+                    if use_runtime_settings:
+                        with _obs_x_runtime_lock:
+                            return _reserve_locked()
+                    return _reserve_locked()
+
+        if total == 0:
+            if _reserve_action():
+                _obs_append_status(
+                    "X投稿用の配信先URLがないため、X投稿を作成しませんでした"
+                )
+            return
+
+        for index, post_text in enumerate(post_texts):
+            if not _reserve_action():
                 return
             if not post_text.strip():
-                _obs_append_status("X投稿文が空のため、投稿画面を開きませんでした")
+                _obs_append_status(
+                    f"X投稿文が空のため、投稿画面を開きませんでした{_tag(index)}"
+                )
                 return
 
-            if auto_enabled:
+            if latched[1] and not api_halted:
                 if x_credentials.is_complete():
                     try:
                         result = post_x_post(post_text, x_credentials)
                     except XPostError as exc:
                         _obs_append_status(
-                            f"X自動投稿に失敗しました: {exc}。"
-                            "手動投稿画面へ切り替えます"
+                            f"X自動投稿に失敗しました{_tag(index)}: {exc}。"
+                            "手動投稿画面へ切り替えます。"
+                            "タイムアウト時は投稿済みか不明な場合があるため、"
+                            "手動で投稿する前にXで投稿済みか確認してください"
                         )
                     except Exception:
-                        # Do not log provider/test-double exception text: it
-                        # may contain a credential or signed request detail.
+                        # Provider exception text may contain signed requests.
                         logger.warning("X API post failed with an unexpected error")
                         _obs_append_status(
-                            "X自動投稿に失敗しました: 予期しないエラー。"
-                            "手動投稿画面へ切り替えます"
+                            f"X自動投稿に失敗しました{_tag(index)}: 予期しないエラー。"
+                            "手動投稿画面へ切り替えます。"
+                            "タイムアウト時は投稿済みか不明な場合があるため、"
+                            "手動で投稿する前にXで投稿済みか確認してください"
                         )
                     else:
                         _obs_append_status(
-                            f"Xへ自動投稿しました: {result.status_url}"
+                            f"Xへ自動投稿しました{_tag(index)}: {result.status_url}"
                         )
+                        continue
+                    # A failed write is never retried; failed and remaining
+                    # targets use composers without reopening successful ones.
+                    api_halted = True
+                    # Failure fallback is a new external action. The user may
+                    # have stopped the batch while the API request was pending.
+                    if not _reserve_action():
                         return
                 else:
                     _obs_append_status(
                         "X自動投稿の認証情報未設定のため手動投稿に切り替えます"
+                        f"{_tag(index)}"
                     )
-            try:
-                open_x_post_composer(post_text)
-                target_count = len(
-                    parse_destination_links(
-                        settings.get("obs_x_post_destinations", "")
-                    )
-                ) + (1 if youtube_url else 0)
-                _obs_append_status(
-                    "X投稿作成画面を開きました。内容を確認して「ポスト」を押してください"
-                    f"（配信先リンク {target_count}件）"
-                )
-            except Exception as exc:
-                logger.warning("X post composer open failed: %s", exc)
-                _obs_append_status(
-                    "X投稿作成画面を開けませんでした。"
-                    "ブラウザの設定を確認し、手動で投稿してください"
-                )
-
-        # All production generation changes use _obs_watcher_lock. Holding it
-        # through the external write closes the old-generation/new-generation
-        # race; the stream lock also serializes competing callbacks.
-        with _obs_watcher_lock:
-            if not _is_current():
-                return
-            with _obs_x_post_lock:
-                if use_runtime_settings:
-                    with _obs_x_runtime_lock:
-                        _action_locked()
-                else:
-                    _action_locked()
+            _open_composer(index, post_text)
 
     def _on_stream_started(
         proactive: bool = False,
@@ -3323,13 +3584,28 @@ def _obs_make_x_post_callbacks(
 
             if not _is_current():
                 return
-            post_text = render_x_post_text(
-                settings.get("obs_x_post_template", DEFAULT_X_POST_TEMPLATE),
-                youtube_url=youtube_url,
-                title=title,
-                destinations=settings.get("obs_x_post_destinations", ""),
+            snapshot_mode = normalize_x_post_mode(
+                settings.get("obs_x_post_mode", "combined")
             )
-            _perform_action(post_text, stream_epoch, youtube_url)
+            snapshot_template = settings.get(
+                "obs_x_post_template", DEFAULT_X_POST_TEMPLATE
+            )
+            snapshot_destinations = settings.get("obs_x_post_destinations", "")
+            try:
+                post_texts = build_x_post_texts(
+                    snapshot_template,
+                    youtube_url=youtube_url,
+                    title=title,
+                    destinations=snapshot_destinations,
+                    mode=snapshot_mode,
+                )
+            except XPostTooLongError as exc:
+                # Never post or open the composer with an over-limit text.
+                _obs_append_status(f"X投稿を中止しました: {exc}")
+                return
+            _perform_batch(
+                post_texts, stream_epoch, youtube_url, snapshot_destinations
+            )
 
         def _worker() -> None:
             try:
@@ -4458,6 +4734,7 @@ def _start_obs_watch_impl(
     x_api_key_secret: str = "",
     x_access_token: str = "",
     x_access_token_secret: str = "",
+    x_post_mode: str | None = None,
 ) -> str:
     """Implementation shared by manual and automatic OBS connection starts."""
     global _obs_watcher, _obs_generation, _obs_retry_handler
@@ -4546,6 +4823,12 @@ def _start_obs_watch_impl(
         x_post_template or DEFAULT_X_POST_TEMPLATE
     )
     settings["obs_x_post_destinations"] = str(x_post_destinations or "")
+    if x_post_mode is None:
+        settings["obs_x_post_mode"] = normalize_x_post_mode(
+            settings.get("obs_x_post_mode", "combined")
+        )
+    else:
+        settings["obs_x_post_mode"] = normalize_x_post_mode(x_post_mode)
     entered_x_credentials = XCredentials(
         api_key=str(x_api_key or ""),
         api_key_secret=str(x_api_key_secret or ""),
@@ -4636,6 +4919,7 @@ def _start_obs_watch_impl(
                 if entered_x_credentials.is_complete()
                 else None
             ),
+            x_post_mode=settings["obs_x_post_mode"],
         )
     except Exception:
         logger.exception("Failed to save OBS connection settings or secrets")
@@ -4822,6 +5106,7 @@ def start_obs_watch(
     obs_x_api_key_secret=None,
     obs_x_access_token=None,
     obs_x_access_token_secret=None,
+    obs_x_post_mode=None,
 ) -> str:
     """Manually (re)start OBS integration from the Gradio controls.
 
@@ -4919,6 +5204,7 @@ def start_obs_watch(
             x_api_key_secret=str(obs_x_api_key_secret or ""),
             x_access_token=str(obs_x_access_token or ""),
             x_access_token_secret=str(obs_x_access_token_secret or ""),
+            x_post_mode=obs_x_post_mode,
         )
 
 
@@ -5029,6 +5315,17 @@ def start_obs_watch_from_defaults(
         settings["obs_x_post_auto"] = bool(
             latest_x_settings.get("obs_x_post_auto", False)
         )
+        settings["obs_x_post_mode"] = normalize_x_post_mode(
+            latest_x_settings.get("obs_x_post_mode", "combined")
+        )
+        # Template and destinations travel with the mode so a save made while
+        # waiting for OBS is never overwritten by the stale startup snapshot.
+        settings["obs_x_post_template"] = latest_x_settings.get(
+            "obs_x_post_template", DEFAULT_X_POST_TEMPLATE
+        )
+        settings["obs_x_post_destinations"] = latest_x_settings.get(
+            "obs_x_post_destinations", ""
+        )
         try:
             return _start_obs_watch_impl(
                 method=method,
@@ -5059,6 +5356,10 @@ def start_obs_watch_from_defaults(
                 x_post_destinations=settings.get(
                     "obs_x_post_destinations",
                     "",
+                ),
+                x_post_mode=settings.get(
+                    "obs_x_post_mode",
+                    "combined",
                 ),
             )
         except secret_store.SecretUnavailableError:
@@ -6485,87 +6786,10 @@ def create_ui():
                             value="",
                         )
 
-                with gr.Accordion("X 配信開始ポスト", open=False):
-                    gr.Markdown(
-                        "WebSocket方式で配信開始を検知したら、配信先リンク入りの"
-                        "告知文を作成します。自動投稿をONにして認証情報4項目を"
-                        "設定するとX APIから投稿します。認証情報が未設定または"
-                        "API投稿に失敗した場合は手動投稿画面を開きます。"
-                        "料金・認証情報の保存場所・停止/失効の手順は "
-                        "`docs/TERMS.md` と `docs/PRIVACY.md` を参照してください。"
-                    )
-                    obs_x_post_on_stream_start = gr.Checkbox(
-                        label="配信開始時にXへ告知する",
-                        value=bool(
-                            defaults.get("obs_x_post_on_stream_start", False)
-                        ),
-                        info="配信開始ごとに新しい投稿文を作成します",
-                    )
-                    obs_x_post_destinations = gr.Textbox(
-                        label="同時配信先URL（1行1件）",
-                        value=defaults.get("obs_x_post_destinations", ""),
-                        lines=3,
-                        placeholder=(
-                            "Twitch|https://www.twitch.tv/your_channel\n"
-                            "Kick|https://kick.com/your_channel"
-                        ),
-                        info=(
-                            "YouTubeのライブURLは認証済みなら自動取得します。"
-                            "他サイトはチャンネルURLを登録してください"
-                        ),
-                    )
-                    obs_x_post_auto = gr.Checkbox(
-                        label="X APIで完全自動投稿する",
-                        value=bool(defaults.get("obs_x_post_auto", False)),
-                        info=(
-                            "ユーザーが明示的にONにした場合だけ投稿します。"
-                            "API利用料とXのポリシーはユーザーのDeveloperアカウントに適用されます"
-                        ),
-                    )
-                    x_credentials_placeholder, x_credentials_info = (
-                        _x_credentials_ui_copy(
-                            _read_secret_for_ui(load_x_credentials, XCredentials())
-                        )
-                    )
-                    with gr.Row():
-                        obs_x_api_key = gr.Textbox(
-                            label="API Key",
-                            value="",
-                            type="password",
-                            placeholder=x_credentials_placeholder,
-                            info=x_credentials_info,
-                        )
-                        obs_x_api_key_secret = gr.Textbox(
-                            label="API Key Secret",
-                            value="",
-                            type="password",
-                            placeholder=x_credentials_placeholder,
-                        )
-                    with gr.Row():
-                        obs_x_access_token = gr.Textbox(
-                            label="Access Token",
-                            value="",
-                            type="password",
-                            placeholder=x_credentials_placeholder,
-                        )
-                        obs_x_access_token_secret = gr.Textbox(
-                            label="Access Token Secret",
-                            value="",
-                            type="password",
-                            placeholder=x_credentials_placeholder,
-                        )
-                    obs_x_post_template = gr.Textbox(
-                        label="X投稿文テンプレート",
-                        value=defaults.get(
-                            "obs_x_post_template",
-                            DEFAULT_X_POST_TEMPLATE,
-                        ),
-                        lines=3,
-                        info=(
-                            "置換: {links}=配信先一覧、{youtube_url}=YouTubeライブURL、"
-                            "{title}=YouTubeタイトル"
-                        ),
-                    )
+                gr.Markdown(
+                    "配信開始時のXへの自動ポストは、"
+                    " **Settings / 設定 → 自動ポスト設定** で設定できます。"
+                )
 
                 with gr.Accordion(
                     "OBS自動処理の生成設定",
@@ -6854,6 +7078,167 @@ def create_ui():
 
             # --- Settings Tab ---
             with gr.Tab("Settings / 設定"):
+                with gr.Accordion("自動ポスト設定 / X 配信開始ポスト", open=False):
+                    gr.Markdown(
+                        "OBSの配信開始に合わせて、Twitch・YouTube・ニコ生のURLを"
+                        "**Xへ告知**します。上から順に設定してください。"
+                    )
+
+                    gr.Markdown("### 1. 配信先URLを入れる")
+                    obs_x_post_destinations = gr.Textbox(
+                        label="同時配信先URL（1行1件）",
+                        value=defaults.get("obs_x_post_destinations", ""),
+                        lines=3,
+                        placeholder=(
+                            "https://www.twitch.tv/your_channel\n"
+                            "https://live.nicovideo.jp/watch/lv123456789"
+                        ),
+                        info="告知したいURLを1行ずつ入力します。配信サービス名は自動で付きます。",
+                    )
+                    gr.Markdown(
+                        "- **Twitch**：自分のチャンネルURLを登録します。\n"
+                        "- **ニコ生**：番組URLを配信のたびに更新します。\n"
+                        "- **YouTube**：この設定タブの「YouTube認証」が済んでいれば、"
+                        "配信開始時にURLとタイトルを取得します。予備のURLも登録できます。"
+                    )
+
+                    gr.Markdown("### 2. 投稿内容を決める")
+                    obs_x_post_mode = gr.Radio(
+                        choices=[
+                            ("まとめて1件", "combined"),
+                            ("配信先ごとに別々", "separate"),
+                        ],
+                        value=normalize_x_post_mode(
+                            defaults.get("obs_x_post_mode", "combined")
+                        ),
+                        label="X投稿のまとめ方",
+                        info="3つの配信先なら、まとめて1投稿／別々に3投稿。タイトルと本文テンプレートは共通です。",
+                    )
+                    obs_x_post_template = gr.Textbox(
+                        label="X投稿文テンプレート",
+                        value=defaults.get(
+                            "obs_x_post_template",
+                            DEFAULT_X_POST_TEMPLATE,
+                        ),
+                        lines=3,
+                        info="{title}=YouTubeタイトル、{links}=配信先リンク。最初は既定の文面のままで使えます。",
+                    )
+                    with gr.Accordion("投稿文の書き方・差し込み項目", open=False):
+                        gr.Markdown(
+                            "好きな挨拶やハッシュタグを追加できます。\n\n"
+                            "| 差し込み項目 | 投稿時に入る内容 |\n"
+                            "| --- | --- |\n"
+                            "| `{title}` | YouTubeから取得した配信タイトル |\n"
+                            "| `{links}` | まとめ投稿では全配信先、別々の投稿ではその配信先のリンク |\n"
+                            "| `{youtube_url}` | YouTubeライブURL（別々の投稿ではYouTubeの投稿だけ） |\n"
+                            "| `{url}` | まとめ投稿ではYouTubeライブURL、別々の投稿では各配信先URL |\n"
+                            "| `{platform}` | 別々の投稿で使う配信サービス名 |\n\n"
+                            "タイトルを取得できなければ `{title}` は空欄になります。"
+                            "Twitch・ニコ生からのタイトル取得には対応していません。"
+                            "配信先の表示名を変える場合は、URL欄に `表示名|URL` と入力できます。"
+                        )
+                    x_post_preview_btn = gr.Button("プレビューを表示", variant="secondary")
+                    gr.Markdown(
+                        "プレビューで文面を確認できます。**このボタンでは投稿されません。**\n\n"
+                        "YouTubeから取得するURL・タイトルは配信開始時に追加されます。"
+                        "「別々」では、投稿ごとに分けて表示します。"
+                    )
+                    x_post_preview_box = gr.Textbox(
+                        label="X投稿プレビュー",
+                        lines=4,
+                        interactive=False,
+                        value="",
+                    )
+
+                    gr.Markdown(
+                        "### 3. Xの認証情報を登録する\n\n"
+                        "**初回は4項目を入力します。** 入力欄に「保存済み」と表示されていれば、"
+                        "空欄のまま再利用できます。"
+                    )
+                    with gr.Accordion("認証情報の取得手順（初回だけ）", open=False):
+                        gr.Markdown(
+                            "1. [X Developer Consoleを開く](https://console.x.com/)から、"
+                            "告知に使うXアカウントのアプリを作成・選択します。\n"
+                            "2. アプリの投稿権限を **Read and write（読み取り・書き込み）** に設定します。\n"
+                            "3. **API Key / API Key Secret / Access Token / Access Token Secret** "
+                            "を発行し、下の同じ名前の欄へ貼り付けます。\n"
+                            "4. 次の手順の **「X告知設定を保存」** を押します。\n\n"
+                            "権限を変更した場合は、その権限でAccess TokenとSecretを再取得してください。"
+                            "この画面ではOAuth 1.0aの4項目を使います。\n\n"
+                            "[X公式：アプリ・認証情報・投稿権限の説明]"
+                            "(https://docs.x.com/fundamentals/developer-apps)"
+                        )
+                    x_credentials_placeholder, x_credentials_info = (
+                        _x_credentials_ui_copy(
+                            _read_secret_for_ui(load_x_credentials, XCredentials())
+                        )
+                    )
+                    with gr.Row():
+                        obs_x_api_key = gr.Textbox(
+                            label="API Key",
+                            value="",
+                            type="password",
+                            placeholder=x_credentials_placeholder,
+                            info=x_credentials_info,
+                        )
+                        obs_x_api_key_secret = gr.Textbox(
+                            label="API Key Secret",
+                            value="",
+                            type="password",
+                            placeholder=x_credentials_placeholder,
+                        )
+                    with gr.Row():
+                        obs_x_access_token = gr.Textbox(
+                            label="Access Token",
+                            value="",
+                            type="password",
+                            placeholder=x_credentials_placeholder,
+                        )
+                        obs_x_access_token_secret = gr.Textbox(
+                            label="Access Token Secret",
+                            value="",
+                            type="password",
+                            placeholder=x_credentials_placeholder,
+                        )
+
+                    gr.Markdown(
+                        "### 4. 保存して自動投稿をONにする\n\n"
+                        "まず入力内容を保存し、**下の2項目を両方ON**にしてください。\n\n"
+                        "X APIの利用料・利用枠は自分のX Developerアカウントに適用されます。"
+                        "別々に投稿する場合は、投稿数分を使います。"
+                    )
+                    x_post_save_btn = gr.Button("X告知設定を保存", variant="primary")
+                    x_post_save_status = gr.Textbox(
+                        label="X告知設定の保存結果",
+                        lines=3,
+                        interactive=False,
+                        value="",
+                    )
+                    gr.Markdown(
+                        "料金・認証情報の保存場所・停止/失効の手順は "
+                        "`docs/TERMS.md` と `docs/PRIVACY.md` を参照してください。"
+                    )
+                    obs_x_post_on_stream_start = gr.Checkbox(
+                        label="配信開始時にXへ告知する",
+                        value=bool(defaults.get("obs_x_post_on_stream_start", False)),
+                        info="告知機能を使うためのスイッチです。OFFにすると配信開始時の告知を停止します。",
+                    )
+                    obs_x_post_auto = gr.Checkbox(
+                        label="X APIで完全自動投稿する",
+                        value=bool(defaults.get("obs_x_post_auto", False)),
+                        info="ON：確認画面を出さずに投稿します。OFF：投稿画面を開き、自分で「ポスト」を押します。",
+                    )
+                    gr.Markdown(
+                        "**最後に「OBS連携 / OBS」タブで開始します**\n\n"
+                        "1. 検知方式を **websocket** にして、OBSの接続情報を設定します。\n"
+                        "2. **「OBS連携 開始」** を押します。すでに連携中なら、停止→開始し直してください。\n"
+                        "3. 次にOBSで配信を開始すると、告知が動きます。配信開始時はこのアプリを起動しておいてください。\n\n"
+                        "ON/OFFは切り替え時に自動保存され、起動中の連携にも反映されます。"
+                        "本文・URL・まとめ方・認証情報を変更したら、保存して連携を停止→開始してください。\n\n"
+                        "認証情報が未設定またはAPI投稿に失敗した場合は手動投稿画面へ切り替わります。"
+                        "結果はOBS連携タブの「OBS連携ステータス」で確認できます。"
+                    )
+
                 with gr.Row():
                     with gr.Column():
                         gr.HTML("<h3>AI Model / 分析AI</h3>")
@@ -7436,6 +7821,7 @@ def create_ui():
                 obs_x_api_key_secret,
                 obs_x_access_token,
                 obs_x_access_token_secret,
+                obs_x_post_mode,
             ],
             outputs=obs_status_box,
         )
@@ -7450,6 +7836,37 @@ def create_ui():
             inputs=[obs_x_post_on_stream_start, obs_x_post_auto],
             outputs=[],
             queue=False,
+        )
+        x_post_preview_btn.click(
+            fn=preview_x_post_text,
+            inputs=[obs_x_post_template, obs_x_post_destinations, obs_x_post_mode],
+            outputs=x_post_preview_box,
+            queue=False,
+        )
+        app.load(
+            fn=load_x_post_defaults_for_ui,
+            inputs=None,
+            outputs=[obs_x_post_template, obs_x_post_destinations, obs_x_post_mode],
+            queue=False,
+        )
+        x_post_save_btn.click(
+            fn=save_x_post_settings_for_ui,
+            inputs=[
+                obs_x_post_template,
+                obs_x_post_destinations,
+                obs_x_api_key,
+                obs_x_api_key_secret,
+                obs_x_access_token,
+                obs_x_access_token_secret,
+                obs_x_post_mode,
+            ],
+            outputs=[
+                x_post_save_status,
+                obs_x_api_key,
+                obs_x_api_key_secret,
+                obs_x_access_token,
+                obs_x_access_token_secret,
+            ],
         )
         obs_stop_btn.click(
             fn=stop_obs_watch,

@@ -23,8 +23,10 @@
 - The feature posts only the user's own stream announcement. It does not read, analyze, cache, redistribute, or resell X Content.
 - Automatic posting is disabled by default and requires both the existing stream-start announcement switch and the separate **X APIで完全自動投稿する** opt-in.
 - The UI explains the action before opt-in. Turning either switch off stops future automated actions.
-- One active stream can trigger at most one API request. Duplicate stream-start events are ignored until a stream-finished event resets the guard.
-- The implementation does not retry a failed API write. A failure opens the prefilled composer for an optional manual post instead.
+- Combined mode (the default) makes at most one API request per active stream. Optional separate mode makes at most one request per unique destination, using the same title and template. Duplicate stream-start events are ignored for the entire batch until a stream-finished event resets the guard.
+- The implementation does not retry a failed API write. After a failure, the failed and remaining destinations open prefilled composers for optional manual posts; successful destinations are not reopened. Because a failed response can still mean X accepted a post, the status asks the user to check X before posting manually.
+- Each action rechecks the watcher, stream, and posting switches. Stopping the integration, ending the stream, or changing either switch cancels the remaining batch. A request already sent cannot be recalled.
+- Separate mode creates multiple posts and API requests. The UI explains this next to the mode control; it does not change credentials or silently enable automatic posting.
 - The user remains responsible for the post body, linked content, account behavior, developer use-case registration, and ongoing compliance with the X Rules and Automation Rules. Duplicate, spammy, misleading, abusive, private, or unauthorized content is not permitted.
 
 This is intended to meet the Automation Rules for explicit consent and helpful informational posts while limiting duplicate activity. It is an implementation assessment, not a legal opinion or approval from X.

@@ -817,7 +817,7 @@ def test_generation_race_cannot_post_twice(monkeypatch):
     posted = []
     first_render_started = threading.Event()
     release_first_render = threading.Event()
-    original_render = web_app.render_x_post_text
+    original_render = web_app.build_x_post_texts
     render_count = 0
     render_lock = threading.Lock()
 
@@ -835,7 +835,7 @@ def test_generation_race_cannot_post_twice(monkeypatch):
         posted.append(text)
         return XPostResult("1", "https://x.com/i/web/status/1")
 
-    monkeypatch.setattr(web_app, "render_x_post_text", blocking_render)
+    monkeypatch.setattr(web_app, "build_x_post_texts", blocking_render)
     monkeypatch.setattr(web_app, "post_x_post", fake_post)
     monkeypatch.setattr(
         web_app,

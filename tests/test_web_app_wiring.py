@@ -712,6 +712,7 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_x_post_destinations", "obs_x_post_auto", "obs_x_api_key",
         "obs_x_api_key_secret", "obs_x_access_token",
         "obs_x_access_token_secret",
+        "obs_x_post_mode",
     ]
     assert _click_input_names(module, "obs_start_btn") == [
         "obs_trigger_radio", "obs_host", "obs_port", "obs_password",
@@ -728,6 +729,7 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_x_post_destinations", "obs_x_post_auto", "obs_x_api_key",
         "obs_x_api_key_secret", "obs_x_access_token",
         "obs_x_access_token_secret",
+        "obs_x_post_mode",
     ]
 
 
@@ -746,7 +748,8 @@ def test_obs_x_post_controls_are_saved_and_explain_dynamic_links():
     assert "obs_x_post_auto" in source
     assert "obs_x_post_destinations" in source
     assert "obs_x_post_template" in source
-    assert "{links}=配信先一覧" in source
+    assert "{links}=配信先リンク" in source
+    assert 'label="X投稿のまとめ方"' in source
     assert "認証情報が未設定または" in source
     assert "API投稿に失敗した場合は手動投稿画面" in source
 
