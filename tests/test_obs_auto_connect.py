@@ -128,6 +128,7 @@ def test_auto_connect_waits_then_starts_with_saved_defaults(monkeypatch, tmp_pat
         "x_post_auto": False,
         "x_post_template": web_app.DEFAULT_X_POST_TEMPLATE,
         "x_post_destinations": "",
+        "x_post_mode": "combined",
     }]
 
 
@@ -315,3 +316,35 @@ def test_scheduler_thread_failure_does_not_break_app_startup(monkeypatch, tmp_pa
 
     assert web_app.schedule_obs_auto_connect() is None
     assert "予約できません" in web_app._obs_status_text()
+
+
+def test_auto_connect_uses_latest_saved_announcement_settings(monkeypatch, tmp_path):
+    settings_file_dir = tmp_path
+    _isolate_settings(
+        monkeypatch,
+        tmp_path,
+        obs_x_post_template="OLD {title}",
+        obs_x_post_destinations="Twitch: https://twitch.tv/old",
+        obs_x_post_mode="combined",
+    )
+    calls = []
+
+    def fake_wait(host, port, *, timeout, retry_interval):
+        # The user saves new announcement settings while startup is waiting.
+        _write_settings(
+            settings_file_dir,
+            obs_x_post_template="NEW {title}",
+            obs_x_post_destinations="Twitch: https://twitch.tv/new",
+            obs_x_post_mode="separate",
+        )
+        return True
+
+    monkeypatch.setattr(web_app, "_wait_for_obs_websocket", fake_wait)
+    monkeypatch.setattr(
+        web_app, "_start_obs_watch_impl", lambda **kwargs: calls.append(kwargs) or "ok"
+    )
+
+    assert web_app.start_obs_watch_from_defaults() == "ok"
+    assert calls[0]["x_post_template"] == "NEW {title}"
+    assert calls[0]["x_post_destinations"] == "Twitch: https://twitch.tv/new"
+    assert calls[0]["x_post_mode"] == "separate"

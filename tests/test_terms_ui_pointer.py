@@ -7,7 +7,7 @@ def test_terms_and_privacy_pointers_in_ui_source():
     source = (Path(__file__).resolve().parents[1] / "web_app.py").read_text(
         encoding="utf-8"
     )
-    x_description = source.split('with gr.Accordion("X 配信開始ポスト"', 1)[1].split(
+    x_description = source.split('with gr.Accordion("自動ポスト設定 / X 配信開始ポスト"', 1)[1].split(
         "obs_x_post_on_stream_start =", 1
     )[0]
     settings_description = source.split('with gr.Tab("Settings / 設定")', 1)[1].split(

@@ -66,6 +66,7 @@ def test_obs_settings_save_preserves_connection_and_secrets(
         "obs_x_post_auto": True,
         "obs_x_post_template": "配信開始 {links}",
         "obs_x_post_destinations": "Twitch|https://twitch.tv/example",
+        "obs_x_post_mode": "separate",
     }
     settings_file.write_text(json.dumps(x_settings), encoding="utf-8")
     password_bytes = b"saved-password-must-not-change"
