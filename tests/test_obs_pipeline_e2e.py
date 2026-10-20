@@ -1642,6 +1642,52 @@ def test_recording_primary_falls_back_when_local_pipeline_fails(monkeypatch):
     assert "完成アーカイブへフォールバック" in web_app._obs_status_text()
 
 
+def test_recording_primary_does_not_fall_back_when_llm_detection_fails(monkeypatch):
+    with web_app._obs_status_lock:
+        web_app._obs_status_lines.clear()
+    local_done = threading.Event()
+    archive_touched = threading.Event()
+
+    def fake_local(_path, _settings):
+        local_done.set()
+        return web_app.ObsPipelineOutcome(
+            log="Error: quota",
+            success=False,
+            error="Gemini の利用枠（無料枠の上限）に達しました",
+            llm_failed=True,
+        )
+
+    def touch_archive(*_args, **_kwargs):
+        archive_touched.set()
+        raise AssertionError("LLM failure must not resolve or download the archive")
+
+    monkeypatch.setattr(web_app, "_run_obs_auto_pipeline_outcome", fake_local)
+    monkeypatch.setattr(web_app, "_resolve_obs_youtube_archive", touch_archive)
+    monkeypatch.setattr(web_app, "_run_obs_youtube_pipeline_outcome", touch_archive)
+
+    recorded, recording_stopped, _started, finished = (
+        web_app._obs_make_recording_primary_callbacks(True, {})
+    )
+    recording_path = "C:/recordings/llm-failed.mkv"
+    recording_stopped(recording_path)
+    recorded(recording_path)
+    assert local_done.wait(timeout=5)
+    finished()
+
+    deadline = time.monotonic() + 5
+    while (
+        "フォールバックは行いません" not in web_app._obs_status_text()
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.02)
+    status = web_app._obs_status_text()
+    assert "文字起こしは完了しましたが" in status
+    assert "利用枠" in status
+    assert "YouTube完成アーカイブへフォールバックします" not in status
+    time.sleep(0.2)
+    assert not archive_touched.is_set()
+
+
 def test_local_timestamp_append_failure_never_downloads_archive(monkeypatch):
     with web_app._obs_status_lock:
         web_app._obs_status_lines.clear()

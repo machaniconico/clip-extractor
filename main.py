@@ -9,7 +9,13 @@ from pathlib import Path
 from chapters import generate_chapter_text, write_chapter_file
 from config import FontConfig
 from downloader import download_video, get_url_source
-from transcriber import transcribe, segments_to_text
+from transcriber import (
+    TRANSCRIPT_SEGMENTS_FILENAME,
+    segments_to_llm_text,
+    segments_to_text,
+    transcribe,
+    write_transcript_segments,
+)
 from highlighter import detect_highlights
 from audio_energy import fuse_audio_energy
 from clipper import extract_clips, generate_thumbnails, get_video_info
@@ -242,11 +248,18 @@ def main():
     transcript_path = output_dir / "transcript.txt"
     transcript_path.write_text(transcript_text, encoding="utf-8")
     print(f"Transcript saved: {transcript_path}")
+    write_transcript_segments(
+        output_dir / TRANSCRIPT_SEGMENTS_FILENAME,
+        segments,
+        video_path,
+        args.language,
+        args.whisper_model,
+    )
 
     # Step 4: Detect highlights
     print("\n--- Highlight Detection ---")
     highlights = detect_highlights(
-        transcript_text,
+        segments_to_llm_text(segments),
         num_clips=args.clips,
         min_duration=args.min_duration,
         max_duration=args.max_duration,

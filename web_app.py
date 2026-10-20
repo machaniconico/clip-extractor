@@ -86,6 +86,7 @@ class ObsPipelineOutcome:
     chapters_text: str = ""
     youtube_appended: bool | None = None
     skipped: bool = False
+    llm_failed: bool = False
 
 # --- File logging setup ---
 # Use TEMP dir to avoid Japanese path issues with OneDrive/Desktop
@@ -1066,10 +1067,21 @@ def open_output_folder(current_base: str) -> None:
 
 from chapters import generate_chapter_text, write_chapter_file
 from downloader import download_video, get_url_source
-from transcriber import transcribe, segments_to_text
+from transcriber import (
+    TRANSCRIPT_SEGMENTS_FILENAME,
+    find_reusable_transcript,
+    load_transcript_file,
+    load_transcript_meta,
+    segments_to_llm_text,
+    segments_to_text,
+    source_fingerprint,
+    transcribe,
+    write_transcript_segments,
+)
 from highlighter import (
     GEMINI_DEFAULT_MODEL,
     GEMINI_MODEL_CHOICES,
+    GeminiTemporaryError,
     LOCAL_LLM_ENABLE_ENV,
     LOCAL_LLM_MODEL_ENV,
     detect_highlights,
@@ -1419,6 +1431,104 @@ def _apply_review_edit_event_session_only(
     return apply_edits_to_session(session, idx, start_sec, end_sec, title)
 
 
+def _obtain_segments(
+    video_path: Path,
+    original_path: Path | None,
+    video_duration: float,
+    base_dir: Path,
+    output_dir: Path,
+    whisper_model: str,
+    language: str,
+    resume_transcript: str,
+    log: Callable[[str], None],
+) -> list:
+    """Return transcript segments, reusing a saved transcript when possible.
+
+    Order: manual resume file, then an earlier ``output_*`` run of the same
+    local input, then Whisper. Also writes transcript.txt and
+    transcript_segments.json into ``output_dir``.
+    """
+    segments = None
+    resume_text = str(resume_transcript or "").strip().strip('"')
+    if resume_text and original_path is None:
+        log("既存の文字起こしの指定はローカル動画のときのみ使えるため無視します")
+    elif resume_text:
+        resume_path = Path(resume_text)
+        if resume_path.is_dir():
+            json_path = resume_path / TRANSCRIPT_SEGMENTS_FILENAME
+            resume_path = json_path if json_path.is_file() else resume_path / "transcript.txt"
+        if not resume_path.is_file():
+            raise ValueError(f"既存の文字起こしファイルが見つかりません: {resume_text}")
+        segments, source = load_transcript_file(resume_path)
+        if source is not None:
+            wanted = source_fingerprint(original_path)
+            if source.get("size") != wanted["size"] or not (
+                source.get("name") == wanted["name"]
+                or source.get("mtime") == wanted["mtime"]
+            ):
+                raise ValueError(
+                    "指定された文字起こしは別の動画から作られたようです"
+                    "（ファイルサイズが一致しない、またはファイル名と更新日時の"
+                    "どちらも一致しません）。動画と文字起こしを確認してください。"
+                    "それでも使う場合は transcript.txt を指定してください"
+                )
+        else:
+            log(
+                "  [Warn] transcript.txt には元動画の情報がないため、"
+                "動画との一致は確認できません"
+            )
+            last_end = max(seg.end for seg in segments)
+            if last_end > float(video_duration) + 5.0:
+                raise ValueError(
+                    f"文字起こしの最終時刻（{last_end:.0f}秒）が動画の長さ"
+                    f"（{float(video_duration):.0f}秒）を超えています。"
+                    "別の動画の文字起こしではありませんか"
+                )
+        log(
+            f"[Transcribe] 既存の文字起こしを再利用: {resume_path} "
+            f"({len(segments)} segments)"
+        )
+        if source is None:
+            log("  ユーザー指定のため、動画との一致は未検証のまま現在の動画情報で保存します")
+        else:
+            saved_model, saved_language = load_transcript_meta(resume_path)
+            whisper_model = saved_model or whisper_model
+            language = saved_language or language
+    elif original_path is not None:
+        reusable = find_reusable_transcript(
+            base_dir, original_path, whisper_model, language
+        )
+        if reusable is not None:
+            try:
+                segments, _source = load_transcript_file(reusable)
+            except ValueError:
+                segments = None
+            else:
+                log(
+                    f"[Transcribe] 同じ録画の文字起こしを再利用: {reusable} "
+                    f"({len(segments)} segments)"
+                )
+                saved_model, saved_language = load_transcript_meta(reusable)
+                whisper_model = saved_model or whisper_model
+                language = saved_language or language
+    if segments is None:
+        segments = transcribe(video_path, whisper_model, language)
+    (output_dir / "transcript.txt").write_text(
+        segments_to_text(segments), encoding="utf-8"
+    )
+    try:
+        write_transcript_segments(
+            output_dir / TRANSCRIPT_SEGMENTS_FILENAME,
+            segments,
+            original_path or video_path,
+            language,
+            whisper_model,
+        )
+    except OSError as exc:
+        logger.warning("Could not save transcript_segments.json: %s", exc)
+    return segments
+
+
 def detect_phase(
     input_url: str,
     input_file,
@@ -1438,10 +1548,17 @@ def detect_phase(
     audio_alpha: float,
     output_base_dir: str,
     generate_shorts: bool = False,
+    resume_transcript: str = "",
     progress=gr.Progress(),
 ):
     """Detection phase: validate, resolve input, transcribe, and find highlights."""
     logs = []
+    # True only while the LLM highlight call runs, so callers (OBS) can tell an
+    # LLM failure from a recording problem and skip the pointless archive fallback.
+    llm_stage = False
+
+    def failed_session() -> dict:
+        return {"logs": logs, "llm_failed": True} if llm_stage else {"logs": logs}
 
     def log(msg: str):
         logger.info(msg)
@@ -1519,11 +1636,17 @@ def detect_phase(
 
         progress(0.15, desc="[Step 2/3] Transcribing audio...")
         log("[Step 2/3] Transcribing... (this may take a while)")
-        segments = transcribe(video_path, whisper_model, language)
-        transcript_text = segments_to_text(segments)
-
-        transcript_path = output_dir / "transcript.txt"
-        transcript_path.write_text(transcript_text, encoding="utf-8")
+        segments = _obtain_segments(
+            video_path,
+            original_path if input_file is not None else None,
+            video_info["duration"],
+            base_dir,
+            output_dir,
+            whisper_model,
+            language,
+            resume_transcript,
+            log,
+        )
         log(f"  Transcription complete: {len(segments)} segments")
 
         progress(0.5, desc="[Step 3/3] Detecting highlights...")
@@ -1534,8 +1657,9 @@ def detect_phase(
             "local": "Local LLM",
         }.get(ai_provider, ai_provider)
         log(f"[Step 3/3] Analyzing with {provider_name}...")
+        llm_stage = True
         highlights = detect_highlights(
-            transcript_text,
+            segments_to_llm_text(segments),
             num_clips=num_clips,
             min_duration=min_duration,
             max_duration=max_duration,
@@ -1545,6 +1669,7 @@ def detect_phase(
             ai_model=ai_model,
             video_duration=video_info["duration"],
         )
+        llm_stage = False
 
         if audio_fusion:
             alpha = float(audio_alpha if audio_alpha is not None else 0.35)
@@ -1601,6 +1726,10 @@ def detect_phase(
             SECRET_UNAVAILABLE_UI_MESSAGE,
             gr.update(visible=False),
         )
+    except GeminiTemporaryError as e:
+        logger.warning("Highlight detection stopped: %s", e)
+        log(f"\nError: {e}")
+        return failed_session(), "\n".join(logs), gr.update(visible=False)
     except subprocess.CalledProcessError as e:
         err_detail = f"Command failed: {e.cmd}\nReturn code: {e.returncode}"
         if e.stdout:
@@ -1609,13 +1738,13 @@ def detect_phase(
             err_detail += f"\nstderr: {e.stderr[:500]}"
         logger.error(err_detail)
         log(f"\nError (subprocess): {err_detail}")
-        return {"logs": logs}, "\n".join(logs), gr.update(visible=False)
+        return failed_session(), "\n".join(logs), gr.update(visible=False)
     except Exception as e:
         tb = traceback.format_exc()
         logger.error(f"Error: {e}\n{tb}")
         log(f"\nError: {e}")
         log(tb)
-        return {"logs": logs}, "\n".join(logs), gr.update(visible=False)
+        return failed_session(), "\n".join(logs), gr.update(visible=False)
 
 
 def render_phase(
@@ -2501,6 +2630,7 @@ def _run_obs_detect_render(
                 log="\n".join(logs + [error]),
                 success=False,
                 error=error,
+                llm_failed=bool(isinstance(session, dict) and session.get("llm_failed")),
             )
 
         log("[OBS] Detect 完了 — Render 開始")
@@ -3496,6 +3626,11 @@ def _obs_make_stream_pipeline_callbacks(
                     _obs_append_status(
                         "OBS録画から" + "と".join(generated) + "を生成しました"
                     )
+                elif outcome.llm_failed:
+                    _obs_append_status(
+                        "OBS録画のハイライト検出(LLM)に失敗しました: "
+                        f"{outcome.error or outcome.log}"
+                    )
                 else:
                     _obs_append_status(
                         "OBS録画の処理に失敗 — 完成アーカイブを保険として使用します: "
@@ -3726,6 +3861,19 @@ def _obs_make_stream_pipeline_callbacks(
                             local_outcome is not None
                             and getattr(local_outcome, "success", False)
                         )
+                        if not use_recording and getattr(
+                            local_outcome, "llm_failed", False
+                        ):
+                            # 文字起こしは成功しLLM検出だけ失敗: アーカイブでも同じ理由で
+                            # 失敗するため、15GB級のDLに進まず終了する（再試行は可能）。
+                            _obs_append_status(
+                                "OBS録画の文字起こしは完了しましたが、"
+                                "ハイライト検出(LLM)に失敗したため、"
+                                "YouTubeアーカイブへのフォールバックは行いません"
+                                "（同じ理由で失敗するため）。"
+                                f"{getattr(local_outcome, 'error', '')}"
+                            )
+                            return
                         if not use_recording:
                             with state_lock:
                                 stream_state["source_claim"] = "archive"
@@ -5128,11 +5276,17 @@ def _legacy_one_shot_handler(
         # Step 2: Transcription
         progress(0.15, desc="[Step 2/6] Transcribing audio...")
         log("[Step 2/6] Transcribing... (this may take a while)")
-        segments = transcribe(video_path, whisper_model, language)
-        transcript_text = segments_to_text(segments)
-
-        transcript_path = output_dir / "transcript.txt"
-        transcript_path.write_text(transcript_text, encoding="utf-8")
+        segments = _obtain_segments(
+            video_path,
+            original_path if input_file is not None else None,
+            video_info["duration"],
+            base_dir,
+            output_dir,
+            whisper_model,
+            language,
+            "",
+            log,
+        )
         log(f"  Transcription complete: {len(segments)} segments")
 
         # Step 3: Highlight detection
@@ -5151,7 +5305,7 @@ def _legacy_one_shot_handler(
         )
 
         highlights = detect_highlights(
-            transcript_text,
+            segments_to_llm_text(segments),
             num_clips=num_clips,
             min_duration=min_duration,
             max_duration=max_duration,
@@ -5365,6 +5519,10 @@ def _legacy_one_shot_handler(
         return ProcessResult(
             log=SECRET_UNAVAILABLE_UI_MESSAGE,
         ).as_gradio_outputs()
+    except GeminiTemporaryError as e:
+        logger.warning("Highlight detection stopped: %s", e)
+        log(f"\nError: {e}")
+        return ProcessResult(log="\n".join(logs)).as_gradio_outputs()
     except subprocess.CalledProcessError as e:
         err_detail = f"Command failed: {e.cmd}\nReturn code: {e.returncode}"
         if e.stdout:
@@ -5875,6 +6033,15 @@ def create_ui():
                             height=128,
                             elem_classes="input-source-control",
                         )
+
+                resume_transcript = gr.Textbox(
+                    label="既存の文字起こしから再開（任意）",
+                    placeholder="transcript_segments.json または transcript.txt のパス",
+                    info=(
+                        "ローカルファイル入力のときだけ有効。指定すると Whisper を"
+                        "飛ばして、保存済みの文字起こしでハイライト検出から始めます"
+                    ),
+                )
 
                 with gr.Row(elem_classes="input-settings-grid"):
                     with gr.Column(
@@ -7149,6 +7316,7 @@ def create_ui():
                 audio_fusion, audio_alpha,
                 output_base_dir,
                 generate_shorts,
+                resume_transcript,
             ],
             outputs=[session_state, status, review_panel],
             concurrency_limit=1,

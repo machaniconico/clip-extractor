@@ -207,11 +207,12 @@ def test_detect_phase_signature_matches_detect_inputs():
     args = _function_args(module, "detect_phase")
     args = [arg for arg in args if arg != "progress"]
     assert args == _event_input_names(module, "detect_phase", "then")
-    assert args[-4:] == [
+    assert args[-5:] == [
         "audio_fusion",
         "audio_alpha",
         "output_base_dir",
         "generate_shorts",
+        "resume_transcript",
     ]
 
 
