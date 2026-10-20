@@ -173,3 +173,39 @@ def test_post_x_post_network_error_is_sanitized():
 
     assert str(raised.value) == "X APIへの接続に失敗しました"
     assert secret not in str(raised.value)
+
+
+_DEST_TEXT = "https://twitch.tv/a\nhttps://kick.com/b"
+_DEST_LIST = ["https://twitch.tv/a", "https://kick.com/b"]
+
+
+@pytest.mark.parametrize("mode", ["combined", "separate"])
+def test_list_destinations_match_newline_string(mode):
+    kwargs = dict(
+        youtube_url="https://www.youtube.com/watch?v=abc123",
+        title="配信",
+        mode=mode,
+    )
+    from_text = x_post.build_x_post_texts(None, destinations=_DEST_TEXT, **kwargs)
+    from_list = x_post.build_x_post_texts(None, destinations=_DEST_LIST, **kwargs)
+    from_tuple = x_post.build_x_post_texts(
+        None, destinations=tuple(_DEST_LIST), **kwargs
+    )
+
+    assert from_list == from_text == from_tuple
+    assert len(from_list) == (3 if mode == "separate" else 1)
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (None, ""),
+        ("a\nb", "a\nb"),
+        (["a", "", "  ", None, 3, " b "], "a\nb"),
+        (("a",), "a"),
+        ({"a": 1}, ""),
+        (5, ""),
+    ],
+)
+def test_normalize_destinations_text(value, expected):
+    assert x_post.normalize_destinations_text(value) == expected

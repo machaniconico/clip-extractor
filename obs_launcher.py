@@ -16,6 +16,8 @@ import subprocess
 import sys
 from typing import Mapping
 
+from config import setting_bool
+
 
 OBS_EXECUTABLE_ENV = "OBS_EXECUTABLE"
 _WINDOWS_PROCESS_NAMES = ("obs64.exe", "obs32.exe")
@@ -51,7 +53,9 @@ def load_obs_launch_preferences(settings_path: str | Path) -> ObsLaunchPreferenc
     raw_path = data.get("obs_executable_path", "")
     executable_path = raw_path.strip() if isinstance(raw_path, str) else ""
     return ObsLaunchPreferences(
-        enabled=data.get("obs_launch_on_startup") is True,
+        enabled=setting_bool(
+            data.get("obs_launch_on_startup"), False, "obs_launch_on_startup"
+        ),
         executable_path=executable_path,
     )
 

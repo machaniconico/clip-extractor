@@ -28,6 +28,7 @@ os.environ["MPLBACKEND"] = "Agg"
 
 import gradio as gr
 import secret_store
+from config import setting_bool
 from x_post import (
     DEFAULT_X_POST_TEMPLATE,
     XCredentials,
@@ -35,6 +36,7 @@ from x_post import (
     XPostTooLongError,
     X_MAX_WEIGHTED_LENGTH,
     build_x_post_texts,
+    normalize_destinations_text,
     normalize_x_post_mode,
     open_x_post_composer,
     parse_destination_links,
@@ -108,6 +110,8 @@ _sh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger.addHandler(_fh)
 logger.addHandler(_sh)
 logger.info(f"Log file: {LOG_FILE}")
+
+_setting_bool = setting_bool
 
 
 def get_system_fonts():
@@ -323,16 +327,60 @@ OBS_PROCESSING_DEFAULTS = {
     "karaoke": False,
 }
 
+# Every boolean that is persisted in the settings file.  load_defaults() coerces
+# these once at the load boundary so UI initial values, strict ``is True`` checks
+# and callbacks only ever see real bools (a saved "false"/"off" must not become
+# True when handed to Gradio or ``bool()``).
+_SAVED_BOOL_DEFAULTS = {
+    "enable_clips": True,
+    "enable_chapters": True,
+    "auto_append_youtube": False,
+    "confirm_before_auto_process": True,
+    "generate_shorts": False,
+    "shorts_title": True,
+    "generate_thumbnails": False,
+    "audio_fusion": False,
+    "karaoke": False,
+    "obs_launch_on_startup": False,
+    "obs_auto_connect_on_startup": True,
+    "obs_auto_process": True,
+    "obs_x_post_on_stream_start": False,
+    "obs_x_post_auto": False,
+}
+_OBS_PROFILE_BOOL_KEYS = tuple(
+    key for key, value in OBS_PROCESSING_DEFAULTS.items() if isinstance(value, bool)
+)
+
+
+def _normalise_saved_booleans(data: dict) -> None:
+    """Coerce known boolean settings (top level and obs_processing) in place."""
+    for key, default in _SAVED_BOOL_DEFAULTS.items():
+        if key in data:
+            data[key] = setting_bool(data[key], default, key)
+    profile = data.get("obs_processing")
+    if isinstance(profile, dict):
+        for key in _OBS_PROFILE_BOOL_KEYS:
+            if key in profile:
+                profile[key] = setting_bool(
+                    profile[key], OBS_PROCESSING_DEFAULTS[key], f"obs_processing.{key}"
+                )
+
+
 def _obs_processing_settings_from_defaults(defaults: dict | None = None) -> dict:
     """Return the OBS processing profile with legacy top-level fallbacks."""
     source = defaults if defaults is not None else load_defaults()
     saved_profile = source.get("obs_processing")
     if not isinstance(saved_profile, dict):
         saved_profile = {}
-    return {
+    profile = {
         key: saved_profile.get(key, source.get(key, fallback))
         for key, fallback in OBS_PROCESSING_DEFAULTS.items()
     }
+    for key in _OBS_PROFILE_BOOL_KEYS:
+        profile[key] = setting_bool(
+            profile[key], OBS_PROCESSING_DEFAULTS[key], f"obs_processing.{key}"
+        )
+    return profile
 
 
 def _normalise_obs_processing_settings(
@@ -347,15 +395,33 @@ def _normalise_obs_processing_settings(
             if value is not None:
                 base[key] = value
 
-    base["enable_clips"] = bool(base["enable_clips"])
-    base["enable_chapters"] = bool(base["enable_chapters"])
-    base["auto_append_youtube"] = bool(base["auto_append_youtube"])
-    base["confirm_before_auto_process"] = bool(base["confirm_before_auto_process"])
-    base["generate_shorts"] = bool(base["generate_shorts"])
-    base["shorts_title"] = bool(base["shorts_title"])
-    base["generate_thumbnails"] = bool(base["generate_thumbnails"])
-    base["audio_fusion"] = bool(base["audio_fusion"])
-    base["karaoke"] = bool(base["karaoke"])
+    base["enable_clips"] = _setting_bool(
+        base["enable_clips"], OBS_PROCESSING_DEFAULTS["enable_clips"], "enable_clips"
+    )
+    base["enable_chapters"] = _setting_bool(
+        base["enable_chapters"], OBS_PROCESSING_DEFAULTS["enable_chapters"], "enable_chapters"
+    )
+    base["auto_append_youtube"] = _setting_bool(
+        base["auto_append_youtube"], OBS_PROCESSING_DEFAULTS["auto_append_youtube"], "auto_append_youtube"
+    )
+    base["confirm_before_auto_process"] = _setting_bool(
+        base["confirm_before_auto_process"], OBS_PROCESSING_DEFAULTS["confirm_before_auto_process"], "confirm_before_auto_process"
+    )
+    base["generate_shorts"] = _setting_bool(
+        base["generate_shorts"], OBS_PROCESSING_DEFAULTS["generate_shorts"], "generate_shorts"
+    )
+    base["shorts_title"] = _setting_bool(
+        base["shorts_title"], OBS_PROCESSING_DEFAULTS["shorts_title"], "shorts_title"
+    )
+    base["generate_thumbnails"] = _setting_bool(
+        base["generate_thumbnails"], OBS_PROCESSING_DEFAULTS["generate_thumbnails"], "generate_thumbnails"
+    )
+    base["audio_fusion"] = _setting_bool(
+        base["audio_fusion"], OBS_PROCESSING_DEFAULTS["audio_fusion"], "audio_fusion"
+    )
+    base["karaoke"] = _setting_bool(
+        base["karaoke"], OBS_PROCESSING_DEFAULTS["karaoke"], "karaoke"
+    )
     try:
         base["num_clips"] = int(base["num_clips"])
     except (TypeError, ValueError):
@@ -614,6 +680,7 @@ def load_defaults() -> dict:
                 SETTINGS_FILE,
                 exc,
             )
+    _normalise_saved_booleans(defaults)
     for key in REMOVED_MEDIA_SETTING_KEYS:
         defaults.pop(key, None)
     for key in X_SECRET_SETTING_KEYS:
@@ -633,6 +700,9 @@ def load_defaults() -> dict:
     )
     defaults["obs_x_post_mode"] = normalize_x_post_mode(
         defaults.get("obs_x_post_mode", "combined")
+    )
+    defaults["obs_x_post_destinations"] = normalize_destinations_text(
+        defaults.get("obs_x_post_destinations", "")
     )
     # Secrets are loaded only inside start_obs_watch(). Returning one here can
     # expose it in Gradio's component configuration when the app is LAN-bound.
@@ -688,7 +758,7 @@ def _obs_settings_updates_for_ui(defaults: dict) -> tuple:
         defaults["obs_port"],
         defaults["obs_stop_event"],
         defaults["obs_watch_folder"],
-        bool(defaults["obs_auto_process"]),
+        _setting_bool(defaults["obs_auto_process"], True, "obs_auto_process"),
         processing["enable_clips"],
         processing["clip_prompt"],
         processing["enable_chapters"],
@@ -764,7 +834,7 @@ def _save_obs_connection_defaults(
             "obs_x_post_on_stream_start": bool(x_post_on_stream_start),
             "obs_x_post_auto": bool(x_post_auto),
             "obs_x_post_template": str(x_post_template or DEFAULT_X_POST_TEMPLATE),
-            "obs_x_post_destinations": str(x_post_destinations or ""),
+            "obs_x_post_destinations": normalize_destinations_text(x_post_destinations),
             "obs_x_post_mode": obs_x_post_mode,
         }
     )
@@ -2373,9 +2443,9 @@ def retry_obs_detection_flow() -> str:
 
 def _obs_effective_prompt(settings: dict) -> str:
     """Return the prompt that will actually drive automatic highlight detection."""
-    if bool(settings.get("enable_clips", True)):
+    if _setting_bool(settings.get("enable_clips"), True, "enable_clips"):
         return str(settings.get("clip_prompt", "") or "").strip()
-    if bool(settings.get("enable_chapters", True)):
+    if _setting_bool(settings.get("enable_chapters"), True, "enable_chapters"):
         return str(settings.get("chapter_prompt", "") or "").strip()
     return ""
 
@@ -2383,9 +2453,9 @@ def _obs_effective_prompt(settings: dict) -> str:
 def _obs_apply_effective_prompt(settings: dict, prompt: str) -> None:
     """Apply a one-run prompt to the generation mode that drives detection."""
     prompt_text = str(prompt or "").strip()
-    if bool(settings.get("enable_clips", True)):
+    if _setting_bool(settings.get("enable_clips"), True, "enable_clips"):
         settings["clip_prompt"] = prompt_text
-    elif bool(settings.get("enable_chapters", True)):
+    elif _setting_bool(settings.get("enable_chapters"), True, "enable_chapters"):
         settings["chapter_prompt"] = prompt_text
 
 
@@ -2500,7 +2570,7 @@ def _obs_confirm_before_auto_process(
     A watcher stop is fail-closed and skips generation. User confirmation has
     no deadline; the short event wait only keeps cancellation responsive.
     """
-    if not bool(settings.get("confirm_before_auto_process", False)):
+    if not _setting_bool(settings.get("confirm_before_auto_process"), False, "confirm_before_auto_process"):
         return True
 
     request = {
@@ -2601,13 +2671,13 @@ def _run_obs_detect_render(
 
     try:
         s = _obs_settings_for_render(settings)
-        clips_enabled = bool(s.get("enable_clips", True))
-        shorts_enabled = bool(s.get("generate_shorts", False))
-        chapters_enabled = bool(s.get("enable_chapters", True))
+        clips_enabled = _setting_bool(s.get("enable_clips"), True, "enable_clips")
+        shorts_enabled = _setting_bool(s.get("generate_shorts"), False, "generate_shorts")
+        chapters_enabled = _setting_bool(s.get("enable_chapters"), True, "enable_chapters")
         s["enable_clips"] = clips_enabled
         s["generate_shorts"] = shorts_enabled
         s["enable_chapters"] = chapters_enabled
-        if bool(s.get("auto_append_youtube", False)) and not chapters_enabled:
+        if _setting_bool(s.get("auto_append_youtube"), False, "auto_append_youtube") and not chapters_enabled:
             # A description can only receive generated timestamp text.  Keep
             # the pipeline successful when a caller leaves auto-append on but
             # turns timestamp generation off in the OBS profile.
@@ -2619,9 +2689,9 @@ def _run_obs_detect_render(
         detect_result = detect_phase(
             input_url,
             input_file,
-            bool(s.get("enable_clips", True)),
+            _setting_bool(s.get("enable_clips"), True, "enable_clips"),
             s.get("clip_prompt", ""),
-            bool(s.get("enable_chapters", True)),
+            _setting_bool(s.get("enable_chapters"), True, "enable_chapters"),
             s.get("chapter_prompt", ""),
             _coerce_int(s.get("num_clips", 5), 5),
             s.get("ai_provider", "gemini"),
@@ -2631,10 +2701,10 @@ def _run_obs_detect_render(
             _coerce_int(s.get("max_duration", 90), 90),
             s.get("whisper_model", "large-v3"),
             s.get("language", "ja"),
-            bool(s.get("audio_fusion", False)),
+            _setting_bool(s.get("audio_fusion"), False, "audio_fusion"),
             _coerce_float(s.get("audio_alpha", 0.35), 0.35),
             s.get("output_base_dir", ""),
-            bool(s.get("generate_shorts", False)),
+            _setting_bool(s.get("generate_shorts"), False, "generate_shorts"),
             progress=progress,
         )
         # detect_phase returns (session, status_md, review_panel_update)
@@ -2655,18 +2725,18 @@ def _run_obs_detect_render(
         render_result = render_phase(
             session,
             s.get("output_mode", "combined"),
-            bool(s.get("generate_shorts", False)),
+            _setting_bool(s.get("generate_shorts"), False, "generate_shorts"),
             s.get("shorts_mode", "pad"),
             s.get("shorts_crop", "center"),
-            bool(s.get("shorts_title", True)),
+            _setting_bool(s.get("shorts_title"), True, "shorts_title"),
             False,  # generate_zip — 自動処理では ZIP を作らない
             False,  # upload_to_drive — 自動処理では Drive 投稿しない
-            bool(s.get("auto_append_youtube", False)),
+            _setting_bool(s.get("auto_append_youtube"), False, "auto_append_youtube"),
             s.get("font_name", "Noto Sans JP"),
             _coerce_int(s.get("font_size", 96), 96),
             s.get("font_color", "#FFFFFF"),
-            bool(s.get("generate_thumbnails", False)),
-            bool(s.get("karaoke", False)),
+            _setting_bool(s.get("generate_thumbnails"), False, "generate_thumbnails"),
+            _setting_bool(s.get("karaoke"), False, "karaoke"),
             shorts_blur_strength=_normalise_shorts_blur_strength(
                 s.get("shorts_blur_strength", 20)
             ),
@@ -2700,7 +2770,7 @@ def _run_obs_detect_render(
         )
         output_errors: list[str] = []
 
-        if bool(s.get("enable_clips", True)):
+        if _setting_bool(s.get("enable_clips"), True, "enable_clips"):
             clip_files = [Path(path) for path in clip_paths]
             if not clip_files or any(
                 not path.is_file() or path.stat().st_size <= 0
@@ -2708,7 +2778,7 @@ def _run_obs_detect_render(
             ):
                 output_errors.append("切り抜きファイルを確認できませんでした")
 
-        if bool(s.get("generate_shorts", False)):
+        if _setting_bool(s.get("generate_shorts"), False, "generate_shorts"):
             short_files = [Path(path) for path in shorts_paths]
             if not short_files or any(
                 not path.is_file() or path.stat().st_size <= 0
@@ -2716,7 +2786,7 @@ def _run_obs_detect_render(
             ):
                 output_errors.append("ショート動画ファイルを確認できませんでした")
 
-        if bool(s.get("enable_chapters", True)):
+        if _setting_bool(s.get("enable_chapters"), True, "enable_chapters"):
             chapter_file = Path(chapters_path) if chapters_path else None
             if (
                 not chapters_text.strip()
@@ -2727,7 +2797,7 @@ def _run_obs_detect_render(
                 output_errors.append("タイムスタンプファイルの生成を確認できませんでした")
 
         youtube_appended = render_outcome.get("youtube_append_succeeded")
-        if bool(s.get("auto_append_youtube", False)) and youtube_appended is not True:
+        if _setting_bool(s.get("auto_append_youtube"), False, "auto_append_youtube") and youtube_appended is not True:
             output_errors.append("YouTube概要欄へのタイムスタンプ反映を確認できませんでした")
 
         if output_errors:
@@ -3077,7 +3147,7 @@ def preview_x_post_text(x_post_template, x_post_destinations, x_post_mode="combi
         try:
             texts = build_x_post_texts(
                 str(x_post_template or ""),
-                destinations=str(x_post_destinations or ""),
+                destinations=normalize_destinations_text(x_post_destinations),
                 mode="separate",
             )
         except XPostTooLongError as exc:
@@ -3097,7 +3167,7 @@ def preview_x_post_text(x_post_template, x_post_destinations, x_post_mode="combi
     try:
         rendered = render_x_post_text(
             str(x_post_template or ""),
-            destinations=str(x_post_destinations or ""),
+            destinations=normalize_destinations_text(x_post_destinations),
         )
     except XPostTooLongError as exc:
         return str(exc)
@@ -3162,7 +3232,7 @@ def save_x_post_settings(
                 data["obs_x_post_template"] = str(
                     x_post_template or DEFAULT_X_POST_TEMPLATE
                 )
-                data["obs_x_post_destinations"] = str(x_post_destinations or "")
+                data["obs_x_post_destinations"] = normalize_destinations_text(x_post_destinations)
                 if x_post_mode is not None:
                     data["obs_x_post_mode"] = normalize_x_post_mode(x_post_mode)
                 _write_settings_file(data, reason="obs_x_post_settings")
@@ -3264,8 +3334,8 @@ def _obs_make_x_post_callbacks(
                 bool(_obs_x_runtime_settings["auto"]),
             )
         return (
-            bool(settings.get("obs_x_post_on_stream_start", True)),
-            bool(settings.get("obs_x_post_auto", False)),
+            _setting_bool(settings.get("obs_x_post_on_stream_start"), True, "obs_x_post_on_stream_start"),
+            _setting_bool(settings.get("obs_x_post_auto"), False, "obs_x_post_auto"),
         )
 
     def _perform_batch(
@@ -3895,9 +3965,9 @@ def _obs_make_stream_pipeline_callbacks(
                     stream_state["recording_outcome"] = outcome
                 if outcome.success:
                     generated = []
-                    if bool(local_settings.get("enable_clips", True)):
+                    if _setting_bool(local_settings.get("enable_clips"), True, "enable_clips"):
                         generated.append("切り抜き")
-                    if bool(local_settings.get("enable_chapters", True)):
+                    if _setting_bool(local_settings.get("enable_chapters"), True, "enable_chapters"):
                         generated.append("タイムスタンプ")
                     _obs_append_status(
                         "OBS録画から" + "と".join(generated) + "を生成しました"
@@ -4282,7 +4352,7 @@ def _obs_make_stream_pipeline_callbacks(
                     state["inflight_ids"].add(video_id)
                     owns_inflight = True
 
-                chapters_enabled = bool(settings.get("enable_chapters", True))
+                chapters_enabled = _setting_bool(settings.get("enable_chapters"), True, "enable_chapters")
                 if use_recording and chapters_enabled:
                     _obs_append_status(
                         "OBS録画から生成したタイムスタンプをYouTubeアーカイブへ"
@@ -4328,7 +4398,7 @@ def _obs_make_stream_pipeline_callbacks(
                         state["processed_ids"].add(video_id)
                         state["completed_epochs"].add(epoch)
                     generated = []
-                    if bool(settings.get("enable_clips", True)):
+                    if _setting_bool(settings.get("enable_clips"), True, "enable_clips"):
                         generated.append("切り抜き")
                     if chapters_enabled:
                         generated.append("タイムスタンプ")
@@ -4782,9 +4852,9 @@ def _start_obs_watch_impl(
         )
     try:
         GenerationModes(
-            enable_clips=bool(obs_profile.get("enable_clips", True)),
-            enable_shorts=bool(obs_profile.get("generate_shorts", False)),
-            enable_chapters=bool(obs_profile.get("enable_chapters", True)),
+            enable_clips=_setting_bool(obs_profile.get("enable_clips"), True, "enable_clips"),
+            enable_shorts=_setting_bool(obs_profile.get("generate_shorts"), False, "generate_shorts"),
+            enable_chapters=_setting_bool(obs_profile.get("enable_chapters"), True, "enable_chapters"),
         ).validate()
     except ValueError as mode_err:
         msg = f"OBS自動処理設定エラー: {mode_err}"
@@ -4822,7 +4892,7 @@ def _start_obs_watch_impl(
     settings["obs_x_post_template"] = str(
         x_post_template or DEFAULT_X_POST_TEMPLATE
     )
-    settings["obs_x_post_destinations"] = str(x_post_destinations or "")
+    settings["obs_x_post_destinations"] = normalize_destinations_text(x_post_destinations)
     if x_post_mode is None:
         settings["obs_x_post_mode"] = normalize_x_post_mode(
             settings.get("obs_x_post_mode", "combined")
@@ -4853,19 +4923,20 @@ def _start_obs_watch_impl(
         bool(x_post_on_stream_start),
         bool(x_post_auto),
     )
-    profile_auto_append = obs_profile.get(
+    profile_auto_append = _setting_bool(
+        obs_profile.get("auto_append_youtube"),
+        bool(auto_append_youtube),
         "auto_append_youtube",
-        auto_append_youtube,
     )
-    chapters_enabled = bool(obs_profile.get("enable_chapters", True))
+    chapters_enabled = _setting_bool(obs_profile.get("enable_chapters"), True, "enable_chapters")
     settings["auto_append_youtube"] = (
         True
         if recording_primary_mode and auto_process and chapters_enabled
-        else bool(profile_auto_append) and chapters_enabled
+        else profile_auto_append and chapters_enabled
         if archive_only_mode
         else False
     )
-    if (auto_append_youtube or bool(profile_auto_append)) and not chapters_enabled:
+    if (auto_append_youtube or profile_auto_append) and not chapters_enabled:
         _obs_append_status(
             "タイムスタンプ生成が無効のため、YouTube概要欄への自動追加を無効化しました"
         )
@@ -5180,7 +5251,11 @@ def start_obs_watch(
             x_post_on_stream_start=bool(
                 obs_x_post_on_stream_start
                 if obs_x_post_on_stream_start is not None
-                else load_defaults().get("obs_x_post_on_stream_start", False)
+                else _setting_bool(
+                    load_defaults().get("obs_x_post_on_stream_start"),
+                    False,
+                    "obs_x_post_on_stream_start",
+                )
             ),
             x_post_template=(
                 obs_x_post_template
@@ -5198,7 +5273,9 @@ def start_obs_watch(
             x_post_auto=bool(
                 obs_x_post_auto
                 if obs_x_post_auto is not None
-                else load_defaults().get("obs_x_post_auto", False)
+                else _setting_bool(
+                    load_defaults().get("obs_x_post_auto"), False, "obs_x_post_auto"
+                )
             ),
             x_api_key=str(obs_x_api_key or ""),
             x_api_key_secret=str(obs_x_api_key_secret or ""),
@@ -5309,11 +5386,13 @@ def start_obs_watch_from_defaults(
             _obs_append_status(msg)
             return msg
         latest_x_settings = load_defaults()
-        settings["obs_x_post_on_stream_start"] = bool(
-            latest_x_settings.get("obs_x_post_on_stream_start", False)
+        settings["obs_x_post_on_stream_start"] = _setting_bool(
+            latest_x_settings.get("obs_x_post_on_stream_start"),
+            False,
+            "obs_x_post_on_stream_start",
         )
-        settings["obs_x_post_auto"] = bool(
-            latest_x_settings.get("obs_x_post_auto", False)
+        settings["obs_x_post_auto"] = _setting_bool(
+            latest_x_settings.get("obs_x_post_auto"), False, "obs_x_post_auto"
         )
         settings["obs_x_post_mode"] = normalize_x_post_mode(
             latest_x_settings.get("obs_x_post_mode", "combined")
@@ -5335,20 +5414,16 @@ def start_obs_watch_from_defaults(
                 save_password=OBS_PASSWORD_FILE.exists(),
                 stop_event=settings.get("obs_stop_event", "record"),
                 watch_folder=settings.get("obs_watch_folder", ""),
-                auto_process=bool(settings.get("obs_auto_process", True)),
-                auto_append_youtube=bool(
-                    settings.get("auto_append_youtube", False)
-                ),
+                auto_process=_setting_bool(settings.get("obs_auto_process"), True, "obs_auto_process"),
+                auto_append_youtube=_setting_bool(settings.get("auto_append_youtube"), False, "auto_append_youtube"),
                 num_clips=settings.get("num_clips", 5),
                 output_mode=settings.get("output_mode", "combined"),
-                generate_shorts=bool(settings.get("generate_shorts", False)),
+                generate_shorts=_setting_bool(settings.get("generate_shorts"), False, "generate_shorts"),
                 ai_provider=settings.get("ai_provider", "gemini"),
                 whisper_model=settings.get("whisper_model", "large-v3"),
                 output_base_dir=settings.get("output_base_dir", ""),
-                x_post_on_stream_start=bool(
-                    settings.get("obs_x_post_on_stream_start", False)
-                ),
-                x_post_auto=bool(settings.get("obs_x_post_auto", False)),
+                x_post_on_stream_start=_setting_bool(settings.get("obs_x_post_on_stream_start"), False, "obs_x_post_on_stream_start"),
+                x_post_auto=_setting_bool(settings.get("obs_x_post_auto"), False, "obs_x_post_auto"),
                 x_post_template=settings.get(
                     "obs_x_post_template",
                     DEFAULT_X_POST_TEMPLATE,
@@ -6685,7 +6760,7 @@ def create_ui():
                                     label=(
                                         "検知後に自動で切り抜き/チャプター生成まで実行"
                                     ),
-                                    value=bool(defaults.get("obs_auto_process", True)),
+                                    value=_setting_bool(defaults.get("obs_auto_process"), True, "obs_auto_process"),
                                 )
                             with gr.Column(
                                 scale=2,
@@ -7220,12 +7295,12 @@ def create_ui():
                     )
                     obs_x_post_on_stream_start = gr.Checkbox(
                         label="配信開始時にXへ告知する",
-                        value=bool(defaults.get("obs_x_post_on_stream_start", False)),
+                        value=_setting_bool(defaults.get("obs_x_post_on_stream_start"), False, "obs_x_post_on_stream_start"),
                         info="告知機能を使うためのスイッチです。OFFにすると配信開始時の告知を停止します。",
                     )
                     obs_x_post_auto = gr.Checkbox(
                         label="X APIで完全自動投稿する",
-                        value=bool(defaults.get("obs_x_post_auto", False)),
+                        value=_setting_bool(defaults.get("obs_x_post_auto"), False, "obs_x_post_auto"),
                         info="ON：確認画面を出さずに投稿します。OFF：投稿画面を開き、自分で「ポスト」を押します。",
                     )
                     gr.Markdown(
@@ -7370,7 +7445,7 @@ def create_ui():
                         )
                         obs_launch_on_startup = gr.Checkbox(
                             label="Clip Extractor起動時にOBS Studioも起動",
-                            value=bool(defaults.get("obs_launch_on_startup", False)),
+                            value=_setting_bool(defaults.get("obs_launch_on_startup"), False, "obs_launch_on_startup"),
                             info="「デフォルトに設定」で保存後、次回起動から有効になります。OBSが起動中なら二重起動しません。",
                         )
                         obs_auto_connect_on_startup = gr.Checkbox(

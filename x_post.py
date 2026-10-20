@@ -9,10 +9,13 @@ provided for one request and never logs them.
 
 from __future__ import annotations
 
+import logging
 import re
 import webbrowser
 from dataclasses import dataclass
 from urllib.parse import parse_qs, quote, urlencode, urlparse
+
+logger = logging.getLogger("clip-extractor.x_post")
 
 
 X_POST_INTENT_URL = "https://x.com/intent/post"
@@ -277,14 +280,33 @@ def _infer_label(url: str) -> str:
     return hostname.removeprefix("www.") or "配信先"
 
 
-def parse_destination_links(value: str | None) -> tuple[DestinationLink, ...]:
+def normalize_destinations_text(value: object) -> str:
+    """Coerce a saved destinations value into the newline-separated string form.
+
+    Hand-edited or legacy settings may store a JSON list.  Lists and tuples are
+    joined from their non-empty string items; ``None`` becomes ``""`` and any
+    other type is dropped with a warning.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return "\n".join(
+            item.strip() for item in value if isinstance(item, str) and item.strip()
+        )
+    logger.warning("X投稿先の設定値の型が不正なため無視します: %s", type(value).__name__)
+    return ""
+
+
+def parse_destination_links(value: object) -> tuple[DestinationLink, ...]:
     """Parse one destination per line.
 
     Each line may be either ``URL`` or ``表示名|URL``.  Invalid and blank
     lines are ignored so a stray empty line never prevents OBS from starting.
     """
     links: list[DestinationLink] = []
-    for raw_line in str(value or "").splitlines():
+    for raw_line in normalize_destinations_text(value).splitlines():
         try:
             line = raw_line.strip()
             if not line or line.startswith("#"):

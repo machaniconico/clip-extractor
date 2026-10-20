@@ -1,8 +1,42 @@
 """Configuration handling for clip-extractor."""
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger("clip-extractor.config")
+
+_TRUE_SETTING_STRINGS = frozenset({"true", "1", "yes", "on"})
+_FALSE_SETTING_STRINGS = frozenset({"false", "0", "no", "off", ""})
+
+
+def setting_bool(value, default: bool = False, key: str = "") -> bool:
+    """Coerce a boolean read from a saved settings file.
+
+    ``bool("false")`` is True, so hand-edited or legacy files must not go through
+    it.  bool is returned as-is, numbers are truthy when non-zero (legacy
+    behaviour), and strings are matched case-insensitively.  ``None`` (explicit
+    or missing) and unrecognised values yield ``default``; the latter also logs a
+    warning naming the setting but never echoing its value.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _TRUE_SETTING_STRINGS:
+            return True
+        if text in _FALSE_SETTING_STRINGS:
+            return False
+    logger.warning(
+        "設定値を真偽値として解釈できないため既定値を使用します: %s", key or "(unknown)"
+    )
+    return default
+
 
 DEFAULT_FONT_CONFIG = {
     # Bundled Noto Sans JP Bold (700): readable, OFL-licensed Shorts captions.
