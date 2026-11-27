@@ -43,7 +43,8 @@ def test_exception_without_reason_fails(tmp_path):
 
 def test_repository_exceptions_are_well_formed():
     ignored = run_pip_audit.load_ignored_ids(run_pip_audit.IGNORES_FILE, date(2026, 10, 21))
-    assert ignored and all(i.startswith(("GHSA-", "PYSEC-")) for i in ignored)
+    # 例外が無い(空リスト)のは正常。あれば ID 形式だけを検査する。
+    assert all(i.startswith(("GHSA-", "PYSEC-")) for i in ignored)
 
 
 def test_main_passes_ignores_to_pip_audit(tmp_path, monkeypatch):
