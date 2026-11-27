@@ -436,7 +436,7 @@ OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
 EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-## brotli 1.2.0
+## brotli 1.2.1
 
 - License: MIT
 - Project URL: https://github.com/google/brotli
@@ -1106,10 +1106,10 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-## filelock 3.32.5
+## filelock 4.3.1
 
 - License: MIT
-- Project URL: https://github.com/tox-dev/py-filelock
+- Project URL: https://github.com/tox-dev/filelock
 
 #### `licenses/LICENSE`
 
@@ -2646,7 +2646,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
    See the License for the specific language governing permissions and
    limitations under the License.
 
-## gradio 6.26.0
+## gradio 6.32.0
 
 - License: Apache-2.0
 - Project URL: https://github.com/gradio-app/gradio
@@ -2855,7 +2855,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
    See the License for the specific language governing permissions and
    limitations under the License.
 
-## gradio_client 2.6.1
+## gradio_client 2.7.2
 
 - License: Apache-2.0
 - Project URL: https://github.com/gradio-app/gradio
@@ -6147,7 +6147,7 @@ worldwide. This software is distributed without any warranty.
 
 See <http://creativecommons.org/publicdomain/zero/1.0/>.
 
-## oauthlib 4.0.0
+## oauthlib 4.0.1
 
 - License: BSD-3-Clause
 - Project URL: https://github.com/oauthlib/oauthlib
@@ -8976,10 +8976,10 @@ https://opensource.apple.com/source/tcl/tcl-14/tcl/license.terms
   permission to use and distribute the software in accordance with the
   terms specified in this license.
 
-## pillow 12.3.0
+## pillow 13.0.0
 
 - License: MIT-CMU
-- Project URL: https://python-pillow.github.io
+- Project URL: https://python-pillow.org
 
 #### `licenses/LICENSE`
 
@@ -10845,7 +10845,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-## pyasn1 0.6.4
+## pyasn1 0.6.5
 
 - License: BSD-2-Clause
 - Project URL: https://github.com/pyasn1/pyasn1

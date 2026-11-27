@@ -231,7 +231,7 @@ def test_obs_recording_is_the_default_source(monkeypatch, tmp_path):
     assert web_app.load_defaults()["shorts_blur_strength"] == 20
     assert web_app.load_defaults()["shorts_title_position"] == "top"
     assert web_app.load_defaults()["font_name"] == "Noto Sans JP"
-    assert web_app.load_defaults()["ai_model"] == "gemini-3.5-flash-lite"
+    assert web_app.load_defaults()["ai_model"] == "gemini-4-hydrogen"
     assert web_app._obs_processing_settings_from_defaults()["shorts_blur_strength"] == 20
     assert web_app._obs_processing_settings_from_defaults()["shorts_title_position"] == "top"
     assert AppConfig().obs_stop_event == "record"
@@ -250,11 +250,12 @@ def test_blank_saved_gemini_model_migrates_to_current_default(monkeypatch, tmp_p
 
     defaults = web_app.load_defaults()
 
-    assert defaults["ai_model"] == "gemini-3.5-flash-lite"
-    assert web_app._ai_model_choices("gemini")[:3] == [
+    assert defaults["ai_model"] == "gemini-4-hydrogen"
+    assert web_app._ai_model_choices("gemini")[:4] == [
+        "gemini-4-hydrogen",
+        "gemini-3.8-flash",
         "gemini-3.5-flash-lite",
         "gemini-3.6-flash",
-        "gemini-3.5-flash",
     ]
     assert "gemini-2.5-flash" in web_app._ai_model_choices("gemini")
 
@@ -263,7 +264,7 @@ def test_local_provider_is_hidden_until_explicitly_enabled(monkeypatch):
     monkeypatch.delenv(web_app.LOCAL_LLM_ENABLE_ENV, raising=False)
 
     assert "local" not in web_app._available_ai_providers()
-    assert web_app._default_ai_model("gemini") == "gemini-3.5-flash-lite"
+    assert web_app._default_ai_model("gemini") == "gemini-4-hydrogen"
 
 
 def test_local_provider_uses_environment_model_when_enabled(monkeypatch):
@@ -287,7 +288,7 @@ def test_saved_local_provider_falls_back_in_memory_when_feature_is_off(
     defaults = web_app.load_defaults()
 
     assert defaults["ai_provider"] == "gemini"
-    assert defaults["ai_model"] == "gemini-3.5-flash-lite"
+    assert defaults["ai_model"] == "gemini-4-hydrogen"
     assert settings_file.read_text(encoding="utf-8") == original
 
 

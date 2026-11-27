@@ -20,6 +20,7 @@ logger = logging.getLogger("clip-extractor.x_post")
 
 X_POST_INTENT_URL = "https://x.com/intent/post"
 X_API_POST_URL = "https://api.x.com/2/tweets"
+X_API_USERS_ME_URL = "https://api.x.com/2/users/me"
 X_API_TIMEOUT = (5, 15)
 DEFAULT_X_POST_TEMPLATE = "{title}\n配信開始しました！\n{links}"
 
@@ -254,6 +255,94 @@ def post_x_post(
         post_id=post_id,
         status_url=f"https://x.com/i/web/status/{post_id}",
     )
+
+
+def test_x_credentials(
+    credentials: XCredentials,
+    *,
+    session_factory=None,
+) -> tuple[bool, str]:
+    """Verify OAuth 1.0a X credentials using read-only GET /2/users/me.
+
+    Never publishes a post and never exposes credentials or raw API responses
+    in the returned status text.
+    """
+    if not isinstance(credentials, XCredentials) or not credentials.is_complete():
+        return (
+            False,
+            "❌ X API認証情報が未設定または不足しています。4項目すべてを入力・保存してからお試しください。",
+        )
+
+    if session_factory is None:
+        try:
+            from requests_oauthlib import OAuth1Session
+        except Exception:
+            return False, "❌ X API認証ライブラリを読み込めませんでした。"
+        session_factory = OAuth1Session
+
+    session = None
+    try:
+        session = session_factory(
+            client_key=credentials.api_key.strip(),
+            client_secret=credentials.api_key_secret.strip(),
+            resource_owner_key=credentials.access_token.strip(),
+            resource_owner_secret=credentials.access_token_secret.strip(),
+        )
+        response = session.get(
+            X_API_USERS_ME_URL,
+            timeout=X_API_TIMEOUT,
+        )
+    except Exception:
+        return (
+            False,
+            "❌ X APIへの接続に失敗しました。インターネット接続を確認してください。",
+        )
+    finally:
+        close = getattr(session, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    try:
+        status_code = int(response.status_code)
+    except (AttributeError, TypeError, ValueError):
+        return False, "❌ X APIから不正な応答を受信しました。"
+
+    if status_code == 200:
+        username = ""
+        try:
+            payload = response.json()
+            raw_username = str(payload.get("data", {}).get("username", "")).strip()
+            if re.fullmatch(r"[A-Za-z0-9_]{1,30}", raw_username):
+                username = raw_username
+        except Exception:
+            username = ""
+        account_label = f"（アカウント: @{username}）" if username else ""
+        return (
+            True,
+            f"✅ X API認証情報の接続テストに成功しました{account_label}。"
+            "※自動投稿にはアプリ権限「Read and write」が必要です（このテストでは投稿していません）。",
+        )
+    if status_code == 401:
+        return (
+            False,
+            "❌ X APIの認証情報が拒否されました（HTTP 401）。"
+            "4項目のコピー漏れや、権限変更前の古いAccess Tokenでないか確認してください。",
+        )
+    if status_code == 403:
+        return (
+            False,
+            "❌ X APIでアクセスが拒否されました（HTTP 403）。"
+            "X Developer Console でアプリの権限（Read and write）とプラン設定を確認してください。",
+        )
+    if status_code == 429:
+        return (
+            False,
+            "⚠️ X APIの利用上限に達しています（HTTP 429）。少し時間を置いて再試行してください。",
+        )
+    return False, f"❌ X APIの接続テストに失敗しました（HTTP {status_code}）。"
 
 
 # Exact hostnames with human readable labels. Lookup is exact-equality only so

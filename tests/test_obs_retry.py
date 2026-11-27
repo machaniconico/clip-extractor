@@ -540,3 +540,49 @@ def test_recording_retry_reuses_late_stable_file_after_archive_failure(
     _wait_until(lambda: "タイムスタンプ無効" in web_app._obs_status_text())
     assert local_paths == [str(recording)]
     assert archive_calls == ["https://www.youtube.com/watch?v=retry-late-recording"]
+
+
+# 失敗表示の直後に再試行しても「まだ処理中」で弾かれない(recording_done を表示より先に立てる)。
+@pytest.mark.parametrize("marker", ["OBS録画の処理に失敗", "local failed", "boom-exc"])
+def test_retry_right_after_failure_status_is_not_rejected_as_in_progress(monkeypatch, tmp_path, marker):
+    with web_app._obs_status_lock:
+        web_app._obs_status_lines.clear()
+    calls = []
+    results = []
+    holder = {}
+    fired = threading.Event()
+
+    def fake_local(path, _settings):
+        calls.append(path)
+        if len(calls) == 1:
+            if marker == "boom-exc":
+                raise RuntimeError("boom-exc")
+            return web_app.ObsPipelineOutcome(log="local failed", success=False, error="local failed")
+        return web_app.ObsPipelineOutcome(log="local done", success=True)
+
+    orig = web_app._obs_append_status
+
+    def hooked(msg):
+        orig(msg)
+        if marker in str(msg) and not fired.is_set():
+            fired.set()
+            t = threading.Thread(target=lambda: results.append(holder["retry"]()))
+            t.start()
+            t.join(timeout=3)
+
+    monkeypatch.setattr(web_app, "_run_obs_auto_pipeline_outcome", fake_local)
+    monkeypatch.setattr(web_app, "_obs_append_status", hooked)
+    recorded, recording_stopped, _started, finished = (
+        web_app._obs_make_recording_primary_callbacks(True, {})
+    )
+    holder["retry"] = getattr(finished, "_retry_detection_flow")
+    rec = tmp_path / "r.mkv"
+    rec.write_bytes(b"x")
+    recording_stopped(str(rec))
+    recorded(str(rec))
+    assert fired.wait(5)
+    deadline = time.time() + 5
+    while not results and time.time() < deadline:
+        time.sleep(0.01)
+    assert results, "retry did not return"
+    assert "まだ処理中" not in results[0], results[0]

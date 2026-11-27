@@ -1,6 +1,6 @@
 {
   "ai_provider": "gemini",
-  "ai_model": "gemini-3.5-flash-lite",
+  "ai_model": "gemini-4-hydrogen",
   "enable_clips": true,
   "enable_chapters": true,
   "clip_prompt": "",
@@ -38,8 +38,10 @@
   "obs_auto_process": true,
   "obs_x_post_on_stream_start": false,
   "obs_x_post_auto": false,
-  "obs_x_post_template": "配信開始しました！\n{links}",
+  "obs_x_post_template": "{title}\n配信開始しました！\n{links}",
   "obs_x_post_destinations": "",
+  "obs_x_post_mode": "combined",
+  "obs_output_location": "recording",
   "obs_processing": {
     "enable_clips": true,
     "clip_prompt": "",
@@ -49,7 +51,7 @@
     "confirm_before_auto_process": false,
     "num_clips": 5,
     "min_duration": 60,
-    "max_duration": 90,
+    "max_duration": 350,
     "output_mode": "combined",
     "generate_shorts": true,
     "shorts_mode": "blur",

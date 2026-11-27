@@ -54,19 +54,119 @@ GEMINI_SYSTEM_PROMPT = """あなたはYouTube動画の切り抜きエキスパ�
 """
 
 
-GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
+GEMINI_DEFAULT_MODEL = "gemini-4-hydrogen"
 GEMINI_REQUEST_TIMEOUT_MS = 300_000
 GEMINI_REQUEST_ATTEMPTS = 4
 GEMINI_RETRY_STATUS_CODES = (500, 502, 503, 504)
 GEMINI_MODEL_CHOICES = (
     GEMINI_DEFAULT_MODEL,
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
     "gemini-3.6-flash",
-    "gemini-3.5-flash",
-    # Keep the stable 2.5 models selectable for existing saved workflows.
+    # Keep legacy 2.5 models selectable for existing saved workflows
+    # (Google routes 2.5-flash -> 3.5-flash-lite and 2.5-pro -> 3.8-flash from Dec 2026).
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
     "gemini-2.5-pro",
 )
+GEMINI_FREE_TIER_MODELS = frozenset(
+    {
+        "gemini-4-hydrogen",
+        "gemini-3.8-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+    }
+)
+GEMINI_FREE_FALLBACK_CHAIN = (
+    "gemini-4-hydrogen",
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+)
+GEMINI_LOW_COST_MODELS = frozenset(
+    {
+        "gemini-3.5-flash-lite",
+        "gemini-2.5-flash-lite",
+    }
+)
+GEMINI_PAID_ONLY_MARKERS = ("carbon", "argon", "ultra", "-pro")
+
+
+def classify_ai_cost_risk(ai_provider: str, ai_model: str = "") -> tuple[str, str]:
+    """Classify billing/cost risk for ``(ai_provider, ai_model)``.
+
+    Returns ``(level, message)`` where ``level`` is one of:
+      - ``"paid_only"``: always billed or no free tier available
+      - ``"unknown_custom"``: unrecognized custom Gemini model ID (might be paid-only)
+      - ``"billing_caveat"``: has a free tier, but billed at higher rate when Cloud Billing is linked
+      - ``"free_low_cost"``: has a free tier and lowest paid unit price
+      - ``"subscription"``: uses CLI / external subscription quota
+      - ``"local_free"``: local loopback inference (no cloud billing)
+    """
+    provider = str(ai_provider or "gemini").strip().lower()
+    model = str(ai_model or "").strip().lower()
+
+    if provider == "openai":
+        return (
+            "paid_only",
+            "OpenAI（ChatGPT API）には無料枠がありません。実行のたびに従量課金されます。"
+            "無料で使う場合はプロバイダーを「gemini」に切り替えてください。",
+        )
+    if provider == "claude":
+        return (
+            "subscription",
+            "Claude CLI はAPIキー不要ですが、契約中のClaudeプラン（またはAPI課金）の利用枠を消費します。",
+        )
+    if provider == "local":
+        return (
+            "local_free",
+            "ローカルLLMはPC内で処理するため、クラウドAPI料金は発生しません。",
+        )
+    if provider != "gemini":
+        return (
+            "unknown_custom",
+            f"プロバイダー「{provider}」の課金条件は公式料金表を確認してください。",
+        )
+
+    effective_model = model or GEMINI_DEFAULT_MODEL
+    if any(marker in effective_model for marker in GEMINI_PAID_ONLY_MARKERS):
+        return (
+            "paid_only",
+            f"「{effective_model}」は無料枠の対象外（有料専用）または非推奨Proモデルです。"
+            "課金プロジェクトでは実行ごとに料金が発生し、無課金プロジェクトではエラーになる場合があります。"
+            "無料枠で使う場合は gemini-4-hydrogen / gemini-3.8-flash / gemini-3.5-flash-lite を選んでください。",
+        )
+    if effective_model not in GEMINI_FREE_TIER_MODELS:
+        return (
+            "unknown_custom",
+            f"カスタムモデル「{effective_model}」は無料枠の確認済み一覧に含まれていません。"
+            "有料専用モデルの場合、課金設定があるプロジェクトでは料金が発生します（Google公式料金表を確認してください）。",
+        )
+    if effective_model in GEMINI_LOW_COST_MODELS:
+        return (
+            "free_low_cost",
+            f"「{effective_model}」は無料枠あり・最安クラスです。"
+            "クレカ未登録なら無料枠で動作し、課金プロジェクトでも低コスト（入力 $0.30 / 出力 $2.50 / 100万トークン）です。",
+        )
+    if effective_model.startswith("gemini-2.5-"):
+        return (
+            "billing_caveat",
+            f"「{effective_model}」は旧世代（非推奨）です。2026年12月以降、Google側で後継モデルへ自動転送されます。"
+            "新規利用は gemini-4-hydrogen / gemini-3.8-flash / gemini-3.5-flash-lite を推奨します。",
+        )
+    extra = (
+        "（3.8 Flash は 2027/1/1 から有料単価が $0.75/$3.75 → $1.50/$7.50 へ改定予定）"
+        if effective_model == "gemini-3.8-flash"
+        else ""
+    )
+    return (
+        "billing_caveat",
+        f"「{effective_model}」は無料枠あり（クレカ未登録なら無料・目安: 1日20回前後）です。"
+        f"ただし Google Cloud の課金（Billing）を紐づけたプロジェクトでは有料枠で従量課金されます{extra}。"
+        "課金プロジェクトで費用を抑えたい場合は「gemini-3.5-flash-lite」（約1/5の単価）をおすすめします。",
+    )
 
 
 class GeminiTemporaryError(RuntimeError):
@@ -637,6 +737,48 @@ def _extract_json_object(text: str | None) -> dict | None:
     return None
 
 
+def gemini_fallback_models(model: str) -> tuple[str, ...]:
+    """Return strictly lower free-tier Gemini models to try if ``model`` hits 429."""
+    current = str(model or GEMINI_DEFAULT_MODEL).strip() or GEMINI_DEFAULT_MODEL
+    if current in GEMINI_FREE_FALLBACK_CHAIN:
+        idx = GEMINI_FREE_FALLBACK_CHAIN.index(current)
+        return GEMINI_FREE_FALLBACK_CHAIN[idx + 1 :]
+    if current == "gemini-3.6-flash":
+        return ("gemini-3.5-flash-lite",)
+    return ()
+
+
+def _call_gemini_with_fallback(
+    user_prompt: str,
+    api_key: str,
+    model: str = GEMINI_DEFAULT_MODEL,
+) -> str:
+    """Call Gemini and automatically step down to lower free-tier models on 429 quota exhaustion."""
+    candidates = (model, *gemini_fallback_models(model))
+    last_quota_error: GeminiQuotaError | None = None
+    for idx, candidate in enumerate(candidates):
+        try:
+            return _call_gemini(user_prompt, api_key, candidate)
+        except GeminiQuotaError as exc:
+            last_quota_error = exc
+            if idx + 1 < len(candidates):
+                next_model = candidates[idx + 1]
+                logger.warning(
+                    "[Gemini] %s の無料枠上限に達したため、下位モデル %s へ自動フォールバックします",
+                    candidate,
+                    next_model,
+                )
+                print(
+                    f"[Gemini] {candidate} の無料枠上限に達したため、"
+                    f"下位の無料枠モデル {next_model} に切り替えて再試行します..."
+                )
+                continue
+            raise
+    if last_quota_error is not None:  # pragma: no cover
+        raise last_quota_error
+    raise RuntimeError("Gemini highlight detection did not execute any model")  # pragma: no cover
+
+
 def detect_highlights(
     transcript: str,
     num_clips: int = 5,
@@ -661,7 +803,7 @@ def detect_highlights(
         response_text = _call_openai(user_prompt, api_key, model)
     elif ai_provider == "gemini":
         model = ai_model or GEMINI_DEFAULT_MODEL
-        response_text = _call_gemini(user_prompt, api_key, model)
+        response_text = _call_gemini_with_fallback(user_prompt, api_key, model)
     elif ai_provider == "local":
         response_text = _call_local_openai_compatible(user_prompt, ai_model)
     elif ai_provider == "claude":
@@ -810,3 +952,235 @@ def _parse_timestamp(ts: str | int | float) -> float:
         return int(m) * 60 + float(s)
     else:
         return float(ts)
+
+
+AI_CONNECTION_TEST_TIMEOUT_SECONDS = 10.0
+
+
+def test_ai_connection(
+    ai_provider: str,
+    api_key: str = "",
+    ai_model: str = "",
+) -> tuple[bool, str]:
+    """Verify AI provider readiness with a lightweight, non-generating probe.
+
+    Returns ``(ok, message)`` with user-safe Japanese text that never echoes
+    credentials or raw third-party response payloads.
+    """
+    provider = str(ai_provider or "").strip().lower()
+    key = str(api_key or "").strip().strip('"').strip("'")
+
+    if provider == "gemini":
+        if not key:
+            return (
+                False,
+                "❌ Gemini APIキーが未設定です。Google AI Studio（https://aistudio.google.com/apikey）で"
+                "取得し、上の「APIキー」欄に貼り付けて保存してください。",
+            )
+        try:
+            from google import genai
+            from google.genai import errors, types
+        except ImportError:
+            return (
+                False,
+                "❌ google-genai パッケージが見つかりません。setup.bat を再実行してください。",
+            )
+        model_name = str(ai_model or GEMINI_DEFAULT_MODEL).strip() or GEMINI_DEFAULT_MODEL
+        client = genai.Client(
+            api_key=key,
+            http_options=types.HttpOptions(
+                timeout=int(AI_CONNECTION_TEST_TIMEOUT_SECONDS * 1000),
+                retry_options=types.HttpRetryOptions(attempts=1),
+            ),
+        )
+        try:
+            client.models.get(model=model_name)
+        except errors.APIError as exc:
+            code = getattr(exc, "code", None)
+            logger.warning("[Gemini] connection test failed: http=%s", code)
+            if code in (400, 401, 403):
+                hint = ""
+                if not key.startswith("AIza"):
+                    hint = "（Gemini APIキーは通常「AIza」で始まります）"
+                return (
+                    False,
+                    f"❌ Gemini APIキーが無効または拒否されました（HTTP {code}）。{hint}"
+                    "コピー漏れ・余分な文字がないか確認するか、Google AI Studio で新しいキーを作成し直してください。",
+                )
+            if code == 404:
+                return (
+                    False,
+                    f"⚠️ APIキーは認識されましたが、モデル「{model_name}」が見つかりません。"
+                    f"既定の「{GEMINI_DEFAULT_MODEL}」などに切り替えてお試しください。",
+                )
+            if code == 429:
+                return (
+                    False,
+                    "⚠️ APIキーは有効ですが、現在レート制限（HTTP 429）に達しています。"
+                    "少し時間を置いてから再度お試しください。",
+                )
+            if isinstance(code, int) and code >= 500:
+                return (
+                    False,
+                    f"⚠️ Google側で一時的な障害が発生しています（HTTP {code}）。数分待ってから再試行してください。",
+                )
+            return (
+                False,
+                f"❌ Gemini への接続テストに失敗しました（HTTP {code or '不明'}）。"
+                "ネットワーク環境とAPIキーを確認してください。",
+            )
+        except Exception as exc:
+            logger.warning("[Gemini] connection test error: %s", type(exc).__name__)
+            return (
+                False,
+                "❌ Gemini へ接続できませんでした。インターネット接続やプロキシ設定を確認してください。",
+            )
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+        return (
+            True,
+            f"✅ Gemini APIキーの接続テストに成功しました（モデル: {model_name} 利用可能）",
+        )
+
+    if provider == "openai":
+        if not key:
+            return (
+                False,
+                "❌ OpenAI APIキーが未設定です。OpenAI Platform でキーを取得し、"
+                "上の「APIキー」欄に貼り付けて保存してください。",
+            )
+        try:
+            import openai
+            from openai import OpenAI
+        except ImportError:
+            return (
+                False,
+                "❌ openai パッケージが見つかりません。setup.bat を再実行してください。",
+            )
+        model_name = str(ai_model or "gpt-4.1").strip() or "gpt-4.1"
+        client = OpenAI(
+            api_key=key,
+            timeout=AI_CONNECTION_TEST_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
+        try:
+            client.models.retrieve(model_name)
+        except openai.AuthenticationError:
+            logger.warning("[OpenAI] connection test failed: authentication error")
+            return (
+                False,
+                "❌ OpenAI APIキーが無効です（HTTP 401）。"
+                "キーのコピー漏れや失効がないか確認してください。",
+            )
+        except openai.PermissionDeniedError:
+            logger.warning("[OpenAI] connection test failed: permission denied")
+            return (
+                False,
+                "❌ OpenAI APIキーに権限がありません（HTTP 403）。プロジェクト権限や課金設定を確認してください。",
+            )
+        except openai.NotFoundError:
+            logger.warning("[OpenAI] connection test failed: model not found")
+            return (
+                False,
+                f"⚠️ APIキーは有効ですが、モデル「{model_name}」にアクセスできません。"
+                "別のモデルを選んでお試しください。",
+            )
+        except openai.RateLimitError:
+            logger.warning("[OpenAI] connection test failed: rate limit")
+            return (
+                False,
+                "⚠️ APIキーは有効ですが、利用上限（HTTP 429）に達しています。OpenAI の残高・上限を確認してください。",
+            )
+        except Exception as exc:
+            logger.warning("[OpenAI] connection test error: %s", type(exc).__name__)
+            return (
+                False,
+                "❌ OpenAI へ接続できませんでした。インターネット接続とAPIキーを確認してください。",
+            )
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+        return (
+            True,
+            f"✅ OpenAI APIキーの接続テストに成功しました（モデル: {model_name} 利用可能）",
+        )
+
+    if provider == "claude":
+        import shutil
+
+        claude_path = shutil.which("claude")
+        if not claude_path:
+            return (
+                False,
+                "❌ Claude CLI が見つかりません。Claude を使うには `npm install -g @anthropic-ai/claude-code` が必要です。"
+                "無料枠のある「gemini」に切り替えると、コマンド導入なしですぐ始められます。",
+            )
+        try:
+            result = subprocess.run(
+                [claude_path, "--version"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=5,
+            )
+        except Exception as exc:
+            logger.warning("[Claude] version probe failed: %s", type(exc).__name__)
+            return (
+                False,
+                "⚠️ Claude CLI の実行確認に失敗しました。コマンドプロンプトで `claude --version` を確認してください。",
+            )
+        if result.returncode != 0:
+            return (
+                False,
+                "⚠️ Claude CLI がエラーを返しました。先にログイン（`claude`）を済ませてください。",
+            )
+        version = (result.stdout or "").strip().splitlines()[0] if (result.stdout or "").strip() else "検出済み"
+        return (
+            True,
+            f"✅ Claude CLI を利用できます（{version} / APIキー入力は不要です）",
+        )
+
+    if provider == "local":
+        if not local_llm_enabled():
+            return (
+                False,
+                f"❌ ローカルLLMは無効です。環境変数 {LOCAL_LLM_ENABLE_ENV}=1 を設定して起動してください。",
+            )
+        try:
+            base_url = validate_local_llm_base_url(
+                os.environ.get(LOCAL_LLM_BASE_URL_ENV, LOCAL_LLM_DEFAULT_BASE_URL)
+            )
+        except ValueError:
+            return (
+                False,
+                "❌ ローカルLLMのURL設定が不正です（loopback の /v1 のみ許可）。",
+            )
+        try:
+            response = httpx.get(
+                f"{base_url}/models",
+                timeout=5.0,
+                trust_env=False,
+                follow_redirects=False,
+            )
+        except Exception as exc:
+            logger.warning("[Local] connection test failed: %s", type(exc).__name__)
+            return (
+                False,
+                f"❌ ローカルサーバー（{base_url}）に接続できません。LM Studio の Local Server が起動しているか確認してください。",
+            )
+        if response.status_code != 200:
+            return (
+                False,
+                f"❌ ローカルサーバーが HTTP {response.status_code} を返しました。LM Studio の状態を確認してください。",
+            )
+        return (
+            True,
+            f"✅ ローカルLLMサーバー（{base_url}）に接続できました（APIキー不要）",
+        )
+
+    return False, f"❌ 未対応のAIプロバイダーです: {provider}"

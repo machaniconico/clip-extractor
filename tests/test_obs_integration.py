@@ -457,7 +457,11 @@ def test_obs_websocket_start_registers_callbacks(monkeypatch):
     w.start()
     assert w.status.startswith("connected")
     assert w._client is not None
-    assert w._client.callback.registered == [w.on_record_state_changed, w.on_stream_state_changed]
+    assert w._client.callback.registered == [
+        w.on_record_state_changed,
+        w.on_stream_state_changed,
+        w.on_record_file_changed,
+    ]
     w.stop()
     assert w.status == "stopped"
 
@@ -676,3 +680,214 @@ def test_folder_watcher_stopped_does_not_fire_callback(tmp_path, monkeypatch):
     for wt in workers:
         wt.join(timeout=5)
     assert received == [], "stopped watcher must not fire the callback"
+
+
+# --------------------------------------------------------------------------
+# Auto-reconnect on initial refusal and OBS restarts
+# --------------------------------------------------------------------------
+
+def test_obs_websocket_retries_after_initial_connection_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(oi.time, "sleep", lambda *a, **k: None)
+    fake = types.ModuleType("obsws_python")
+    attempts = 0
+    status_changes: list[str] = []
+    reconnected = threading.Event()
+
+    class _Callback:
+        def __init__(self):
+            self.registered = []
+
+        def register(self, fn):
+            self.registered.append(fn)
+
+    class _EventClient:
+        def __init__(self, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise ConnectionRefusedError("[WinError 10061] connection refused")
+            self.callback = _Callback()
+
+        def disconnect(self):
+            pass
+
+    fake.EventClient = _EventClient
+    fake.ReqClient = _EventClient
+    monkeypatch.setitem(sys.modules, "obsws_python", fake)
+
+    def on_status(msg: str) -> None:
+        status_changes.append(msg)
+        if msg.startswith("connected:"):
+            reconnected.set()
+
+    w = oi.ObsWebsocketWatcher(
+        "localhost",
+        4455,
+        "pw",
+        lambda _p: None,
+        stop_event="record",
+        on_status_change=on_status,
+        reconnect_interval=0.05,
+    )
+    monkeypatch.setattr(w, "_is_endpoint_reachable", lambda: True)
+
+    w.start()
+    assert "接続失敗" in w.status
+    assert reconnected.wait(timeout=5), "watcher did not reconnect after initial refusal"
+    assert w.status.startswith("connected:")
+    assert w._client is not None
+    assert w._client.callback.registered == [
+        w.on_record_state_changed,
+        w.on_stream_state_changed,
+        w.on_record_file_changed,
+    ]
+    assert any(msg.startswith("connected:") for msg in status_changes)
+    w.stop()
+    assert w.status == "stopped"
+    assert w.reconnecting is False
+
+
+def test_obs_websocket_reconnects_after_obs_restart(monkeypatch):
+    fake = types.ModuleType("obsws_python")
+    clients = []
+    disconnected_event = threading.Event()
+    reconnected_event = threading.Event()
+    status_changes: list[str] = []
+
+    class _Callback:
+        def __init__(self):
+            self.registered = []
+
+        def register(self, fn):
+            self.registered.append(fn)
+
+    class _EventClient:
+        def __init__(self, **_kwargs):
+            self.callback = _Callback()
+            self._alive = threading.Event()
+            self.base_client = types.SimpleNamespace(
+                ws=types.SimpleNamespace(connected=True, close=lambda: None)
+            )
+            self.worker = threading.Thread(
+                target=self._alive.wait,
+                daemon=True,
+            )
+            self.worker.start()
+            clients.append(self)
+
+        def simulate_obs_exit(self):
+            self.base_client.ws.connected = False
+            self._alive.set()
+            self.worker.join(timeout=2)
+
+        def disconnect(self):
+            self.base_client.ws.connected = False
+            self._alive.set()
+            self.worker.join(timeout=2)
+
+    def _unavailable_req_client(**_kwargs):
+        # The record-status probe is best effort; it must not count as a
+        # second event connection.
+        raise ConnectionError("request client unavailable")
+
+    fake.EventClient = _EventClient
+    fake.ReqClient = _unavailable_req_client
+    monkeypatch.setitem(sys.modules, "obsws_python", fake)
+
+    def on_status(msg: str) -> None:
+        status_changes.append(msg)
+        if "切断" in msg:
+            disconnected_event.set()
+        elif msg.startswith("connected:"):
+            reconnected_event.set()
+
+    w = oi.ObsWebsocketWatcher(
+        "localhost",
+        4455,
+        "pw",
+        lambda _p: None,
+        stop_event="record",
+        on_status_change=on_status,
+        reconnect_interval=0.05,
+    )
+    obs_ready = threading.Event()
+    monkeypatch.setattr(w, "_is_endpoint_reachable", obs_ready.is_set)
+
+    w.start()
+    assert w.status.startswith("connected:")
+    assert len(clients) == 1
+
+    # Simulate OBS shutting down.
+    clients[0].simulate_obs_exit()
+    assert disconnected_event.wait(timeout=5), "disconnect was not detected"
+    assert w.reconnecting is True
+    assert w._client is None
+
+    # Simulate OBS coming back up.
+    obs_ready.set()
+    assert reconnected_event.wait(timeout=5), "watcher did not reconnect after OBS restart"
+    assert len(clients) == 2
+    assert w._client is clients[1]
+    assert w.status.startswith("connected:")
+    assert w.reconnecting is False
+
+    w.stop()
+    assert w.status == "stopped"
+
+
+def test_obs_websocket_does_not_retry_permanent_auth_error(monkeypatch):
+    fake = types.ModuleType("obsws_python")
+    attempts = 0
+
+    class _EventClient:
+        def __init__(self, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("authentication enabled but no password provided")
+
+    fake.EventClient = _EventClient
+    monkeypatch.setitem(sys.modules, "obsws_python", fake)
+
+    w = oi.ObsWebsocketWatcher(
+        "localhost",
+        4455,
+        "",
+        lambda _p: None,
+        reconnect_interval=0.05,
+    )
+    w.start()
+    assert "接続失敗" in w.status
+    assert w.reconnecting is False
+    assert w._monitor_thread is None
+    assert attempts == 1
+    w.stop()
+
+
+def test_obs_websocket_stop_terminates_reconnect_loop(monkeypatch):
+    fake = types.ModuleType("obsws_python")
+
+    class _EventClient:
+        def __init__(self, **_kwargs):
+            raise ConnectionRefusedError("no OBS yet")
+
+    fake.EventClient = _EventClient
+    monkeypatch.setitem(sys.modules, "obsws_python", fake)
+
+    w = oi.ObsWebsocketWatcher(
+        "localhost",
+        4455,
+        "pw",
+        lambda _p: None,
+        reconnect_interval=0.05,
+    )
+    monkeypatch.setattr(w, "_is_endpoint_reachable", lambda: False)
+
+    w.start()
+    monitor = w._monitor_thread
+    assert monitor is not None
+    assert w.reconnecting is True
+
+    w.stop()
+    assert not monitor.is_alive()
+    assert w.status == "stopped"
+    assert w.reconnecting is False

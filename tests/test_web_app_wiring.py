@@ -712,7 +712,7 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_x_post_destinations", "obs_x_post_auto", "obs_x_api_key",
         "obs_x_api_key_secret", "obs_x_access_token",
         "obs_x_access_token_secret",
-        "obs_x_post_mode",
+        "obs_x_post_mode", "obs_output_location",
     ]
     assert _click_input_names(module, "obs_start_btn") == [
         "obs_trigger_radio", "obs_host", "obs_port", "obs_password",
@@ -729,7 +729,7 @@ def test_obs_start_signature_matches_inputs_and_passes_obs_profile():
         "obs_x_post_destinations", "obs_x_post_auto", "obs_x_api_key",
         "obs_x_api_key_secret", "obs_x_access_token",
         "obs_x_access_token_secret",
-        "obs_x_post_mode",
+        "obs_x_post_mode", "obs_output_location_radio",
     ]
 
 

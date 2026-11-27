@@ -22,7 +22,7 @@ anyio==4.15.0
     #   starlette
 av==18.1.0
     # via faster-whisper
-brotli==1.2.0
+brotli==1.2.1
     # via
     #   gradio
     #   yt-dlp
@@ -50,7 +50,7 @@ fastapi==0.141.1
     # via gradio
 faster-whisper==1.2.1
     # via -r requirements.txt
-filelock==3.32.5
+filelock==4.3.1
     # via huggingface-hub
 flatbuffers==25.12.19
     # via onnxruntime
@@ -79,9 +79,9 @@ google-genai==2.22.0
     # via -r requirements.txt
 googleapis-common-protos==1.75.2
     # via google-api-core
-gradio==6.26.0
+gradio==6.32.0
     # via -r requirements.txt
-gradio-client==2.6.1
+gradio-client==2.7.2
     # via
     #   gradio
     #   hf-gradio
@@ -147,7 +147,7 @@ numpy==2.5.2
     #   gradio
     #   onnxruntime
     #   pandas
-oauthlib==4.0.0
+oauthlib==4.0.1
     # via requests-oauthlib
 obsws-python==1.8.0
     # via -r requirements.txt
@@ -165,7 +165,7 @@ packaging==26.3
     #   onnxruntime
 pandas==3.0.5
     # via gradio
-pillow==12.3.0
+pillow==13.0.0
     # via
     #   -r requirements.txt
     #   gradio
@@ -179,7 +179,7 @@ protobuf==7.36.1
     #   proto-plus
 psutil==7.2.2
     # via -r requirements.txt
-pyasn1==0.6.4
+pyasn1==0.6.5
     # via pyasn1-modules
 pyasn1-modules==0.4.2
     # via google-auth
