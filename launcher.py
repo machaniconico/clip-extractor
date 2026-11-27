@@ -210,24 +210,18 @@ def _find_windows_default_browser_executable():
 
 
 def open_app_page(*, url=SERVER_URL, platform=None):
-    """Open the UI visibly, preferring a new browser window on Windows."""
+    """Open the UI in a new tab of an existing browser window when possible."""
     target_platform = platform or sys.platform
     if target_platform == "win32":
         browser = _find_windows_default_browser_executable()
         if browser is not None:
             browser_name = PureWindowsPath(str(browser)).name.lower()
             if browser_name == "firefox.exe":
-                args = [str(browser), "-new-window", url]
-            elif browser_name in {
-                "brave.exe",
-                "chrome.exe",
-                "chromium.exe",
-                "msedge.exe",
-                "opera.exe",
-                "vivaldi.exe",
-            }:
-                args = [str(browser), "--new-window", url]
+                args = [str(browser), "-new-tab", url]
             else:
+                # Chromium-based browsers (Chrome, Edge, Brave, Vivaldi, Opera)
+                # open a new tab in the active window when given just the URL,
+                # and open a new window if no browser is running.
                 args = [str(browser), url]
             try:
                 subprocess.Popen(args, close_fds=True)

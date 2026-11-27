@@ -129,6 +129,7 @@ def test_auto_connect_waits_then_starts_with_saved_defaults(monkeypatch, tmp_pat
         "x_post_template": web_app.DEFAULT_X_POST_TEMPLATE,
         "x_post_destinations": "",
         "x_post_mode": "combined",
+        "obs_output_location": "recording",
     }]
 
 
@@ -399,3 +400,82 @@ def test_auto_connect_list_destinations_are_normalised(monkeypatch, tmp_path):
     web_app.start_obs_watch_from_defaults()
 
     assert calls[0]["x_post_destinations"] == "https://twitch.tv/a\nhttps://kick.com/b"
+
+
+def test_auto_connect_recovers_when_obs_restarts_after_initial_refusal(
+    monkeypatch,
+    tmp_path,
+    caplog,
+):
+    import logging
+    import types
+
+    _isolate_settings(
+        monkeypatch,
+        tmp_path,
+        obs_auto_process=False,
+        obs_stop_event="record",
+    )
+    fake = types.ModuleType("obsws_python")
+    attempts = 0
+    reconnected = threading.Event()
+
+    class _Callback:
+        def register(self, _fn):
+            pass
+
+    class _EventClient:
+        def __init__(self, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise ConnectionRefusedError("[WinError 10061] refused")
+            self.callback = _Callback()
+            reconnected.set()
+
+        def disconnect(self):
+            pass
+
+    fake.EventClient = _EventClient
+    fake.ReqClient = _EventClient
+    monkeypatch.setitem(sys.modules, "obsws_python", fake)
+    monkeypatch.setattr(web_app, "_wait_for_obs_websocket", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        obs_integration,
+        "DEFAULT_RECONNECT_INTERVAL",
+        0.05,
+    )
+    monkeypatch.setattr(
+        obs_integration.ObsWebsocketWatcher,
+        "_is_endpoint_reachable",
+        lambda _self: True,
+    )
+
+    try:
+        with caplog.at_level(logging.INFO, logger=web_app.logger.name):
+            initial_status = web_app.start_obs_watch_from_defaults()
+            assert "接続失敗" in initial_status
+            assert "バックグラウンドで待機" in web_app._obs_status_text()
+            assert reconnected.wait(timeout=5), "OBS auto-reconnect did not succeed"
+            # Wait briefly for status callback to activate retry handler.
+            deadline = threading.Event()
+            for _ in range(100):
+                if web_app._obs_retry_handler is not None:
+                    break
+                deadline.wait(0.02)
+            assert web_app._obs_retry_handler is not None
+            assert "[OBS status]" in caplog.text
+            assert "OBS接続状態: connected:" in web_app._obs_status_text()
+    finally:
+        web_app.stop_obs_watch()
+
+
+def test_obs_append_status_logs_single_line_and_skips_multiline(caplog):
+    import logging
+
+    with caplog.at_level(logging.INFO, logger=web_app.logger.name):
+        web_app._obs_append_status("OBS接続テスト単一行")
+        web_app._obs_append_status("line1\nline2")
+
+    assert "[OBS status] OBS接続テスト単一行" in caplog.text
+    assert "line1\nline2" not in caplog.text

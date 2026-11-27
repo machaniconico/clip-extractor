@@ -295,7 +295,7 @@ def test_call_gemini_uses_google_genai_with_structured_json_config(fake_genai_sd
     assert fake_genai_sdk.close_count == 1
     assert len(fake_genai_sdk.calls) == 1
     call = fake_genai_sdk.calls[0]
-    assert call["model"] == "gemini-3.5-flash-lite"
+    assert call["model"] == "gemini-4-hydrogen"
     assert call["contents"] == "USER PROMPT"
 
     config = _config_values(call["config"])
@@ -376,7 +376,7 @@ def test_call_gemini_does_not_retry_non_schema_errors(
     assert len(fake_genai_sdk.calls) == 1
 
 
-def test_detect_highlights_uses_35_flash_lite_when_gemini_model_is_blank(monkeypatch):
+def test_detect_highlights_uses_default_model_when_gemini_model_is_blank(monkeypatch):
     captured = {}
 
     def fake_call(user_prompt, api_key, model):
@@ -392,7 +392,7 @@ def test_detect_highlights_uses_35_flash_lite_when_gemini_model_is_blank(monkeyp
         "transcript", ai_provider="gemini", api_key="secret", ai_model=""
     )
 
-    assert captured["model"] == "gemini-3.5-flash-lite"
+    assert captured["model"] == "gemini-4-hydrogen"
     assert captured["api_key"] == "secret"
     assert result[0]["title"] == "Default model"
 

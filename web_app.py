@@ -42,6 +42,7 @@ from x_post import (
     parse_destination_links,
     post_x_post,
     render_x_post_text,
+    test_x_credentials,
     x_weighted_length,
 )
 
@@ -192,6 +193,7 @@ def get_system_fonts_cached():
 from config import FontConfig
 
 SETTINGS_FILE = Path(__file__).parent / "default_settings.json"
+SETUP_GUIDE_FILE = Path(__file__).parent / "SETUP_GUIDE.html"
 GEMINI_KEY_FILE = Path(__file__).parent / ".gemini_key"
 OBS_PASSWORD_FILE = Path(__file__).parent / ".obs_password"
 X_CREDENTIALS_FILE = Path(__file__).parent / ".x_credentials.json"
@@ -276,7 +278,17 @@ OBS_CONNECTION_DEFAULTS = {
     "obs_x_post_template": DEFAULT_X_POST_TEMPLATE,
     "obs_x_post_destinations": "",
     "obs_x_post_mode": "combined",
+    "obs_output_location": "recording",
 }
+
+# OBS録画から生成したクリップの保存先。recording=録画と同じフォルダ、
+# custom=設定タブの「現在の保存先」(output_base_dir)。
+OBS_OUTPUT_LOCATIONS = ("recording", "custom")
+
+
+def _normalise_obs_output_location(value) -> str:
+    location = str(value or "").strip().lower()
+    return location if location in OBS_OUTPUT_LOCATIONS else "recording"
 
 
 def _normalise_shorts_blur_strength(value) -> float:
@@ -493,6 +505,11 @@ def _build_obs_processing_settings(
     )
 
 
+def _sanitize_api_key_input(key_text: str) -> str:
+    """Trim whitespace and accidental surrounding quotes from pasted API keys."""
+    return str(key_text or "").strip().strip('"').strip("'")
+
+
 def load_gemini_api_key(env_var: str = "GEMINI_API_KEY") -> str:
     """Return the Gemini API key.
 
@@ -514,41 +531,301 @@ def load_gemini_api_key(env_var: str = "GEMINI_API_KEY") -> str:
 
 def _resolve_ai_api_key(key_text: str) -> str:
     """Resolve a request key without ever preloading it into browser state."""
-    entered = (key_text or "").strip()
+    entered = _sanitize_api_key_input(key_text)
     return entered or load_gemini_api_key()
 
 
 def _resolve_provider_api_key(ai_provider: str, key_text: str) -> str:
     """Keep saved cloud credentials out of local and CLI provider calls."""
-    if ai_provider in {"gemini", "openai"}:
+    if ai_provider == "gemini":
         return _resolve_ai_api_key(key_text)
+    if ai_provider == "openai":
+        entered = _sanitize_api_key_input(key_text)
+        if entered:
+            return entered
+        saved = secret_store.read_secret_text(GEMINI_KEY_FILE).strip()
+        if saved and not saved.startswith("AIza"):
+            return saved
+        env_openai = os.environ.get("OPENAI_API_KEY", "").strip()
+        if env_openai:
+            return env_openai
+        return saved
     return ""
 
 
 def save_gemini_api_key(key_text: str):
-    """Persist the Gemini API key to GEMINI_KEY_FILE, or delete the file
-    when the textbox is cleared.
+    """Persist the API key to GEMINI_KEY_FILE.
 
-    Uses gr.Info / gr.Warning for feedback since this is wired to a
-    Gradio button click. Never raises — a failed write surfaces as a
-    warning toast, keeping the UI responsive.
+    Uses gr.Info / gr.Warning for feedback. Empty input never deletes an
+    already-saved key so beginners cannot accidentally erase their setup by
+    clicking Save twice; deletion uses ``delete_saved_api_key``.
     """
-    text = (key_text or "").strip()
+    text = _sanitize_api_key_input(key_text)
     try:
         if text:
             secret_store.write_secret_text(GEMINI_KEY_FILE, text)
-            gr.Info("API キーを .gemini_key に保存しました。次回起動時から自動で読み込まれます。")
+            gr.Info("APIキーを保存しました。次回起動時から自動で読み込まれます。")
             return gr.update(value="", placeholder="保存済み。変更時のみ新しいキーを入力")
         elif GEMINI_KEY_FILE.exists():
-            secret_store.delete_secret(GEMINI_KEY_FILE)
-            gr.Info("API キーをクリアしました (.gemini_key を削除)。")
-            return gr.update(value="", placeholder="OpenAI / Gemini のAPIキーを入力")
+            gr.Warning(
+                "新しいキーが未入力です。保存済みキーを削除する場合は「🗑️ 削除」ボタンを押してください。"
+            )
+            return gr.update(value="", placeholder="保存済み。変更時のみ新しいキーを入力")
         else:
-            gr.Warning("保存する API キーが空です。textbox にキーを入力してから押してください。")
+            gr.Warning("保存するAPIキーが空です。上の欄にキーを貼り付けてから押してください。")
     except Exception:
-        logger.exception("Failed to save or delete the Gemini API key")
-        gr.Warning("API キーの保存に失敗しました。")
+        logger.exception("Failed to save the API key")
+        gr.Warning("APIキーの保存に失敗しました。")
     return gr.update(value="")
+
+
+def delete_saved_api_key():
+    """Explicitly remove the saved local API key file."""
+    try:
+        if GEMINI_KEY_FILE.exists():
+            secret_store.delete_secret(GEMINI_KEY_FILE)
+            gr.Info("保存済みのAPIキーを削除しました。")
+        else:
+            gr.Info("保存済みのAPIキーはありません。")
+    except Exception:
+        logger.exception("Failed to delete the API key")
+        gr.Warning("APIキーの削除に失敗しました。")
+    return gr.update(value="", placeholder="OpenAI / Gemini のAPIキーを入力")
+
+
+def _ai_readiness(ai_provider: str) -> tuple[bool, str]:
+    """Return ``(ready, status_text)`` for the selected AI provider without I/O."""
+    provider = str(ai_provider or "gemini").strip().lower()
+    if provider == "gemini":
+        has_key = bool(_read_secret_for_ui(load_gemini_api_key, ""))
+        if has_key:
+            return True, "🟢 Gemini APIキー設定済み（「🔍 接続テスト」で有効性を確認できます）"
+        return False, "🔴 Gemini APIキー未設定（無料・約2分で取得できます）"
+    if provider == "openai":
+        has_key = bool(
+            _read_secret_for_ui(lambda: _resolve_provider_api_key("openai", ""), "")
+        )
+        if has_key:
+            return True, "🟢 OpenAI APIキー設定済み（「🔍 接続テスト」で有効性を確認できます）"
+        return False, "🔴 OpenAI APIキー未設定（OpenAI Platform でキーを取得して保存してください）"
+    if provider == "claude":
+        if shutil.which("claude"):
+            return True, "🟢 Claude CLI を検出しました（APIキー入力は不要です）"
+        return False, "🔴 Claude CLI が見つかりません（無料枠のある gemini への切り替えが手軽です）"
+    if provider == "local":
+        if local_llm_enabled():
+            return True, "🟢 ローカルLLM 有効（APIキー不要・LM Studio の起動が必要）"
+        return False, "🔴 ローカルLLM は無効です"
+    return False, f"🔴 未対応のAIプロバイダー: {provider}"
+
+
+def _provider_quick_hint(ai_provider: str) -> str:
+    """Short, provider-specific guidance shown under the AI Model selector."""
+    provider = str(ai_provider or "gemini").strip().lower()
+    if provider == "gemini":
+        return (
+            "💡 **おすすめ（無料枠あり・クレカ不要）**: "
+            "[Google AI Studio](https://aistudio.google.com/apikey) でキーを作成し、"
+            "下の欄に貼って **「💾 キーを保存」→「🔍 接続テスト」** を押せば準備完了です。"
+        )
+    if provider == "openai":
+        return (
+            "💡 [OpenAI Platform](https://platform.openai.com/api-keys) で作成したキーを"
+            "下の欄に貼って **「💾 キーを保存」→「🔍 接続テスト」** を押してください（従量課金）。"
+        )
+    if provider == "claude":
+        return (
+            "💡 Claude CLI は APIキー不要です。未導入の場合は "
+            "`npm install -g @anthropic-ai/claude-code` が必要です。"
+            "手軽に始めるなら **gemini** がおすすめです。"
+        )
+    if provider == "local":
+        return (
+            "💡 LM Studio などのローカルサーバーへ接続します（APIキー不要）。"
+            "サーバー起動後に **「🔍 接続テスト」** で疎通確認できます。"
+        )
+    return ""
+
+
+def _build_setup_banner_html(ai_provider: str, ai_model: str = "") -> str:
+    """Build the top-of-page onboarding status banner without leaking secrets."""
+    import html as _html
+
+    ffmpeg_ok = bool(shutil.which("ffmpeg"))
+    ai_ok, ai_status = _ai_readiness(ai_provider)
+    cost_level, cost_msg = classify_ai_cost_risk(ai_provider, ai_model)
+    provider_label = {
+        "gemini": "Gemini（推奨・無料枠あり）",
+        "openai": "OpenAI（有料API）",
+        "claude": "Claude CLI",
+        "local": "ローカルLLM",
+    }.get(str(ai_provider or "gemini").lower(), str(ai_provider))
+
+    paid_alert_html = ""
+    if cost_level in {"paid_only", "unknown_custom"}:
+        paid_alert_html = (
+            "<div class='setup-banner-cost-alert'>"
+            f"🚨 <strong>有料課金の注意：</strong>{_html.escape(cost_msg)}"
+            "</div>"
+        )
+
+    if ffmpeg_ok and ai_ok:
+        if paid_alert_html:
+            return (
+                "<div class='setup-banner setup-banner--pending'>"
+                "<div class='setup-banner-title'>⚠️ 有料課金の可能性があるAI設定が選ばれています</div>"
+                f"{paid_alert_html}"
+                "</div>"
+            )
+        return (
+            "<div class='setup-banner setup-banner--ready'>"
+            "<span class='setup-banner-title'>✅ 初期設定完了</span>"
+            f"<span class='setup-banner-detail'>FFmpeg OK ／ 分析AI: {_html.escape(provider_label)} 準備OK"
+            "（YouTube自動追記・OBS・X連携はあとから Settings タブで設定できます）</span>"
+            "</div>"
+        )
+
+    items = []
+    if ffmpeg_ok:
+        items.append("<li>✅ <strong>FFmpeg</strong>：準備OK</li>")
+    else:
+        items.append(
+            "<li>❌ <strong>FFmpeg が見つかりません</strong>："
+            "<code>setup.bat</code> を実行して導入してください</li>"
+        )
+    if ai_ok:
+        items.append(f"<li>✅ <strong>分析AI</strong>：{_html.escape(ai_status)}</li>")
+    else:
+        items.append(
+            f"<li>⚠️ <strong>分析AI（必須）</strong>：{_html.escape(ai_status)}"
+            " — 下の <strong>「⚙️ 設定タブを開く」</strong> からAPIキーを保存してください</li>"
+        )
+    items.append(
+        "<li class='setup-banner-optional'>⚪ <strong>YouTube自動追記 / OBS連携 / X告知（任意）</strong>"
+        "：切り抜き作成だけなら不要です。必要になったときにあとから設定できます</li>"
+    )
+    return (
+        "<div class='setup-banner setup-banner--pending'>"
+        "<div class='setup-banner-title'>🔑 はじめての方へ：あと少しで切り抜きを始められます</div>"
+        f"<ul class='setup-banner-list'>{''.join(items)}</ul>"
+        f"{paid_alert_html}"
+        "</div>"
+    )
+
+
+def _ai_model_cost_warning_html(ai_provider: str, ai_model: str = "") -> str:
+    """Render a clear cost/billing notice card under the AI model selector."""
+    import html as _html
+
+    level, message = classify_ai_cost_risk(ai_provider, ai_model)
+    css_map = {
+        "paid_only": ("cost-warning--danger", "🚨 有料課金の警告"),
+        "unknown_custom": ("cost-warning--warn", "⚠️ 課金・無料枠の注意"),
+        "billing_caveat": ("cost-warning--warn", "💡 無料枠あり（課金プロジェクト時は有料）"),
+        "subscription": ("cost-warning--info", "💡 契約プラン枠を利用"),
+        "free_low_cost": ("cost-warning--safe", "✅ 無料枠あり・最安モデル"),
+        "local_free": ("cost-warning--safe", "✅ 無料（ローカル推論）"),
+    }
+    cls, heading = css_map.get(level, ("cost-warning--info", "💡 料金の目安"))
+    return (
+        f"<div class='cost-warning-box {cls}'>"
+        f"<div class='cost-warning-title'>{_html.escape(heading)}</div>"
+        f"<div class='cost-warning-body'>{_html.escape(message)}</div>"
+        "</div>"
+    )
+
+
+def open_setup_guide():
+    """Open the bundled visual SETUP_GUIDE.html in the user's browser."""
+    import webbrowser
+
+    if not SETUP_GUIDE_FILE.is_file():
+        gr.Warning(f"図解ガイドが見つかりません: {SETUP_GUIDE_FILE.name}")
+        return
+    try:
+        opened = webbrowser.open(SETUP_GUIDE_FILE.resolve().as_uri(), new=2, autoraise=True)
+        if opened:
+            gr.Info("図解セットアップガイド（SETUP_GUIDE.html）をブラウザで開きました。")
+        else:
+            gr.Warning(
+                f"ブラウザで開けませんでした。フォルダ内の {SETUP_GUIDE_FILE.name} を直接ダブルクリックしてください。"
+            )
+    except Exception:
+        logger.exception("Failed to open SETUP_GUIDE.html")
+        gr.Warning(
+            f"図解ガイドを開けませんでした。フォルダ内の {SETUP_GUIDE_FILE.name} を直接ダブルクリックしてください。"
+        )
+
+
+def _preflight_ai_provider_error(ai_provider: str, api_key: str) -> str | None:
+    """Return a clear Japanese setup error before downloading/transcribing."""
+    provider = str(ai_provider or "gemini").strip().lower()
+    if provider == "gemini":
+        if not _resolve_provider_api_key("gemini", api_key):
+            return (
+                "Error: Gemini APIキーが未設定です。\n"
+                "1. 「Settings / 設定」タブの『① 最初に必要な設定 → 分析AI』を開いてください。\n"
+                "2. Google AI Studio（https://aistudio.google.com/apikey）で無料キーを作成・コピーして貼り付け、"
+                "「💾 キーを保存」を押してください（約2分・クレカ不要）。\n"
+                "詳しい手順は画面上部の「📘 図解セットアップガイドを開く」から確認できます。"
+            )
+    elif provider == "openai":
+        if not _resolve_provider_api_key("openai", api_key):
+            return (
+                "Error: OpenAI APIキーが未設定です。\n"
+                "「Settings / 設定」タブの『分析AI』でAPIキーを保存するか、"
+                "無料枠のある「gemini」へ切り替えてお試しください。"
+            )
+    return None
+
+
+def save_api_key_for_ui(key_text: str, ai_provider: str, ai_model: str = ""):
+    """Save the API key and refresh the status box and top setup banner."""
+    textbox_update = save_gemini_api_key(key_text)
+    _ok, status_text = _ai_readiness(ai_provider)
+    return textbox_update, status_text, _build_setup_banner_html(ai_provider, ai_model)
+
+
+def delete_api_key_for_ui(ai_provider: str, ai_model: str = ""):
+    """Delete the saved API key and refresh the status box and top setup banner."""
+    textbox_update = delete_saved_api_key()
+    _ok, status_text = _ai_readiness(ai_provider)
+    return textbox_update, status_text, _build_setup_banner_html(ai_provider, ai_model)
+
+
+def test_api_key_for_ui(ai_provider: str, ai_model: str, key_text: str) -> str:
+    """Run a lightweight non-generating connection test for the chosen AI provider."""
+    resolved_key = ""
+    if ai_provider in {"gemini", "openai"}:
+        resolved_key = _read_secret_for_ui(
+            lambda: _resolve_provider_api_key(ai_provider, key_text),
+            "",
+        )
+    _ok, message = test_ai_connection(ai_provider, resolved_key, ai_model)
+    return message
+
+
+def test_x_credentials_for_ui(
+    api_key: str,
+    api_key_secret: str,
+    access_token: str,
+    access_token_secret: str,
+) -> str:
+    """Verify entered or saved X OAuth 1.0a credentials without posting."""
+    entered = XCredentials(
+        api_key=str(api_key or ""),
+        api_key_secret=str(api_key_secret or ""),
+        access_token=str(access_token or ""),
+        access_token_secret=str(access_token_secret or ""),
+    )
+    if entered.any_set():
+        if not entered.is_complete():
+            return "❌ 入力途中の項目があります。4項目すべてを入力するか、空欄のまま保存済み認証情報をテストしてください。"
+        creds = entered
+    else:
+        creds = _read_secret_for_ui(load_x_credentials, XCredentials())
+    _ok, message = test_x_credentials(creds)
+    return message
 
 
 def load_obs_password() -> str:
@@ -704,6 +981,9 @@ def load_defaults() -> dict:
     defaults["obs_x_post_destinations"] = normalize_destinations_text(
         defaults.get("obs_x_post_destinations", "")
     )
+    defaults["obs_output_location"] = _normalise_obs_output_location(
+        defaults.get("obs_output_location", "recording")
+    )
     # Secrets are loaded only inside start_obs_watch(). Returning one here can
     # expose it in Gradio's component configuration when the app is LAN-bound.
     defaults.pop("obs_password", None)
@@ -750,7 +1030,7 @@ def _write_settings_file(data: dict, *, reason: str) -> None:
 
 
 def _obs_settings_updates_for_ui(defaults: dict) -> tuple:
-    """Update the 26 OBS controls, in obs_settings_outputs order, without secrets."""
+    """Update the 27 OBS controls, in obs_settings_outputs order, without secrets."""
     processing = _obs_processing_settings_from_defaults(defaults)
     values = (
         defaults["obs_trigger_method"],
@@ -785,6 +1065,11 @@ def _obs_settings_updates_for_ui(defaults: dict) -> tuple:
             visible=processing["shorts_mode"] == "blur",
         ),
         gr.update(value=processing["shorts_title_position"]),
+        gr.update(
+            value=_normalise_obs_output_location(
+                defaults.get("obs_output_location", "recording")
+            )
+        ),
     )
 
 
@@ -812,6 +1097,7 @@ def _save_obs_connection_defaults(
     *,
     reason: str = "obs_connection",
     x_post_mode: str | None = None,
+    output_location: str | None = None,
 ) -> None:
     """Persist OBS controls while keeping all secrets out of tracked JSON."""
     data = load_defaults()
@@ -836,6 +1122,12 @@ def _save_obs_connection_defaults(
             "obs_x_post_template": str(x_post_template or DEFAULT_X_POST_TEMPLATE),
             "obs_x_post_destinations": normalize_destinations_text(x_post_destinations),
             "obs_x_post_mode": obs_x_post_mode,
+            # None = 呼び出し元が保存先を扱わない → 保存済みの値を維持する。
+            "obs_output_location": _normalise_obs_output_location(
+                data.get("obs_output_location", "recording")
+                if output_location is None
+                else output_location
+            ),
         }
     )
     if processing_settings is not None:
@@ -945,6 +1237,7 @@ def save_obs_processing_defaults(
     stop_event=None,
     watch_folder=None,
     auto_process=None,
+    output_location=None,
 ):
     """Persist OBS connection/generation controls and return the saved UI state."""
     data = load_defaults()
@@ -1000,6 +1293,7 @@ def save_obs_processing_defaults(
         x_post_destinations=data["obs_x_post_destinations"],
         reason="obs_settings",
         x_post_mode=data.get("obs_x_post_mode"),
+        output_location=output_location,
     )
     reloaded = load_defaults()
     saved_processing = _obs_processing_settings_from_defaults(reloaded)
@@ -1171,11 +1465,14 @@ from highlighter import (
     GeminiTemporaryError,
     LOCAL_LLM_ENABLE_ENV,
     LOCAL_LLM_MODEL_ENV,
+    classify_ai_cost_risk,
     detect_highlights,
     local_llm_default_model,
     local_llm_enabled,
     normalize_highlight_range,
+    test_ai_connection,
 )
+_REAL_DETECT_HIGHLIGHTS = detect_highlights
 from audio_energy import fuse_audio_energy
 import clipper
 from clipper import extract_clips, generate_thumbnails as generate_thumbnail_candidates, get_video_info
@@ -1220,7 +1517,7 @@ def _ai_provider_info() -> str:
 
 
 def _ai_model_info() -> str:
-    base = "既定: Gemini=gemini-3.5-flash-lite（低コスト）、OpenAI=gpt-4.1、Claude=CLI"
+    base = "既定: Gemini=gemini-4-hydrogen（無料枠あり・高品質）、低コスト=gemini-3.5-flash-lite、OpenAI=gpt-4.1（有料）、Claude=CLI"
     if local_llm_enabled():
         return f"{base}。LocalはモデルIDまたは {LOCAL_LLM_MODEL_ENV} で設定"
     return base
@@ -1230,7 +1527,7 @@ def _api_key_info() -> str:
     no_key_providers = "ClaudeとLocal" if local_llm_enabled() else "Claude"
     return (
         f"{no_key_providers}は入力不要。保存済みキーは画面へ再表示しません。"
-        "空欄のまま保存ボタンを押すと削除します。"
+        "削除したい場合は「🗑️ 削除」ボタンを押してください。"
     )
 
 
@@ -1672,6 +1969,10 @@ def detect_phase(
             modes.validate()
         except ValueError as mode_err:
             return {}, f"Error: {mode_err}", gr.update(visible=False)
+        if detect_highlights is _REAL_DETECT_HIGHLIGHTS:
+            preflight_err = _preflight_ai_provider_error(ai_provider, api_key)
+            if preflight_err:
+                return {}, preflight_err, gr.update(visible=False)
         log(
             f"Modes: clips={modes.enable_clips}, shorts={modes.enable_shorts}, "
             f"chapters={modes.enable_chapters}"
@@ -2404,12 +2705,17 @@ def _obs_retry_after_api_error(
 
 
 def _obs_append_status(msg: str) -> None:
-    """Append a status line (thread-safe, capped to the last N lines)."""
+    """Append a status line (thread-safe, capped to the last N lines) and log it."""
     if not msg:
         return
+    text = str(msg)
     with _obs_status_lock:
-        _obs_status_lines.append(str(msg))
+        _obs_status_lines.append(text)
         del _obs_status_lines[:-_OBS_STATUS_MAX]
+    # Persist single-line OBS lifecycle/error messages in the app log file;
+    # multi-line pipeline logs are already emitted line-by-line by the pipeline.
+    if "\n" not in text:
+        logger.info("[OBS status] %s", text)
 
 
 def _obs_status_text() -> str:
@@ -2862,7 +3168,41 @@ def _run_obs_auto_pipeline_outcome(
             error=error,
         )
     fake_file = type("F", (), {"name": video_path})()
+    settings = _obs_settings_with_recording_output(video_path, settings)
     return _run_obs_detect_render("", fake_file, video_path, settings)
+
+
+def _obs_settings_with_recording_output(video_path: str, settings: dict) -> dict:
+    """Return settings whose output base is the recording's folder when chosen.
+
+    ``obs_output_location == "recording"`` (default) writes
+    ``<録画フォルダ>/output_<ts>_<id>/``.  If that folder is not writable the
+    configured ``output_base_dir`` is used instead.  Archive-sourced runs never
+    come through here, so they always keep ``output_base_dir``.
+    """
+    location = _normalise_obs_output_location(
+        settings.get("obs_output_location", "recording")
+    )
+    if location != "recording":
+        return settings
+    recording_dir = Path(video_path).expanduser().resolve().parent
+    try:
+        # 出力先と同じ操作(サブフォルダ作成)で確かめる。os.access は
+        # Windows の共有フォルダ等で当てにならない。
+        probe = tempfile.mkdtemp(prefix=".clip_extractor_probe_", dir=recording_dir)
+        os.rmdir(probe)
+    except OSError as exc:
+        fallback = resolve_output_base(settings.get("output_base_dir", ""))
+        message = (
+            f"録画フォルダに書き込めないため、指定した保存先を使用します: "
+            f"{recording_dir} → {fallback} ({exc})"
+        )
+        logger.warning(message)
+        _obs_append_status(message)
+        return settings
+    updated = dict(settings)
+    updated["output_base_dir"] = str(recording_dir)
+    return updated
 
 
 def run_obs_auto_pipeline(video_path: str, settings: dict) -> str:
@@ -3930,6 +4270,8 @@ def _obs_make_stream_pipeline_callbacks(
             stream_state["source_claim"] = "recording"
             stream_state["recording_path"] = video_path
             stream_state["recording_ready"].set()
+            # Bind this run's event: a retry swaps in a fresh Event.
+            recording_done = stream_state["recording_done"]
 
         def _recording_worker() -> None:
             try:
@@ -3949,6 +4291,7 @@ def _obs_make_stream_pipeline_callbacks(
                     with state_lock:
                         stream_state["confirmation_decision"] = "skipped"
                         stream_state["recording_outcome"] = skipped
+                        recording_done.set()
                     _obs_append_status(skipped.log)
                     return
                 with state_lock:
@@ -3960,9 +4303,11 @@ def _obs_make_stream_pipeline_callbacks(
                 local_settings["auto_append_youtube"] = False
                 _obs_append_status(f"OBS録画の自動パイプライン開始: {video_path}")
                 outcome = _run_obs_auto_pipeline_outcome(video_path, local_settings)
-                _obs_append_status(outcome.log)
                 with state_lock:
                     stream_state["recording_outcome"] = outcome
+                    recording_done.set()
+                # 完了を立ててから表示する(表示直後の再試行を「処理中」で弾かない)。
+                _obs_append_status(outcome.log)
                 if outcome.success:
                     generated = []
                     if _setting_bool(local_settings.get("enable_clips"), True, "enable_clips"):
@@ -3990,11 +4335,12 @@ def _obs_make_stream_pipeline_callbacks(
                         success=False,
                         error=str(exc),
                     )
+                    recording_done.set()
                 _obs_append_status(
                     f"OBS録画の処理に失敗 — 完成アーカイブを保険として使用します: {exc}"
                 )
             finally:
-                stream_state["recording_done"].set()
+                recording_done.set()
                 _unregister_obs_worker(threading.current_thread())
 
         _spawn(_recording_worker)
@@ -4805,6 +5151,7 @@ def _start_obs_watch_impl(
     x_access_token: str = "",
     x_access_token_secret: str = "",
     x_post_mode: str | None = None,
+    obs_output_location: str | None = None,
 ) -> str:
     """Implementation shared by manual and automatic OBS connection starts."""
     global _obs_watcher, _obs_generation, _obs_retry_handler
@@ -4899,6 +5246,10 @@ def _start_obs_watch_impl(
         )
     else:
         settings["obs_x_post_mode"] = normalize_x_post_mode(x_post_mode)
+    if obs_output_location is not None:
+        settings["obs_output_location"] = _normalise_obs_output_location(
+            obs_output_location
+        )
     entered_x_credentials = XCredentials(
         api_key=str(x_api_key or ""),
         api_key_secret=str(x_api_key_secret or ""),
@@ -4991,6 +5342,7 @@ def _start_obs_watch_impl(
                 else None
             ),
             x_post_mode=settings["obs_x_post_mode"],
+            output_location=settings["obs_output_location"],
         )
     except Exception:
         logger.exception("Failed to save OBS connection settings or secrets")
@@ -5076,6 +5428,57 @@ def _start_obs_watch_impl(
         archive_finished,
         x_post_finished,
     )
+    watcher_holder: list[object] = []
+
+    def _activate_connected_state(current_watcher, current_status: str) -> bool:
+        global _obs_retry_handler
+        status_text = str(current_status)
+        status_lower = status_text.lower()
+        retry_ready = (
+            status_lower.startswith("connected")
+            or status_lower.startswith("watching")
+            or status_text.startswith("監視中")
+        )
+        if retry_ready:
+            retry_handler = _obs_make_active_retry_handler(
+                trigger_method,
+                bool(auto_process),
+                gen,
+                current_watcher,
+                archive_finished,
+            )
+            with _obs_watcher_lock:
+                if _obs_watcher is current_watcher and _obs_generation == gen:
+                    _obs_retry_handler = retry_handler
+        if (
+            bool(getattr(current_watcher, "stream_status_checked", False))
+            and not bool(getattr(current_watcher, "stream_active", False))
+        ):
+            with _obs_watcher_lock:
+                if _obs_watcher is current_watcher and _obs_generation == gen:
+                    _reset_obs_x_post_stream_guard()
+        if (
+            stream_started is not None
+            and status_lower.startswith("connected")
+            and not bool(getattr(current_watcher, "stream_status_checked", False))
+            and not bool(getattr(current_watcher, "stream_active", False))
+        ):
+            # Compatibility fallback for older/mocked obsws-python clients that
+            # cannot query GetStreamStatus. Current clients invoke the callback
+            # only when output_active is true.
+            stream_started(proactive=True)
+        return retry_ready
+
+    def _on_watcher_status_change(new_status: str) -> None:
+        if not watcher_holder:
+            return
+        current_watcher = watcher_holder[0]
+        with _obs_watcher_lock:
+            if _obs_watcher is not current_watcher or _obs_generation != gen:
+                return
+        _obs_append_status(f"OBS接続状態: {new_status}")
+        _activate_connected_state(current_watcher, new_status)
+
     try:
         watcher = obs_integration.create_watcher(
             method,
@@ -5084,12 +5487,14 @@ def _start_obs_watch_impl(
             on_recording_stopped=recording_stopped,
             on_stream_started=stream_started,
             on_stream_finished=stream_finished,
+            on_status_change=_on_watcher_status_change,
         )
     except Exception as e:
         msg = f"ウォッチャー生成エラー: {e}"
         _obs_append_status(msg)
         return msg
 
+    watcher_holder.append(watcher)
     with _obs_watcher_lock:
         _obs_watcher = watcher
     try:
@@ -5099,41 +5504,9 @@ def _start_obs_watch_impl(
         return f"OBS連携開始エラー: {e}"
     status = watcher.status
     _obs_append_status(f"OBS連携を開始: {status}")
-    status_text = str(status)
-    status_lower = status_text.lower()
-    retry_ready = (
-        status_lower.startswith("connected")
-        or status_lower.startswith("watching")
-        or status_text.startswith("監視中")
-    )
-    if retry_ready:
-        retry_handler = _obs_make_active_retry_handler(
-            trigger_method,
-            bool(auto_process),
-            gen,
-            watcher,
-            archive_finished,
-        )
-        with _obs_watcher_lock:
-            if _obs_watcher is watcher and _obs_generation == gen:
-                _obs_retry_handler = retry_handler
-    if (
-        bool(getattr(watcher, "stream_status_checked", False))
-        and not bool(getattr(watcher, "stream_active", False))
-    ):
-        with _obs_watcher_lock:
-            if _obs_watcher is watcher and _obs_generation == gen:
-                _reset_obs_x_post_stream_guard()
-    if (
-        stream_started is not None
-        and str(status).lower().startswith("connected")
-        and not bool(getattr(watcher, "stream_status_checked", False))
-        and not bool(getattr(watcher, "stream_active", False))
-    ):
-        # Compatibility fallback for older/mocked obsws-python clients that
-        # cannot query GetStreamStatus. Current clients invoke the callback
-        # only when output_active is true.
-        stream_started(proactive=True)
+    retry_ready = _activate_connected_state(watcher, status)
+    if not retry_ready and bool(getattr(watcher, "reconnecting", False)):
+        _obs_append_status("OBSの起動・再接続をバックグラウンドで待機しています")
     return status
 
 
@@ -5178,6 +5551,7 @@ def start_obs_watch(
     obs_x_access_token=None,
     obs_x_access_token_secret=None,
     obs_x_post_mode=None,
+    obs_output_location=None,
 ) -> str:
     """Manually (re)start OBS integration from the Gradio controls.
 
@@ -5282,6 +5656,7 @@ def start_obs_watch(
             x_access_token=str(obs_x_access_token or ""),
             x_access_token_secret=str(obs_x_access_token_secret or ""),
             x_post_mode=obs_x_post_mode,
+            obs_output_location=obs_output_location,
         )
 
 
@@ -5436,6 +5811,10 @@ def start_obs_watch_from_defaults(
                     "obs_x_post_mode",
                     "combined",
                 ),
+                obs_output_location=settings.get(
+                    "obs_output_location",
+                    "recording",
+                ),
             )
         except secret_store.SecretUnavailableError:
             logger.warning("OBS startup stopped because a saved secret is unavailable")
@@ -5569,6 +5948,10 @@ def _legacy_one_shot_handler(
             modes.validate()
         except ValueError as mode_err:
             return ProcessResult(log=f"Error: {mode_err}").as_gradio_outputs()
+        if detect_highlights is _REAL_DETECT_HIGHLIGHTS:
+            preflight_err = _preflight_ai_provider_error(ai_provider, api_key)
+            if preflight_err:
+                return ProcessResult(log=preflight_err).as_gradio_outputs()
         log(
             f"Modes: clips={modes.enable_clips}, shorts={modes.enable_shorts}, "
             f"chapters={modes.enable_chapters}"
@@ -6138,6 +6521,111 @@ APP_CSS = """
                 box-sizing: border-box !important;
             }
         }
+        .setup-banner-row {
+            align-items: center !important;
+            gap: 0.75rem !important;
+            margin-bottom: 0.75rem !important;
+        }
+        .setup-banner {
+            border-radius: 0.75rem;
+            padding: 0.75rem 1rem;
+            font-size: 0.92rem;
+            line-height: 1.55;
+        }
+        .setup-banner--pending {
+            border: 1px solid color-mix(in srgb, #e37400 55%, var(--border-color-primary) 45%);
+            background: color-mix(in srgb, var(--block-background-fill) 88%, #fef7e0 12%);
+        }
+        .setup-banner--ready {
+            border: 1px solid color-mix(in srgb, #188038 40%, var(--border-color-primary) 60%);
+            background: color-mix(in srgb, var(--block-background-fill) 93%, #e6f4ea 7%);
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.5rem 0.9rem;
+            padding: 0.55rem 0.9rem;
+        }
+        .setup-banner-title {
+            font-weight: 700;
+            font-size: 0.96rem;
+        }
+        .setup-banner-detail {
+            opacity: 0.88;
+            font-size: 0.88rem;
+        }
+        .setup-banner-list {
+            margin: 0.4rem 0 0 1.2rem !important;
+            padding: 0 !important;
+        }
+        .setup-banner-list li {
+            margin: 0.2rem 0;
+        }
+        .setup-banner-optional {
+            opacity: 0.82;
+            font-size: 0.88rem;
+        }
+        .setup-banner-cost-alert {
+            margin-top: 0.45rem;
+            padding: 0.45rem 0.7rem;
+            border-radius: 0.45rem;
+            border-left: 4px solid #d93025;
+            background: color-mix(in srgb, var(--block-background-fill) 85%, #fce8e6 15%);
+            font-size: 0.88rem;
+        }
+        .cost-warning-box {
+            border-radius: 0.55rem;
+            padding: 0.6rem 0.85rem;
+            margin: 0.25rem 0 0.5rem;
+            font-size: 0.86rem;
+            line-height: 1.5;
+            border-left: 4px solid var(--border-color-primary);
+        }
+        .cost-warning-title {
+            font-weight: 700;
+            margin-bottom: 0.15rem;
+        }
+        .cost-warning--danger {
+            border-left-color: #d93025;
+            border: 1px solid color-mix(in srgb, #d93025 45%, var(--border-color-primary) 55%);
+            border-left-width: 4px;
+            background: color-mix(in srgb, var(--block-background-fill) 86%, #fce8e6 14%);
+        }
+        .cost-warning--warn {
+            border-left-color: #e37400;
+            border: 1px solid color-mix(in srgb, #e37400 45%, var(--border-color-primary) 55%);
+            border-left-width: 4px;
+            background: color-mix(in srgb, var(--block-background-fill) 88%, #fef7e0 12%);
+        }
+        .cost-warning--info {
+            border-left-color: #1a73e8;
+            background: color-mix(in srgb, var(--block-background-fill) 92%, #e8f0fe 8%);
+        }
+        .cost-warning--safe {
+            border-left-color: #188038;
+            background: color-mix(in srgb, var(--block-background-fill) 92%, #e6f4ea 8%);
+        }
+        .settings-section-heading {
+            margin: 0.25rem 0 0.75rem !important;
+            padding: 0.55rem 0.85rem;
+            border-left: 4px solid var(--primary-500);
+            background: color-mix(in srgb, var(--block-background-fill) 92%, var(--primary-500) 8%);
+            border-radius: 0.4rem;
+        }
+        .settings-section-heading h2 {
+            margin: 0 !important;
+            font-size: 1.12rem !important;
+            line-height: 1.4 !important;
+        }
+        .settings-section-heading p {
+            margin: 0.2rem 0 0 !important;
+            font-size: 0.88rem !important;
+            opacity: 0.82;
+        }
+        .settings-section-heading--optional {
+            margin-top: 1.75rem !important;
+            border-left-color: var(--border-color-primary);
+            background: color-mix(in srgb, var(--block-background-fill) 96%, var(--border-color-primary) 4%);
+        }
         footer { display: none !important; }
         a[href*="gradio.app"] { display: none !important; }
         """
@@ -6312,7 +6800,36 @@ def create_ui():
         gr.HTML("<h1 class='main-title'>Clip Extractor</h1>")
         gr.HTML("<p class='subtitle'>YouTube / Twitch配信アーカイブから切り抜きショート動画を自動生成</p>")
 
-        with gr.Tabs():
+        initial_ai_model = _resolve_ai_model(
+            defaults.get("ai_provider", "gemini"),
+            defaults.get("ai_model", ""),
+        )
+        with gr.Row(elem_classes="setup-banner-row"):
+            with gr.Column(scale=4):
+                setup_banner_html = gr.HTML(
+                    _build_setup_banner_html(defaults["ai_provider"], initial_ai_model),
+                )
+            with gr.Column(scale=1):
+                go_settings_banner_btn = gr.Button(
+                    "⚙️ 設定タブを開く",
+                    variant=(
+                        "primary"
+                        if (
+                            not _ai_readiness(defaults["ai_provider"])[0]
+                            or classify_ai_cost_risk(defaults["ai_provider"], initial_ai_model)[0]
+                            in {"paid_only", "unknown_custom"}
+                        )
+                        else "secondary"
+                    ),
+                    size="sm",
+                )
+                open_guide_banner_btn = gr.Button(
+                    "📘 図解ガイドを開く",
+                    variant="secondary",
+                    size="sm",
+                )
+
+        with gr.Tabs() as main_tabs:
             # --- Input Tab ---
             with gr.Tab("Input / 入力"):
                 # Normal clips, Shorts, and timestamps are independent outputs.
@@ -6762,6 +7279,21 @@ def create_ui():
                                     ),
                                     value=_setting_bool(defaults.get("obs_auto_process"), True, "obs_auto_process"),
                                 )
+                                obs_output_location_radio = gr.Radio(
+                                    [
+                                        ("録画と同じフォルダ（既定）", "recording"),
+                                        ("指定した保存先フォルダ", "custom"),
+                                    ],
+                                    label="OBS録画のクリップ保存先",
+                                    value=_normalise_obs_output_location(
+                                        defaults.get("obs_output_location", "recording")
+                                    ),
+                                    info=(
+                                        "指定した保存先フォルダ＝設定タブの「現在の保存先」。"
+                                        "完成アーカイブをダウンロードして処理する場合は"
+                                        "常に「現在の保存先」に保存します"
+                                    ),
+                                )
                             with gr.Column(
                                 scale=2,
                                 min_width=280,
@@ -7071,6 +7603,7 @@ def create_ui():
                         obs_auto_start_without_prompt_confirmation,
                         obs_shorts_blur_strength,
                         obs_shorts_title_position,
+                        obs_output_location_radio,
                     ]
                     obs_save_processing_btn.click(
                         fn=save_obs_processing_defaults,
@@ -7101,6 +7634,7 @@ def create_ui():
                             obs_stop_event_radio,
                             obs_watch_folder,
                             obs_auto_process,
+                            obs_output_location_radio,
                         ],
                         outputs=[obs_save_processing_msg, *obs_settings_outputs],
                     )
@@ -7153,6 +7687,244 @@ def create_ui():
 
             # --- Settings Tab ---
             with gr.Tab("Settings / 設定"):
+                gr.HTML(
+                    "<div class='settings-section-heading'>"
+                    "<h2>① 最初に必要な設定（必須）</h2>"
+                    "<p>切り抜き作成を始めるには、まず<strong>分析AI（おすすめ: 無料枠のある Gemini）</strong>の"
+                    "APIキーを保存し、「🔍 接続テスト」で確認してください。</p>"
+                    "</div>"
+                )
+
+                with gr.Row():
+                    with gr.Column():
+                        gr.HTML("<h3>AI Model / 分析AI</h3>")
+                        ai_provider = gr.Dropdown(
+                            choices=_available_ai_providers(),
+                            value=defaults["ai_provider"],
+                            label="AIプロバイダー",
+                            info=_ai_provider_info(),
+                        )
+                        ai_provider_hint = gr.Markdown(
+                            _provider_quick_hint(defaults["ai_provider"]),
+                        )
+                        ai_model = gr.Dropdown(
+                            choices=_ai_model_choices(defaults.get("ai_provider", "gemini")),
+                            value=initial_ai_model,
+                            label="モデル",
+                            allow_custom_value=True,
+                            info=_ai_model_info(),
+                        )
+                        ai_model_cost_warning = gr.HTML(
+                            _ai_model_cost_warning_html(
+                                defaults.get("ai_provider", "gemini"),
+                                initial_ai_model,
+                            ),
+                        )
+                        has_saved_api_key = bool(
+                            _read_secret_for_ui(load_gemini_api_key, "")
+                        )
+                        api_key = gr.Textbox(
+                            label="APIキー",
+                            value="",
+                            placeholder=(
+                                "保存済み。変更時のみ新しいキーを入力"
+                                if has_saved_api_key
+                                else "OpenAI / Gemini のAPIキーを入力"
+                            ),
+                            type="password",
+                            info=_api_key_info(),
+                        )
+                        gr.Markdown(
+                            "Gemini の従量課金・無料枠のデータ利用・認証情報の保存場所・"
+                            "停止/失効の手順は `docs/TERMS.md` と "
+                            "`docs/PRIVACY.md` を参照してください。"
+                        )
+                        with gr.Row():
+                            save_api_key_btn = gr.Button(
+                                "💾 このキーを保存",
+                                variant="primary",
+                                size="sm",
+                            )
+                            test_api_key_btn = gr.Button(
+                                "🔍 接続テスト",
+                                variant="secondary",
+                                size="sm",
+                            )
+                            delete_api_key_btn = gr.Button(
+                                "🗑️ 削除",
+                                variant="secondary",
+                                size="sm",
+                            )
+                        api_key_status_box = gr.Textbox(
+                            label="APIキー状態 / 接続テスト結果",
+                            value=_ai_readiness(defaults["ai_provider"])[1],
+                            interactive=False,
+                            lines=2,
+                        )
+                        with gr.Accordion(
+                            "📘 Gemini APIキーの取得手順 — 4ステップ",
+                            open=False,
+                        ):
+                            gr.Markdown(GEMINI_API_KEY_GUIDE_MD)
+                        open_guide_settings_btn = gr.Button(
+                            "📖 図解セットアップガイド（SETUP_GUIDE.html）をブラウザで開く",
+                            variant="secondary",
+                            size="sm",
+                        )
+
+                        def update_ai_provider_ui(provider):
+                            default_model = _default_ai_model(provider)
+                            _ready, status_text = _ai_readiness(provider)
+                            cost_level, _ = classify_ai_cost_risk(provider, default_model)
+                            needs_attention = (not _ready) or (
+                                cost_level in {"paid_only", "unknown_custom"}
+                            )
+                            return (
+                                gr.update(
+                                    choices=_ai_model_choices(provider),
+                                    value=default_model,
+                                ),
+                                _provider_quick_hint(provider),
+                                _ai_model_cost_warning_html(provider, default_model),
+                                status_text,
+                                _build_setup_banner_html(provider, default_model),
+                                gr.update(
+                                    variant="primary" if needs_attention else "secondary",
+                                ),
+                            )
+
+                        def update_ai_model_cost_ui(provider, model):
+                            _ready, _ = _ai_readiness(provider)
+                            cost_level, _ = classify_ai_cost_risk(provider, model)
+                            needs_attention = (not _ready) or (
+                                cost_level in {"paid_only", "unknown_custom"}
+                            )
+                            return (
+                                _ai_model_cost_warning_html(provider, model),
+                                _build_setup_banner_html(provider, model),
+                                gr.update(
+                                    variant="primary" if needs_attention else "secondary",
+                                ),
+                            )
+
+                        save_api_key_btn.click(
+                            fn=save_api_key_for_ui,
+                            inputs=[api_key, ai_provider, ai_model],
+                            outputs=[api_key, api_key_status_box, setup_banner_html],
+                        )
+                        delete_api_key_btn.click(
+                            fn=delete_api_key_for_ui,
+                            inputs=[ai_provider, ai_model],
+                            outputs=[api_key, api_key_status_box, setup_banner_html],
+                        )
+                        test_api_key_btn.click(
+                            fn=test_api_key_for_ui,
+                            inputs=[ai_provider, ai_model, api_key],
+                            outputs=api_key_status_box,
+                        )
+                        ai_provider.change(
+                            fn=update_ai_provider_ui,
+                            inputs=ai_provider,
+                            outputs=[
+                                ai_model,
+                                ai_provider_hint,
+                                ai_model_cost_warning,
+                                api_key_status_box,
+                                setup_banner_html,
+                                go_settings_banner_btn,
+                            ],
+                        )
+                        ai_model.change(
+                            fn=update_ai_model_cost_ui,
+                            inputs=[ai_provider, ai_model],
+                            outputs=[
+                                ai_model_cost_warning,
+                                setup_banner_html,
+                                go_settings_banner_btn,
+                            ],
+                        )
+                        open_guide_settings_btn.click(
+                            fn=open_setup_guide,
+                            inputs=[],
+                            outputs=[],
+                            queue=False,
+                        )
+
+                    with gr.Column():
+                        gr.HTML("<h3>出力先 / Output Destination</h3>")
+                        _saved_base = (defaults.get("output_base_dir", "") or "").strip()
+                        _initial_path = _saved_base or str(resolve_output_base(""))
+                        with gr.Row():
+                            browse_output_btn = gr.Button(
+                                "📁 保存先フォルダを選択…",
+                                variant="primary",
+                                scale=1,
+                            )
+                            open_output_btn = gr.Button(
+                                "📂 現在のフォルダを開く",
+                                variant="secondary",
+                                scale=1,
+                            )
+                        output_base_dir = gr.Textbox(
+                            label="現在の保存先",
+                            value=_initial_path,
+                            info="上のボタンから選ぶか、直接パスを編集できます。空欄にすると clip-extractor/output/ に戻ります。各 Generate ごとに output_<日時>/ サブフォルダが自動生成されます。",
+                        )
+                        browse_output_btn.click(
+                            fn=pick_folder_dialog,
+                            inputs=output_base_dir,
+                            outputs=output_base_dir,
+                        )
+                        open_output_btn.click(
+                            fn=open_output_folder,
+                            inputs=output_base_dir,
+                            outputs=None,
+                        )
+
+                        gr.HTML("<h3 style='margin-top: 1.5em;'>Whisper Settings</h3>")
+                        whisper_model = gr.Dropdown(
+                            choices=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
+                            value=defaults["whisper_model"],
+                            label="Whisper Model",
+                            info="大きいモデルほど精度が高いが時間がかかる",
+                        )
+                        language = gr.Dropdown(
+                            choices=["ja", "en", "zh", "ko", "auto"],
+                            value=defaults["language"],
+                            label="言語",
+                        )
+
+                        gr.HTML("<h3 style='margin-top: 1.5em;'>Font Settings / 字幕フォント</h3>")
+                        system_fonts = get_system_fonts_cached()
+                        # The bundled bold gothic (fonts/NotoSansJP-Bold.otf) is
+                        # not installed system-wide, so surface it explicitly as the
+                        # first choice and the default.
+                        BUNDLED_FONT = "Noto Sans JP"
+                        font_choices = [BUNDLED_FONT] + [f for f in system_fonts if f != BUNDLED_FONT]
+                        saved_font = defaults["font_name"]
+                        default_font = saved_font if saved_font in font_choices else BUNDLED_FONT
+                        font_name = gr.Dropdown(
+                            choices=font_choices,
+                            value=default_font,
+                            label="フォント名",
+                            allow_custom_value=True,
+                            info="先頭の「Noto Sans JP」は同梱のBold（700・商用利用可）で、ショート字幕向けの既定。その他はPCにインストール済みのフォント、直接入力も可。",
+                        )
+                        with gr.Row():
+                            font_size = gr.Number(
+                                label="フォントサイズ", value=defaults["font_size"], precision=0,
+                            )
+                            font_color = gr.ColorPicker(
+                                label="フォント色", value=defaults["font_color"],
+                            )
+
+                gr.HTML(
+                    "<div class='settings-section-heading settings-section-heading--optional'>"
+                    "<h2>② 外部連携・詳細設定（任意・あとから設定してOK）</h2>"
+                    "<p>通常の切り抜き生成だけなら設定不要です。YouTube概要欄への自動追記、Xへの配信告知、OBS・Premiere Pro連携を使いたいときだけ設定してください。</p>"
+                    "</div>"
+                )
+
                 with gr.Accordion("自動ポスト設定 / X 配信開始ポスト", open=False):
                     gr.Markdown(
                         "OBSの配信開始に合わせて、Twitch・YouTube・ニコ生のURLを"
@@ -7282,9 +8054,14 @@ def create_ui():
                         "X APIの利用料・利用枠は自分のX Developerアカウントに適用されます。"
                         "別々に投稿する場合は、投稿数分を使います。"
                     )
-                    x_post_save_btn = gr.Button("X告知設定を保存", variant="primary")
+                    with gr.Row():
+                        x_post_save_btn = gr.Button("X告知設定を保存", variant="primary")
+                        x_post_test_btn = gr.Button(
+                            "🔍 X接続テスト（投稿されません）",
+                            variant="secondary",
+                        )
                     x_post_save_status = gr.Textbox(
-                        label="X告知設定の保存結果",
+                        label="X告知設定の保存・テスト結果",
                         lines=3,
                         interactive=False,
                         value="",
@@ -7316,99 +8093,7 @@ def create_ui():
 
                 with gr.Row():
                     with gr.Column():
-                        gr.HTML("<h3>AI Model / 分析AI</h3>")
-                        ai_provider = gr.Dropdown(
-                            choices=_available_ai_providers(),
-                            value=defaults["ai_provider"],
-                            label="AIプロバイダー",
-                            info=_ai_provider_info(),
-                        )
-                        initial_ai_model = _resolve_ai_model(
-                            defaults.get("ai_provider", "gemini"),
-                            defaults.get("ai_model", ""),
-                        )
-                        ai_model = gr.Dropdown(
-                            choices=_ai_model_choices(defaults.get("ai_provider", "gemini")),
-                            value=initial_ai_model,
-                            label="モデル",
-                            allow_custom_value=True,
-                            info=_ai_model_info(),
-                        )
-                        has_saved_api_key = bool(
-                            _read_secret_for_ui(load_gemini_api_key, "")
-                        )
-                        api_key = gr.Textbox(
-                            label="APIキー",
-                            value="",
-                            placeholder=(
-                                "保存済み。変更時のみ新しいキーを入力"
-                                if has_saved_api_key
-                                else "OpenAI / Gemini のAPIキーを入力"
-                            ),
-                            type="password",
-                            info=_api_key_info(),
-                        )
-                        gr.Markdown(
-                            "Gemini の従量課金・無料枠のデータ利用・認証情報の保存場所・"
-                            "停止/失効の手順は `docs/TERMS.md` と "
-                            "`docs/PRIVACY.md` を参照してください。"
-                        )
-                        save_api_key_btn = gr.Button(
-                            "💾 このキーを保存 (.gemini_key)",
-                            variant="secondary",
-                            size="sm",
-                        )
-                        save_api_key_btn.click(
-                            fn=save_gemini_api_key,
-                            inputs=api_key,
-                            outputs=api_key,
-                        )
-                        with gr.Accordion(
-                            "📘 Gemini APIキーの取得手順 — 4ステップ",
-                            open=False,
-                        ):
-                            gr.Markdown(GEMINI_API_KEY_GUIDE_MD)
-
-                        def update_models(provider):
-                            return gr.update(
-                                choices=_ai_model_choices(provider),
-                                value=_default_ai_model(provider),
-                            )
-
-                        ai_provider.change(fn=update_models, inputs=ai_provider, outputs=ai_model)
-
-                    with gr.Column():
-                        gr.HTML("<h3>出力先 / Output Destination</h3>")
-                        _saved_base = (defaults.get("output_base_dir", "") or "").strip()
-                        _initial_path = _saved_base or str(resolve_output_base(""))
-                        with gr.Row():
-                            browse_output_btn = gr.Button(
-                                "📁 保存先フォルダを選択…",
-                                variant="primary",
-                                scale=1,
-                            )
-                            open_output_btn = gr.Button(
-                                "📂 現在のフォルダを開く",
-                                variant="secondary",
-                                scale=1,
-                            )
-                        output_base_dir = gr.Textbox(
-                            label="現在の保存先",
-                            value=_initial_path,
-                            info="上のボタンから選ぶか、直接パスを編集できます。空欄にすると clip-extractor/output/ に戻ります。各 Generate ごとに output_<日時>/ サブフォルダが自動生成されます。",
-                        )
-                        browse_output_btn.click(
-                            fn=pick_folder_dialog,
-                            inputs=output_base_dir,
-                            outputs=output_base_dir,
-                        )
-                        open_output_btn.click(
-                            fn=open_output_folder,
-                            inputs=output_base_dir,
-                            outputs=None,
-                        )
-
-                        gr.HTML("<h3 style='margin-top: 1.5em;'>Adobe Premiere Pro 連携</h3>")
+                        gr.HTML("<h3>Adobe Premiere Pro 連携</h3>")
                         premiere_executable_path = gr.Textbox(
                             label="Premiere Pro実行ファイルのパス",
                             value=defaults.get("premiere_executable_path", ""),
@@ -7471,48 +8156,6 @@ def create_ui():
                             info="obs64.exe のフルパスを貼り付けます。空欄なら自動検出。専用の同時起動ショートカットでもこのパスを使います。",
                         )
 
-                with gr.Row():
-                    with gr.Column():
-                        gr.HTML("<h3>Whisper Settings</h3>")
-                        whisper_model = gr.Dropdown(
-                            choices=["tiny", "base", "small", "medium", "large-v2", "large-v3"],
-                            value=defaults["whisper_model"],
-                            label="Whisper Model",
-                            info="大きいモデルほど精度が高いが時間がかかる",
-                        )
-                        language = gr.Dropdown(
-                            choices=["ja", "en", "zh", "ko", "auto"],
-                            value=defaults["language"],
-                            label="言語",
-                        )
-
-                with gr.Row():
-                    with gr.Column():
-                        gr.HTML("<h3>Font Settings / 字幕フォント</h3>")
-                        system_fonts = get_system_fonts_cached()
-                        # The bundled bold gothic (fonts/NotoSansJP-Bold.otf) is
-                        # not installed system-wide, so surface it explicitly as the
-                        # first choice and the default.
-                        BUNDLED_FONT = "Noto Sans JP"
-                        font_choices = [BUNDLED_FONT] + [f for f in system_fonts if f != BUNDLED_FONT]
-                        saved_font = defaults["font_name"]
-                        default_font = saved_font if saved_font in font_choices else BUNDLED_FONT
-                        font_name = gr.Dropdown(
-                            choices=font_choices,
-                            value=default_font,
-                            label="フォント名",
-                            allow_custom_value=True,
-                            info="先頭の「Noto Sans JP」は同梱のBold（700・商用利用可）で、ショート字幕向けの既定。その他はPCにインストール済みのフォント、直接入力も可。",
-                        )
-                        with gr.Row():
-                            font_size = gr.Number(
-                                label="フォントサイズ", value=defaults["font_size"], precision=0,
-                            )
-                            font_color = gr.ColorPicker(
-                                label="フォント色", value=defaults["font_color"],
-                            )
-
-                with gr.Row():
                     with gr.Column():
                         gr.HTML("<h3>YouTube API 認証</h3>")
                         gr.HTML(
@@ -7897,6 +8540,7 @@ def create_ui():
                 obs_x_access_token,
                 obs_x_access_token_secret,
                 obs_x_post_mode,
+                obs_output_location_radio,
             ],
             outputs=obs_status_box,
         )
@@ -7942,6 +8586,28 @@ def create_ui():
                 obs_x_access_token,
                 obs_x_access_token_secret,
             ],
+        )
+        x_post_test_btn.click(
+            fn=test_x_credentials_for_ui,
+            inputs=[
+                obs_x_api_key,
+                obs_x_api_key_secret,
+                obs_x_access_token,
+                obs_x_access_token_secret,
+            ],
+            outputs=x_post_save_status,
+        )
+        go_settings_banner_btn.click(
+            fn=lambda: gr.Tabs(selected=2),
+            inputs=[],
+            outputs=main_tabs,
+            queue=False,
+        )
+        open_guide_banner_btn.click(
+            fn=open_setup_guide,
+            inputs=[],
+            outputs=[],
+            queue=False,
         )
         obs_stop_btn.click(
             fn=stop_obs_watch,

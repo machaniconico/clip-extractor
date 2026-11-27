@@ -222,26 +222,33 @@ def test_main_stops_before_obs_when_existing_instance_cannot_be_stopped(monkeypa
     assert launcher.main([]) == 1
 
 
-def test_windows_browser_launch_requests_a_new_chrome_window(monkeypatch):
-    browser = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+def test_windows_browser_launch_opens_a_new_tab_in_chrome_and_firefox(monkeypatch):
+    chrome = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+    firefox = Path(r"C:\Program Files\Mozilla Firefox\firefox.exe")
     launched = []
-    monkeypatch.setattr(
-        launcher,
-        "_find_windows_default_browser_executable",
-        lambda: browser,
-    )
     monkeypatch.setattr(
         launcher.subprocess,
         "Popen",
         lambda args, **kwargs: launched.append((args, kwargs)),
     )
 
+    monkeypatch.setattr(
+        launcher,
+        "_find_windows_default_browser_executable",
+        lambda: chrome,
+    )
     assert launcher.open_app_page(platform="win32") is True
+
+    monkeypatch.setattr(
+        launcher,
+        "_find_windows_default_browser_executable",
+        lambda: firefox,
+    )
+    assert launcher.open_app_page(platform="win32") is True
+
     assert launched == [
-        (
-            [str(browser), "--new-window", launcher.SERVER_URL],
-            {"close_fds": True},
-        )
+        ([str(chrome), launcher.SERVER_URL], {"close_fds": True}),
+        ([str(firefox), "-new-tab", launcher.SERVER_URL], {"close_fds": True}),
     ]
 
 

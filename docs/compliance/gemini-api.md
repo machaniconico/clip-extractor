@@ -1,10 +1,10 @@
 # Gemini Developer API compliance record
 
-- Last checked: 2026-08-04
+- Last checked: 2026-11-26
 - Integration: Gemini Developer API (`generativelanguage.googleapis.com`)
 - SDK: `google-genai>=2.16.0,<3.0.0`
 - Authentication: bring your own API key (BYOK), loaded from `.gemini_key` or `GEMINI_API_KEY`
-- Models offered by the regular application: `gemini-3.5-flash-lite`, `gemini-3.6-flash`, `gemini-3.5-flash`, plus stable 2.5 IDs for saved-setting compatibility
+- Models offered by the regular application: `gemini-4-hydrogen` (default), `gemini-3.8-flash`, `gemini-3.5-flash-lite`, `gemini-3.6-flash`, plus legacy 2.5 IDs for saved-setting compatibility
 
 ## Primary sources
 
@@ -51,13 +51,14 @@ Clip Extractor adds transcription, highlight selection, video rendering, subtitl
 
 Standard paid rates per 1,000,000 tokens in USD on the checked date:
 
-| Model | Input | Output, including thinking |
-|---|---:|---:|
-| `gemini-3.5-flash-lite` | $0.30 | $2.50 |
-| `gemini-3.6-flash` | $1.50 | $7.50 |
-| `gemini-3.5-flash` | $1.50 | $9.00 |
+| Model | Input | Output, including thinking | Free tier |
+|---|---:|---:|---|
+| `gemini-4-hydrogen` | $1.50 | $7.50 | Available |
+| `gemini-3.8-flash` | $0.75 ($1.50 from 2027-01-01) | $3.75 ($7.50 from 2027-01-01) | Available |
+| `gemini-3.5-flash-lite` | $0.30 | $2.50 | Available |
+| `gemini-3.6-flash` | $1.50 | $7.50 | Available |
 
-All three showed free input and output in the published free tier. Pricing and limits can change; verify the primary pricing page when producing each release artifact.
+All four showed free input and output in the published free tier (`gemini-4-carbon` and `gemini-4-argon` are paid-only and trigger a UI billing warning if entered). Pricing and limits can change; verify the primary pricing page when producing each release artifact.
 
 ## Free-tier usage guidance
 
@@ -69,10 +70,11 @@ All three showed free input and output in the published free tier. Pricing and l
 
 ## Distribution profile decision
 
-The future sales ZIP should expose only:
+The future sales ZIP should expose:
 
-- `gemini-3.5-flash-lite` as the cost-focused default
-- `gemini-3.6-flash` as the quality-focused option
+- `gemini-4-hydrogen` as the quality-focused default (free tier available; 1 video/day target)
+- `gemini-3.8-flash` as the secondary high-performance Flash option (free tier available)
+- `gemini-3.5-flash-lite` as the lowest-cost / high-throughput option (free tier available)
 
 The distribution build should disable arbitrary model IDs and migrate unsupported saved IDs to the default. Model restrictions improve supportability but do not prove Paid Service status; billing status belongs to the customer's Cloud project.
 

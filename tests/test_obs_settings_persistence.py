@@ -27,6 +27,7 @@ OBS_UI_KEYS = (
     "shorts_title", "generate_thumbnails", "audio_fusion", "audio_alpha",
     "karaoke", "auto_start_without_prompt_confirmation",
     "shorts_blur_strength", "shorts_title_position",
+    "obs_output_location",
 )
 
 
@@ -42,13 +43,14 @@ def _save_obs_controls(**overrides):
         shorts_blur_strength=42, shorts_title_position="overlay",
         trigger_method="folder", host="obs-host", port=4456,
         stop_event="stream", watch_folder="C:/録画", auto_process=False,
+        output_location="custom",
     )
     args.update(overrides)
     return web_app.save_obs_processing_defaults(**args)
 
 
 def _ui_values(updates):
-    assert len(updates) == 26
+    assert len(updates) == 27
     assert all(update["__type__"] == "update" for update in updates)
     return dict(zip(OBS_UI_KEYS, (update["value"] for update in updates)))
 
@@ -91,6 +93,7 @@ def test_obs_settings_save_preserves_connection_and_secrets(
         "obs_trigger_method": "folder", "obs_host": "obs-host",
         "obs_port": 4456, "obs_stop_event": "stream",
         "obs_watch_folder": "C:/録画", "obs_auto_process": False,
+        "obs_output_location": "custom",
     }
     assert {key: saved[key] for key in expected_connection} == expected_connection
     assert {key: saved[key] for key in x_settings} == x_settings
@@ -169,11 +172,14 @@ def test_obs_page_load_refreshes_current_file_and_wires_all_controls(
         fn for fn in app.fns.values() if fn.fn is web_app.save_obs_processing_defaults
     )
     assert not load_fn.inputs
-    assert len(save_fn.inputs) == 26
-    assert len(load_fn.outputs) == 26
+    assert len(save_fn.inputs) == 27
+    assert len(load_fn.outputs) == 27
     assert save_fn.outputs[1:] == load_fn.outputs
-    # Save inputs retain their original processing-first order.
-    assert save_fn.inputs == load_fn.outputs[6:] + load_fn.outputs[:6]
+    # Save inputs retain their original processing-first order; the output
+    # location control is appended last on both sides.
+    assert save_fn.inputs == (
+        load_fn.outputs[6:-1] + load_fn.outputs[:6] + load_fn.outputs[-1:]
+    )
     assert all(getattr(component, "type", None) != "password" for component in load_fn.outputs)
     load_dependency = app.get_config_file()["dependencies"][load_fn._id]
     assert any(target[1] == "load" for target in load_dependency["targets"])
@@ -199,6 +205,7 @@ def test_obs_page_load_refreshes_current_file_and_wires_all_controls(
             **web_app.OBS_PROCESSING_DEFAULTS,
             **persisted["obs_processing"],
             "auto_start_without_prompt_confirmation": not confirm,
+            "obs_output_location": "recording",
         }
         expected.pop("confirm_before_auto_process")
         assert values == expected
